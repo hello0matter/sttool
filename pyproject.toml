@@ -1,0 +1,10 @@
+[project]
+name = "sttool"
+version = "0.1.0"
+description = "Atomic project launcher for an authorized penetration-testing toolkit"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
