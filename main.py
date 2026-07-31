@@ -7,8 +7,9 @@ import sys
 from pathlib import Path
 
 from sttool.app import LauncherApp
-from sttool.registry import availability, default_tools
+from sttool.registry import availability
 from sttool.runtime import RuntimeManager
+from sttool.tool_store import ToolStore
 
 
 APP_DIR = Path(__file__).resolve().parent
@@ -38,8 +39,9 @@ def main() -> int:
                 close_fds=True,
             )
             return 0
-    tools = default_tools()
-    manager = RuntimeManager(APP_DIR, tools)
+    tool_store = ToolStore(APP_DIR / "tools.json")
+    tools = tool_store.tools()
+    manager = RuntimeManager(APP_DIR, tools, st_root=tool_store.st_root)
     if args.list_tools:
         print(json.dumps([
             {
@@ -48,20 +50,24 @@ def main() -> int:
                 "category": tool.category,
                 "available": availability(tool)[0],
                 "detail": availability(tool)[1],
+                "path": tool_store.location_for(tool.tool_id, tool),
             }
             for tool in tools
         ], ensure_ascii=False, indent=2))
         return 0
     if args.doctor:
+        if tool_store.load_error:
+            print(f"[FAIL] 工具配置: {tool_store.load_error}")
         for tool in tools:
             healthy, detail = availability(tool)
             print(f"[{'OK' if healthy else 'FAIL'}] {tool.name}: {detail}")
-        for provider in ("codex", "claude"):
+        for provider in ("codexx", "codex"):
             healthy, detail = manager.provider_health(provider)
-            print(f"[{'OK' if healthy else 'FAIL'}] {provider}: {detail}")
+            display = manager.provider_display_name(provider)
+            print(f"[{'OK' if healthy else 'FAIL'}] {display}: {detail}")
         return 0
 
-    app = LauncherApp(manager, tools)
+    app = LauncherApp(manager, tools, tool_store)
     app.mainloop()
     return 0
 

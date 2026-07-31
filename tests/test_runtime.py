@@ -6,15 +6,28 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
-from sttool.models import LaunchRequest, ProcessRecord, ToolDefinition
-from sttool.runtime import RuntimeManager, atomic_json_write, now_text, pid_alive, safe_project_name, target_values
+from sttool.models import LaunchRequest, ProcessRecord, RunState, ToolDefinition
+from sttool.registry import availability, default_tools
+from sttool.runtime import (
+    RuntimeManager,
+    atomic_json_write,
+    now_text,
+    pid_alive,
+    reconcile_component_state,
+    safe_project_name,
+    target_values,
+)
+from sttool.tool_store import ToolStore
+from sttool.tscan_automation import target_for_asset_scan
 
 
 class OfflineRuntimeManager(RuntimeManager):
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
         self.handles: list[subprocess.Popen] = []
+        self.spawn_environments: dict[str, dict[str, str]] = {}
 
     def provider_health(self, provider: str) -> tuple[bool, str]:
         return True, "test"
@@ -38,6 +51,7 @@ class OfflineRuntimeManager(RuntimeManager):
             close_fds=True,
         )
         self.handles.append(process)
+        self.spawn_environments[component_id] = dict(environment or {})
         return ProcessRecord(
             component_id=component_id,
             name=name,
@@ -55,6 +69,53 @@ class OfflineRuntimeManager(RuntimeManager):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_reconcile_asset_commander_marks_stale_scan_interrupted(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = (
+                run_dir / "tool_data" / "asset_commander" / "workflow_state.json"
+            )
+            progress_path = (
+                run_dir
+                / "tool_data"
+                / "asset_commander"
+                / "workspace"
+                / "demo"
+                / "scan_progress.json"
+            )
+            state_path.parent.mkdir(parents=True)
+            progress_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "current_step": "collision",
+                        "steps": {"collision": {"status": "running", "detail": ""}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            progress_path.write_text(
+                json.dumps({"current": 600, "total": 44160, "active": True}),
+                encoding="utf-8",
+            )
+
+            reconcile_component_state(
+                run_dir,
+                "asset_commander",
+                "interrupted",
+                "process exited",
+            )
+
+            workflow = json.loads(state_path.read_text(encoding="utf-8"))
+            progress = json.loads(progress_path.read_text(encoding="utf-8"))
+            self.assertEqual(workflow["status"], "interrupted")
+            self.assertEqual(
+                workflow["steps"]["collision"]["status"], "interrupted"
+            )
+            self.assertFalse(progress["active"])
+            self.assertEqual(progress["stop_reason"], "process exited")
+
     def test_safe_project_name_and_target_values(self) -> None:
         self.assertEqual(safe_project_name(" 客户:A/B "), "客户_A_B")
         self.assertEqual(
@@ -63,6 +124,14 @@ class RuntimeTests(unittest.TestCase):
                 "target": "https://app.example.com:8443/a",
                 "target_host": "app.example.com",
                 "target_domain": "example.com",
+            },
+        )
+        self.assertEqual(
+            target_values("192.168.1.0/24"),
+            {
+                "target": "192.168.1.0/24",
+                "target_host": "192.168.1.0/24",
+                "target_domain": "192.168.1.0/24",
             },
         )
 
@@ -98,6 +167,27 @@ class RuntimeTests(unittest.TestCase):
                 manager.load_project("demo"),
                 {"name": "demo", "target": "example.com"},
             )
+
+    def test_legacy_codex_provider_migrates_to_codexx(self) -> None:
+        base = {
+            "run_id": "run",
+            "project_name": "demo",
+            "target": "example.com",
+            "scope": "example.com",
+            "provider": "codex",
+            "model": "tool-model",
+            "selected_tools": [],
+            "run_dir": "run",
+            "created_at": "2026-01-01T00:00:00+08:00",
+            "updated_at": "2026-01-01T00:00:00+08:00",
+            "status": "completed",
+        }
+
+        legacy = RunState.from_dict({**base, "schema_version": 1})
+        current = RunState.from_dict({**base, "schema_version": 2})
+
+        self.assertEqual(legacy.provider, "codexx")
+        self.assertEqual(current.provider, "codex")
 
     def test_prepare_tool_moves_json_secret_to_environment(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -138,6 +228,372 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(environment, {"STTOOL_TEST_API_KEY": "test-secret"})
             self.assertEqual(copied, {"api_key": "", "enabled": True})
 
+    def test_prepare_tool_refreshes_code_but_preserves_runtime_data_on_recovery(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source_config = root / "source-config.json"
+            source_script = root / "source-script.py"
+            source_config.write_text('{"source": true}', encoding="utf-8")
+            source_script.write_text("print('new')\n", encoding="utf-8")
+            tool = ToolDefinition(
+                tool_id="recovery-test",
+                name="Recovery test",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                cwd="{run_dir}",
+                prepare_files=((str(source_config), "tool/config.json"),),
+                refresh_files=((str(source_script), "tool/main.py"),),
+            )
+            manager = RuntimeManager(root, [tool], st_root=root)
+            run_dir = root / "run"
+            (run_dir / "tool").mkdir(parents=True)
+            (run_dir / "tool" / "config.json").write_text('{"runtime": true}', encoding="utf-8")
+            (run_dir / "tool" / "main.py").write_text("print('old')\n", encoding="utf-8")
+
+            manager._prepare_tool(
+                tool,
+                {"run_dir": str(run_dir)},
+                preserve_existing=True,
+            )
+
+            self.assertEqual((run_dir / "tool" / "config.json").read_text(encoding="utf-8"), '{"runtime": true}')
+            self.assertEqual((run_dir / "tool" / "main.py").read_text(encoding="utf-8"), "print('new')\n")
+
+    def test_availability_checks_required_paths(self) -> None:
+        tool = ToolDefinition(
+            tool_id="required",
+            name="Required",
+            category="test",
+            description="test",
+            executable=sys.executable,
+            required_paths=(str(Path("missing-required-file")),),
+        )
+        healthy, detail = availability(tool)
+        self.assertFalse(healthy)
+        self.assertIn("missing-required-file", detail)
+
+    def test_tscan_target_normalization(self) -> None:
+        self.assertEqual(target_for_asset_scan("https://example.com/path"), "example.com")
+        self.assertEqual(target_for_asset_scan("http://example.com:8080/path"), "example.com:8080")
+        self.assertEqual(target_for_asset_scan("192.168.1.0/24"), "192.168.1.0/24")
+
+    def test_tscan_registry_uses_automation_wrapper(self) -> None:
+        tool = next(tool for tool in default_tools(Path(r"D:\test-st-root")) if tool.tool_id == "tscan_plus")
+        self.assertTrue(tool.sends_requests)
+        self.assertTrue(any(arg.endswith("tscan_automation.py") for arg in tool.args))
+        self.assertIn("{target}", tool.args)
+        self.assertIn("{project_name}", tool.args)
+        self.assertIn("{scope}", tool.args)
+        self.assertIn("--asset-state", tool.args)
+        self.assertIn("--asset-export", tool.args)
+        self.assertNotIn("safe_poc_gui", {item.tool_id for item in default_tools()})
+
+    def test_asset_commander_registry_uses_resumable_source_workflow(self) -> None:
+        tool = next(
+            tool
+            for tool in default_tools(Path(r"D:\test-st-root"))
+            if tool.tool_id == "asset_commander"
+        )
+        self.assertTrue(tool.sends_requests)
+        self.assertTrue(tool.restart_on_recovery)
+        self.assertIn("--sttool-project", tool.args)
+        self.assertIn("--sttool-target", tool.args)
+        self.assertIn("--sttool-scope", tool.args)
+        self.assertIn("--sttool-state", tool.args)
+        self.assertIn("--sttool-export", tool.args)
+        self.assertIn("{scope}", tool.args)
+        self.assertTrue(any(path.endswith("asset_workflow.py") for path in tool.required_paths))
+        self.assertIn(("OPENAI_BASE_URL", "{api_base_url}"), tool.environment)
+        self.assertIn(("OPENAI_MODEL", "{model}"), tool.environment)
+        self.assertIn(("OPENAI_API_KEY", "{api_key}"), tool.environment)
+
+    def test_semantic_dirscan_registry_uses_resumable_source_bridge(self) -> None:
+        tool = next(
+            tool
+            for tool in default_tools(Path(r"D:\test-st-root"))
+            if tool.tool_id == "semantic_dirscan"
+        )
+        self.assertTrue(tool.sends_requests)
+        self.assertTrue(tool.restart_on_recovery)
+        self.assertIn("--sttool-project", tool.args)
+        self.assertIn("--sttool-asset-export", tool.args)
+        self.assertIn("--sttool-asset-state", tool.args)
+        self.assertIn("--sttool-fscan-result", tool.args)
+        self.assertIn("--sttool-auto-start", tool.args)
+        self.assertTrue(any(path.endswith("sttool_bridge.py") for path in tool.required_paths))
+        self.assertTrue(any(destination.endswith("sttool_bridge.py") for _, destination in tool.refresh_files))
+        self.assertIn(("OPENAI_BASE_URL", "{api_base_url}"), tool.environment)
+        self.assertIn(("OPENAI_API_KEY", "{api_key}"), tool.environment)
+
+    def test_default_tools_excludes_poc_toolbox(self) -> None:
+        tool_ids = {tool.tool_id for tool in default_tools(Path(r"D:\test-st-root"))}
+        self.assertNotIn("safe_poc_gui", tool_ids)
+
+    def test_only_one_shot_builtin_scanners_allow_standalone_execution(self) -> None:
+        tools = {tool.tool_id: tool for tool in default_tools(Path(r"D:\test-st-root"))}
+
+        self.assertTrue(tools["fscan"].allow_standalone)
+        self.assertTrue(tools["nuclei"].allow_standalone)
+        self.assertFalse(tools["asset_commander"].allow_standalone)
+        self.assertFalse(tools["semantic_dirscan"].allow_standalone)
+
+    def test_tool_store_persists_builtin_locations_and_custom_tools(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            config_path = root / "tools.json"
+            asset_dir = root / "portable" / "AssetCommander"
+            store = ToolStore(config_path, st_root=root / "default-tools")
+
+            store.set_location("asset_commander", str(asset_dir))
+            store.set_asset_collision_settings(
+                {
+                    "preserve_original_port": False,
+                    "add_80": True,
+                    "add_443": False,
+                    "no_port": True,
+                    "absolute_path": True,
+                    "waf_header": True,
+                    "force_sni": True,
+                    "threads": 88,
+                }
+            )
+            custom = store.upsert_custom(
+                {
+                    "name": "HTTP Probe",
+                    "category": "资产验证",
+                    "description": "自定义探测工具",
+                    "executable": sys.executable,
+                    "args": ("--target", "{target}", "--scope", "{scope}"),
+                    "cwd": "{run_dir}",
+                    "sends_requests": True,
+                    "new_console": True,
+                    "uses_shared_ai": True,
+                    "allow_standalone": True,
+                    "result_paths": (
+                        "{run_dir}/results/probe.json",
+                        "{run_dir}/reports",
+                    ),
+                }
+            )
+
+            reloaded = ToolStore(config_path, st_root=root / "default-tools")
+            tools = {tool.tool_id: tool for tool in reloaded.tools()}
+            asset = tools["asset_commander"]
+            collision_config = json.loads(
+                asset.args[asset.args.index("--sttool-collision-config") + 1]
+            )
+            self.assertEqual(collision_config["threads"], 88)
+            self.assertTrue(collision_config["waf_header"])
+            self.assertFalse(collision_config["preserve_original_port"])
+            self.assertEqual(
+                reloaded.location_for("asset_commander", asset),
+                str(asset_dir.resolve()),
+            )
+            self.assertEqual(Path(asset.args[0]), asset_dir.resolve() / "main.py")
+            self.assertEqual(
+                tools[custom.tool_id],
+                custom,
+            )
+            self.assertIn("{target}", tools[custom.tool_id].args)
+            self.assertIn("{scope}", tools[custom.tool_id].args)
+            self.assertEqual(
+                tools[custom.tool_id].result_paths,
+                ("{run_dir}/results/probe.json", "{run_dir}/reports"),
+            )
+            self.assertTrue(tools[custom.tool_id].uses_shared_ai)
+            self.assertTrue(tools[custom.tool_id].allow_standalone)
+
+            reloaded.remove_custom(custom.tool_id)
+            self.assertNotIn(custom.tool_id, {tool.tool_id for tool in reloaded.tools()})
+
+    def test_standalone_tool_run_is_kept_outside_projects(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = ToolDefinition(
+                tool_id="one_shot",
+                name="One shot",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                args=("--target", "{target}", "--output", "{run_dir}/results/out.txt"),
+                cwd="{run_dir}",
+                sends_requests=True,
+                result_paths=("{run_dir}/results/out.txt",),
+                allow_standalone=True,
+            )
+            manager = OfflineRuntimeManager(root, [tool], st_root=root)
+            try:
+                state = manager.start_standalone(
+                    "one_shot",
+                    "https://example.com/path",
+                    authorization_confirmed=True,
+                    api_base_url="https://gateway.example/v1",
+                    model="tool-model",
+                )
+
+                run_dir = Path(state.run_dir)
+                saved = json.loads(
+                    (run_dir / "standalone.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    run_dir.parent.parent,
+                    root.resolve() / "standalone_runs",
+                )
+                self.assertFalse(list((root / "projects").glob("*/runs/*")))
+                self.assertEqual(saved["tool_id"], "one_shot")
+                self.assertEqual(saved["target"], "https://example.com/path")
+                self.assertTrue(saved["authorization_confirmed"])
+                self.assertEqual(
+                    state.result_paths,
+                    [str(run_dir / "results" / "out.txt")],
+                )
+                self.assertEqual(state.status, "running")
+            finally:
+                manager.cleanup()
+
+    def test_standalone_network_tool_requires_authorization(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = ToolDefinition(
+                tool_id="one_shot",
+                name="One shot",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                sends_requests=True,
+                allow_standalone=True,
+            )
+            manager = OfflineRuntimeManager(root, [tool], st_root=root)
+
+            with self.assertRaisesRegex(Exception, "授权"):
+                manager.start_standalone(
+                    "one_shot",
+                    "example.com",
+                    authorization_confirmed=False,
+                    api_base_url="https://gateway.example/v1",
+                    model="tool-model",
+                )
+            self.assertFalse((root / "standalone_runs").exists())
+
+    def test_codex_agent_script_uses_codexx_yolo_in_run_directory(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "agent_prompt.txt").write_text("default test prompt", encoding="utf-8")
+            manager = RuntimeManager(root, [], st_root=root / "tools")
+            request = LaunchRequest(
+                project_name="demo",
+                target="https://example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=(),
+                user_prompt="default test prompt",
+                authorization_confirmed=True,
+            )
+
+            script_path = manager._agent_script(request, run_dir)
+            script = script_path.read_text(encoding="utf-8-sig")
+
+            self.assertIn(f"Set-Location -LiteralPath '{run_dir}'", script)
+            self.assertIn("& codexx --yolo $prompt", script)
+            self.assertIn("Get-Content -Raw -Encoding UTF8", script)
+            self.assertNotIn("--model", script)
+            self.assertNotIn("--add-dir", script)
+            self.assertNotIn("openai_base_url", script)
+            self.assertNotIn("& codex ", script)
+
+    def test_codex_agent_script_uses_local_codex_command(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "agent_prompt.txt").write_text("test", encoding="utf-8")
+            manager = RuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codex",
+                model="tool-model",
+                selected_tools=(),
+                user_prompt="test",
+                authorization_confirmed=True,
+            )
+
+            script = manager._agent_script(request, run_dir).read_text(
+                encoding="utf-8-sig"
+            )
+
+            self.assertIn("& codex --yolo $prompt", script)
+            self.assertNotIn("& codexx", script)
+
+    def test_codex_recovery_script_resumes_without_replaying_prompt(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "agent_prompt.txt").write_text("do not replay", encoding="utf-8")
+            manager = RuntimeManager(root, [], st_root=root / "tools")
+            request = LaunchRequest(
+                project_name="demo",
+                target="https://example.com",
+                scope="example.com",
+                provider="codexx",
+                model="tool-model",
+                selected_tools=(),
+                user_prompt="do not replay",
+                authorization_confirmed=True,
+                api_base_url="https://gateway.example/v1",
+                api_key="sk-tool-only",
+            )
+
+            script_path = manager._agent_script(request, run_dir, resume=True)
+            script = script_path.read_text(encoding="utf-8-sig")
+
+            self.assertIn("& codexx --yolo resume --last", script)
+            self.assertNotIn("$prompt", script)
+            self.assertNotIn("Get-Content", script)
+            self.assertNotIn("--model", script)
+            self.assertNotIn("openai_base_url", script)
+
+    def test_preflight_rejects_invalid_api_base_url(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = OfflineRuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=(),
+                user_prompt="",
+                authorization_confirmed=True,
+                api_base_url="not-a-url",
+            )
+
+            with self.assertRaisesRegex(Exception, "AI API URL"):
+                manager.preflight(request)
+
+    def test_provider_health_timeout_does_not_block_installed_cli(self) -> None:
+        with TemporaryDirectory() as temporary:
+            manager = RuntimeManager(Path(temporary), [])
+            with (
+                patch("sttool.runtime.shutil.which", return_value="codexx.exe"),
+                patch(
+                    "sttool.runtime.subprocess.run",
+                    side_effect=subprocess.TimeoutExpired("codexx", 30),
+                ),
+            ):
+                first = manager.provider_health("codexx")
+                cached = manager.provider_health("codexx")
+
+            self.assertEqual(first, (True, "已安装；登录检测超时，将在启动时验证"))
+            self.assertEqual(cached, first)
+
     def test_preflight_requires_authorization_before_provider_check(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -146,7 +602,7 @@ class RuntimeTests(unittest.TestCase):
                 project_name="demo",
                 target="example.com",
                 scope="example.com",
-                provider="codex",
+                provider="codexx",
                 model="gpt-5.5",
                 selected_tools=(),
                 user_prompt="",
@@ -154,6 +610,107 @@ class RuntimeTests(unittest.TestCase):
             )
             with self.assertRaisesRegex(Exception, "授权"):
                 manager.preflight(request)
+
+    def test_recover_restarts_persistent_components_in_same_run(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            source = root / "source-config.json"
+            source.write_text('{"value": "source"}', encoding="utf-8")
+            persistent = ToolDefinition(
+                tool_id="persistent",
+                name="Persistent",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                cwd="{run_dir}/persistent",
+                restart_on_recovery=True,
+                prepare_files=((str(source), "tool/config.json"),),
+            )
+            one_shot = ToolDefinition(
+                tool_id="one-shot",
+                name="One shot",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                cwd="{run_dir}/one-shot",
+            )
+            manager = OfflineRuntimeManager(
+                root, [persistent, one_shot], st_root=root
+            )
+            request = LaunchRequest(
+                project_name="recover-demo",
+                target="https://example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=("persistent", "one-shot"),
+                user_prompt="recover",
+                authorization_confirmed=True,
+                api_base_url="https://gateway.example/v1/",
+                api_key="sk-runtime-only",
+            )
+            state = manager.start(request)
+            original_run_dir = state.run_dir
+            copied = Path(state.run_dir) / "tool" / "config.json"
+            copied.write_text('{"value": "runtime"}', encoding="utf-8")
+            for process in manager.handles:
+                process.terminate()
+                process.wait(timeout=5)
+            manager.refresh(state)
+
+            recovered = manager.recover(state, authorization_confirmed=True)
+            try:
+                self.assertEqual(recovered.run_dir, original_run_dir)
+                self.assertEqual(recovered.recovery_count, 1)
+                self.assertEqual(
+                    {item.component_id for item in recovered.processes},
+                    {"persistent", "one-shot", "ai_agent"},
+                )
+                statuses = {
+                    item.component_id: item.status for item in recovered.processes
+                }
+                self.assertEqual(statuses["one-shot"], "exited")
+                self.assertTrue(pid_alive(next(
+                    item.pid
+                    for item in recovered.processes
+                    if item.component_id == "persistent"
+                )))
+                self.assertEqual(
+                    json.loads(copied.read_text(encoding="utf-8")),
+                    {"value": "runtime"},
+                )
+                self.assertEqual(
+                    recovered.recovery_history[-1]["components"],
+                    ["persistent", "ai_agent"],
+                )
+                recovery_script = (Path(state.run_dir) / "launch_agent.ps1").read_text(
+                    encoding="utf-8-sig"
+                )
+                self.assertIn("& codexx --yolo resume --last", recovery_script)
+                self.assertNotIn("$prompt", recovery_script)
+            finally:
+                manager.cleanup()
+
+    def test_recover_requires_current_authorization(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = OfflineRuntimeManager(root, [], st_root=root)
+            state = RunState(
+                run_id="run",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(root),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="completed",
+            )
+            with self.assertRaises(Exception) as raised:
+                manager.recover(state, authorization_confirmed=False)
+            self.assertIn("授权", str(raised.exception))
 
     def test_start_transaction(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -165,25 +722,62 @@ class RuntimeTests(unittest.TestCase):
                 description="test",
                 executable=sys.executable,
                 cwd="{run_dir}/dummy",
+                uses_shared_ai=True,
             )
             manager = OfflineRuntimeManager(root, [tool], st_root=root)
             request = LaunchRequest(
                 project_name="demo",
                 target="https://example.com",
                 scope="example.com",
-                provider="codex",
+                provider="codexx",
                 model="gpt-5.5",
                 selected_tools=("dummy",),
                 user_prompt="test only",
                 authorization_confirmed=True,
+                api_base_url="https://gateway.example/v1/",
+                api_key="sk-runtime-only",
             )
             state = manager.start(request)
             try:
                 self.assertEqual(state.status, "running")
                 self.assertEqual(len(state.processes), 2)
                 self.assertTrue(all(pid_alive(item.pid) for item in state.processes))
-                self.assertTrue((Path(state.run_dir) / "agent_prompt.txt").is_file())
+                prompt_path = Path(state.run_dir) / "agent_prompt.txt"
+                self.assertTrue(prompt_path.is_file())
+                prompt = prompt_path.read_text(encoding="utf-8")
+                self.assertIn("Microsoft Playwright", prompt)
+                self.assertIn("cve_triage.md", prompt)
+                self.assertIn("evidence/poc_review/<CVE>/", prompt)
+                self.assertIn("不要只输出可能漏洞清单", prompt)
                 self.assertTrue((Path(state.run_dir) / "run.json").is_file())
+                project = json.loads(
+                    (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
+                )
+                self.assertEqual(project["api_base_url"], "https://gateway.example/v1")
+                self.assertEqual(state.api_base_url, "https://gateway.example/v1")
+                self.assertNotIn("sk-runtime-only", json.dumps(project))
+                self.assertNotIn(
+                    "sk-runtime-only",
+                    (Path(state.run_dir) / "launch_agent.ps1").read_text(
+                        encoding="utf-8-sig"
+                    ),
+                )
+                self.assertEqual(manager.spawn_environments["ai_agent"], {})
+                self.assertEqual(
+                    manager.spawn_environments["dummy"],
+                    {
+                        "OPENAI_BASE_URL": "https://gateway.example/v1",
+                        "OPENAI_MODEL": "gpt-5.5",
+                        "OPENAI_API_KEY": "sk-runtime-only",
+                    },
+                )
+                activity = (Path(state.run_dir) / "activity.log").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn("工具已启动：Dummy", activity)
+                self.assertIn("本地 Agent 已启动：Codexx", activity)
+                self.assertIn("运行实例启动完成", activity)
+                self.assertNotIn("sk-runtime-only", activity)
             finally:
                 manager.cleanup()
             self.assertTrue(all(not pid_alive(item.pid) for item in state.processes))

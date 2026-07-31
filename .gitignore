@@ -2,4 +2,8 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 projects/
+standalone_runs/
+tools.json
+launcher_settings.json
+launcher_secrets.dat
 ui-*.png

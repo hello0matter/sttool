@@ -4,6 +4,16 @@ from dataclasses import asdict, dataclass, field
 from typing import Any
 
 
+DEFAULT_API_BASE_URL = "https://api.1314mc.net/v1"
+
+
+def normalize_provider(value: object, schema_version: int = 2) -> str:
+    provider = str(value or "codexx").lower()
+    if schema_version < 2 and provider == "codex":
+        return "codexx"
+    return provider
+
+
 @dataclass(frozen=True)
 class ToolDefinition:
     tool_id: str
@@ -16,8 +26,15 @@ class ToolDefinition:
     default_selected: bool = False
     sends_requests: bool = False
     new_console: bool = False
+    required_paths: tuple[str, ...] = ()
+    restart_on_recovery: bool = False
     prepare_files: tuple[tuple[str, str], ...] = ()
+    refresh_files: tuple[tuple[str, str], ...] = ()
     secret_env: tuple[tuple[str, str, str], ...] = ()
+    environment: tuple[tuple[str, str], ...] = ()
+    result_paths: tuple[str, ...] = ()
+    uses_shared_ai: bool = False
+    allow_standalone: bool = False
 
 
 @dataclass(frozen=True)
@@ -30,6 +47,8 @@ class LaunchRequest:
     selected_tools: tuple[str, ...]
     user_prompt: str
     authorization_confirmed: bool
+    api_base_url: str = DEFAULT_API_BASE_URL
+    api_key: str = field(default="", repr=False, compare=False)
 
 
 @dataclass
@@ -49,6 +68,27 @@ class ProcessRecord:
 
 
 @dataclass
+class StandaloneRunState:
+    run_id: str
+    tool_id: str
+    tool_name: str
+    target: str
+    run_dir: str
+    created_at: str
+    updated_at: str
+    status: str
+    authorization_confirmed: bool
+    process: ProcessRecord | None = None
+    result_paths: list[str] = field(default_factory=list)
+    error: str = ""
+
+    def to_dict(self) -> dict[str, Any]:
+        value = asdict(self)
+        value["schema_version"] = 1
+        return value
+
+
+@dataclass
 class RunState:
     run_id: str
     project_name: str
@@ -62,20 +102,27 @@ class RunState:
     updated_at: str
     status: str
     processes: list[ProcessRecord] = field(default_factory=list)
+    recovery_count: int = 0
+    recovery_history: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
+    api_base_url: str = DEFAULT_API_BASE_URL
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        value["schema_version"] = 1
+        value["schema_version"] = 2
         return value
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "RunState":
+        schema_version = int(value.get("schema_version", 1))
         fields = {
             key: item
             for key, item in value.items()
             if key in cls.__dataclass_fields__ and key != "processes"
         }
+        fields["provider"] = normalize_provider(
+            fields.get("provider"), schema_version
+        )
         fields["processes"] = [
             ProcessRecord.from_dict(item) for item in value.get("processes", [])
         ]
