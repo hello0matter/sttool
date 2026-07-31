@@ -82,7 +82,7 @@ def default_tools(
                 "--sttool-export",
                 "{run_dir}/results/asset_commander_assets.json",
                 "--sttool-collision-config",
-                "{\"preserve_original_port\":true,\"add_80\":true,\"add_443\":true,\"no_port\":true,\"absolute_path\":false,\"waf_header\":false,\"force_sni\":false,\"threads\":150}",
+                "{{\"preserve_original_port\":true,\"add_80\":true,\"add_443\":true,\"no_port\":true,\"absolute_path\":false,\"waf_header\":false,\"force_sni\":false,\"threads\":150}}",
             ),
             cwd="{run_dir}/tool_data/asset_commander",
             default_selected=True,

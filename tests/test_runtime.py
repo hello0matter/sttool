@@ -380,9 +380,10 @@ class RuntimeTests(unittest.TestCase):
             reloaded = ToolStore(config_path, st_root=root / "default-tools")
             tools = {tool.tool_id: tool for tool in reloaded.tools()}
             asset = tools["asset_commander"]
-            collision_config = json.loads(
-                asset.args[asset.args.index("--sttool-collision-config") + 1]
-            )
+            encoded_collision_config = asset.args[
+                asset.args.index("--sttool-collision-config") + 1
+            ]
+            collision_config = json.loads(encoded_collision_config.format_map({}))
             self.assertEqual(collision_config["threads"], 88)
             self.assertTrue(collision_config["waf_header"])
             self.assertFalse(collision_config["preserve_original_port"])

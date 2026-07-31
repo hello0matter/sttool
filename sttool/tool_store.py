@@ -106,7 +106,10 @@ class ToolStore:
                 continue
             args = list(tool.args)
             marker = args.index("--sttool-collision-config") + 1
-            args[marker] = json.dumps(settings, ensure_ascii=False, separators=(",", ":"))
+            encoded = json.dumps(
+                settings, ensure_ascii=False, separators=(",", ":")
+            )
+            args[marker] = encoded.replace("{", "{{").replace("}", "}}")
             tools[index] = replace(tool, args=tuple(args))
         seen = {tool.tool_id for tool in tools}
         for value in self._value["custom_tools"]:
