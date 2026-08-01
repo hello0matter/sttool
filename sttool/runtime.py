@@ -442,8 +442,10 @@ class RuntimeManager:
     ) -> Path:
         prompt_path = run_dir / "agent_prompt.txt"
         script_path = run_dir / "launch_agent.ps1"
+        pid_path = run_dir / "agent_shell.pid"
         run_quote = self._ps_quote(str(run_dir))
         prompt_quote = self._ps_quote(str(prompt_path))
+        pid_quote = self._ps_quote(str(pid_path))
         title = self._ps_quote(
             f"STTool {request.project_name} - "
             f"{self.provider_display_name(request.provider)}"
@@ -464,6 +466,10 @@ class RuntimeManager:
         )
         script = (
             "$ErrorActionPreference = 'Stop'\n"
+            f"$agentPidPath = {pid_quote}\n"
+            "Set-Content -LiteralPath $agentPidPath -Value $PID -Encoding ascii\n"
+            "$agentExitCode = 1\n"
+            "try {\n"
             "$utf8 = [System.Text.UTF8Encoding]::new()\n"
             "[Console]::InputEncoding = $utf8\n"
             "[Console]::OutputEncoding = $utf8\n"
@@ -472,10 +478,73 @@ class RuntimeManager:
             f"Set-Location -LiteralPath {run_quote}\n"
             f"{prompt_setup}"
             f"{invocation}\n"
-            "exit $LASTEXITCODE\n"
+            "$agentExitCode = $LASTEXITCODE\n"
+            "} finally {\n"
+            "Remove-Item -LiteralPath $agentPidPath -Force -ErrorAction SilentlyContinue\n"
+            "}\n"
+            "exit $agentExitCode\n"
         )
         script_path.write_text(script, encoding="utf-8-sig")
         return script_path
+
+    def _launch_agent_in_windows_terminal(
+        self,
+        request: LaunchRequest,
+        run_dir: Path,
+        script: Path,
+        terminal: str,
+    ) -> ProcessRecord:
+        pid_path = run_dir / "agent_shell.pid"
+        try:
+            pid_path.unlink()
+        except FileNotFoundError:
+            pass
+        title = (
+            f"STTool {request.project_name} - "
+            f"{self.provider_display_name(request.provider)}"
+        )
+        shell = shutil.which("pwsh.exe") or "powershell.exe"
+        command = [
+            terminal,
+            "-w",
+            "new",
+            "new-tab",
+            "--title",
+            title,
+            "--startingDirectory",
+            str(run_dir),
+            shell,
+            "-NoLogo",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-File",
+            str(script),
+        ]
+        launcher = subprocess.Popen(
+            command,
+            cwd=str(run_dir),
+            creationflags=CREATE_NEW_PROCESS_GROUP,
+            close_fds=True,
+        )
+        deadline = time.monotonic() + 12
+        while time.monotonic() < deadline:
+            try:
+                shell_pid = int(pid_path.read_text(encoding="ascii").strip())
+            except (FileNotFoundError, OSError, UnicodeError, ValueError):
+                shell_pid = 0
+            if shell_pid and pid_alive(shell_pid):
+                return ProcessRecord(
+                    component_id="ai_agent",
+                    name=f"{self.provider_display_name(request.provider)} Agent",
+                    pid=shell_pid,
+                    command=command,
+                    cwd=str(run_dir),
+                    started_at=now_text(),
+                )
+            time.sleep(0.1)
+        if launcher.poll() is None:
+            terminate_process_tree(launcher.pid)
+        raise LaunchError("Windows Terminal 已启动，但未检测到 Agent 终端进程")
 
     def _spawn(
         self,
@@ -675,10 +744,21 @@ class RuntimeManager:
         resume: bool = False,
     ) -> ProcessRecord:
         script = self._agent_script(request, run_dir, resume=resume)
+        if sys.platform == "win32" and request.provider in {"codex", "codexx"}:
+            terminal = shutil.which("wt.exe")
+            if terminal:
+                return self._launch_agent_in_windows_terminal(
+                    request, run_dir, script, terminal
+                )
+            append_activity(
+                run_dir,
+                "未找到 Windows Terminal（wt.exe），本次 Agent 回退到系统控制台。",
+            )
+        shell = shutil.which("pwsh.exe") or "powershell.exe"
         return self._spawn(
             "ai_agent",
             f"{self.provider_display_name(request.provider)} Agent",
-            "powershell.exe",
+            shell,
             ["-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)],
             str(run_dir),
             True,

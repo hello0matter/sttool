@@ -169,6 +169,8 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         status = str(state.get("status") or "")
         stage = str(state.get("current_step") or "")
         detail = ""
+        if status == "completed":
+            detail = "资产工作流已完成；AssetCommander 窗口仍保留，可继续手动操作"
         steps = state.get("steps")
         if stage and isinstance(steps, dict):
             step = steps.get(stage)
@@ -466,7 +468,7 @@ class RunLogDialog(tk.Toplevel):
             "running": "运行中",
             "waiting_assets": "等待资产",
             "manual_required": "需手动处理",
-            "completed": "已结束",
+            "completed": "已完成",
             "failed": "失败",
             "stopped": "已停止",
             "exited": "已退出",

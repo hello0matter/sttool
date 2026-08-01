@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 import unittest
@@ -59,6 +60,22 @@ class OfflineRuntimeManager(RuntimeManager):
             command=[sys.executable, "-c", "import time; time.sleep(30)"],
             cwd=cwd,
             started_at=now_text(),
+        )
+
+    def _launch_agent_in_windows_terminal(
+        self,
+        request: LaunchRequest,
+        run_dir: Path,
+        script: Path,
+        terminal: str,
+    ) -> ProcessRecord:
+        return self._spawn(
+            "ai_agent",
+            f"{self.provider_display_name(request.provider)} Agent",
+            "powershell.exe",
+            ["-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)],
+            str(run_dir),
+            True,
         )
 
     def cleanup(self) -> None:
@@ -499,12 +516,65 @@ class RuntimeTests(unittest.TestCase):
             script = script_path.read_text(encoding="utf-8-sig")
 
             self.assertIn(f"Set-Location -LiteralPath '{run_dir}'", script)
+            self.assertIn("agent_shell.pid", script)
+            self.assertIn("Set-Content -LiteralPath $agentPidPath -Value $PID", script)
+            self.assertIn("Remove-Item -LiteralPath $agentPidPath", script)
             self.assertIn("& codexx --yolo $prompt", script)
             self.assertIn("Get-Content -Raw -Encoding UTF8", script)
             self.assertNotIn("--model", script)
             self.assertNotIn("--add-dir", script)
             self.assertNotIn("openai_base_url", script)
             self.assertNotIn("& codex ", script)
+
+    def test_windows_terminal_agent_tracks_inner_powershell_pid(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "agent_prompt.txt").write_text("test", encoding="utf-8")
+            manager = RuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codex",
+                model="tool-model",
+                selected_tools=(),
+                user_prompt="test",
+                authorization_confirmed=True,
+            )
+            script = manager._agent_script(request, run_dir)
+            captured: list[str] = []
+
+            class Launcher:
+                pid = 999999
+
+                @staticmethod
+                def poll():
+                    return 0
+
+            def fake_popen(command, **kwargs):
+                captured.extend(command)
+                (run_dir / "agent_shell.pid").write_text(
+                    str(os.getpid()), encoding="ascii"
+                )
+                return Launcher()
+
+            with patch("sttool.runtime.subprocess.Popen", side_effect=fake_popen):
+                record = manager._launch_agent_in_windows_terminal(
+                    request, run_dir, script, "wt.exe"
+                )
+
+            self.assertEqual(record.pid, os.getpid())
+            self.assertEqual(captured[:4], ["wt.exe", "-w", "new", "new-tab"])
+            self.assertIn("--startingDirectory", captured)
+            self.assertTrue(
+                any(
+                    Path(value).name in {"pwsh.exe", "powershell.exe"}
+                    for value in captured
+                )
+            )
+            self.assertIn(str(script), captured)
 
     def test_codex_agent_script_uses_local_codex_command(self) -> None:
         with TemporaryDirectory() as temporary:
