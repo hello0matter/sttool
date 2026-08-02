@@ -398,11 +398,20 @@ class LauncherApp(tk.Tk):
         if self.tool_store.is_builtin(tool.tool_id):
             if tool.tool_id == "asset_commander":
                 dialog = AssetCommanderSettingsDialog(
-                    self, self.tool_store.asset_collision_settings()
+                    self,
+                    self.tool_store.asset_collision_settings(),
+                    self.tool_store.location_for(tool.tool_id, tool),
                 )
                 self.wait_window(dialog)
-                if dialog.result is not None:
-                    self.tool_store.set_asset_collision_settings(dialog.result)
+                if dialog.result is not None and dialog.location_result is not None:
+                    try:
+                        self.tool_store.set_location(
+                            tool.tool_id, dialog.location_result
+                        )
+                        self.tool_store.set_asset_collision_settings(dialog.result)
+                    except (OSError, ValueError) as exc:
+                        messagebox.showerror("保存失败", str(exc), parent=self)
+                        return
                     self._reload_tools()
                     self.tools_tree.selection_set(tool.tool_id)
                 return
