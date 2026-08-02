@@ -1680,6 +1680,19 @@ def progress_has_active_tasks(progress: dict[str, object]) -> bool:
     )
 
 
+def monitoring_state(progress: dict[str, object]) -> tuple[str, str, str]:
+    summary = progress_summary(progress)
+    if progress_has_active_tasks(progress):
+        return "running", "monitoring", f"TscanPlus 任务监控：{summary}"
+    return (
+        "waiting_assets",
+        "standby",
+        "TscanPlus 当前批次已无活动内部任务；"
+        "窗口保持待机，等待项目新增资产。"
+        "CPU 占用较低是正常状态",
+    )
+
+
 def monitor_tscan_process(
     child: subprocess.Popen[bytes] | None,
     pid: int,
@@ -1702,6 +1715,13 @@ def monitor_tscan_process(
             )
             page = browser.contexts[0].pages[0]
             while process_alive(pid):
+                dismissed_modals = dismiss_blocking_modals(page)
+                if dismissed_modals:
+                    append_activity(
+                        state_path,
+                        "已关闭 TscanPlus 阻塞弹窗："
+                        + "，".join(dismissed_modals),
+                    )
                 progress = collect_module_progress(page)
                 now = time.monotonic()
                 health: dict[str, str] = {}
@@ -1775,6 +1795,7 @@ def monitor_tscan_process(
                     progress = collect_module_progress(page)
 
                 summary = progress_summary(progress)
+                monitor_status, monitor_stage, monitor_detail = monitoring_state(progress)
                 rendered = json.dumps(
                     {
                         "progress": progress,
@@ -1785,9 +1806,9 @@ def monitor_tscan_process(
                     sort_keys=True,
                 )
                 state.update(
-                    status="running",
-                    stage="monitoring",
-                    detail=f"TscanPlus 任务监控：{summary}",
+                    status=monitor_status,
+                    stage=monitor_stage,
+                    detail=monitor_detail,
                     module_progress=progress,
                     module_health=health,
                     updated_at=now_text(),
@@ -1795,7 +1816,8 @@ def monitor_tscan_process(
                 if rendered != last_rendered:
                     atomic_json_write(state_path, state)
                     last_rendered = rendered
-                if now - last_log_at >= 30 or health:
+                log_interval = 30 if progress_has_active_tasks(progress) else 300
+                if now - last_log_at >= log_interval or health:
                     message = f"任务进度：{summary}"
                     if health:
                         message += f"；健康提示：{health}"

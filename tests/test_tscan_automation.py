@@ -10,6 +10,7 @@ from sttool.tscan_automation import (
     classify_connection_feedback,
     dismiss_blocking_modals,
     filter_assets_by_scope,
+    monitoring_state,
     normalize_poc_urls,
     password_targets,
     prepare_tscan_workspace,
@@ -35,6 +36,30 @@ class ModalPage:
 
 
 class TscanAutomationTests(unittest.TestCase):
+
+    def test_monitoring_state_explains_idle_cpu_as_standby(self) -> None:
+        self.assertEqual(
+            monitoring_state(
+                {
+                    "ipscan": {"status": "idle"},
+                    "pwdcrack": {"status": "idle"},
+                    "ipscanRunning": False,
+                    "unauthRunning": False,
+                }
+            ),
+            (
+                "waiting_assets",
+                "standby",
+                "TscanPlus 当前批次已无活动内部任务；"
+                "窗口保持待机，等待项目新增资产。"
+                "CPU 占用较低是正常状态",
+            ),
+        )
+        status, stage, detail = monitoring_state(
+            {"pwdcrack": {"status": "running", "percent": 33.93}}
+        )
+        self.assertEqual((status, stage), ("running", "monitoring"))
+        self.assertIn("pwdcrack=33.93%", detail)
 
     def test_support_modal_prefers_decline_and_never_opens_external_page(self) -> None:
         page = ModalPage(["\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528"])
