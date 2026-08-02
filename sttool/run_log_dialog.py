@@ -103,6 +103,35 @@ def refresh_component_activity_log(
     return destination
 
 
+def semantic_project_dir(workdir: Path) -> Path | None:
+    projects_dir = workdir / "projects"
+    launcher = load_json(workdir / "launcher_state.json")
+    last_project = str(launcher.get("last_project") or "").strip()
+    if last_project:
+        candidate = projects_dir / last_project
+        if candidate.is_dir():
+            return candidate
+    candidates = [path for path in projects_dir.iterdir() if path.is_dir()] if projects_dir.is_dir() else []
+    if not candidates:
+        return None
+
+    def latest_marker(project_dir: Path) -> int:
+        markers = [
+            project_dir / "project.json",
+            project_dir / "gui.log",
+            *project_dir.glob("runs/**/runtime_state.json"),
+        ]
+        values: list[int] = []
+        for marker_path in markers:
+            try:
+                values.append(marker_path.stat().st_mtime_ns)
+            except OSError:
+                continue
+        return max(values, default=0)
+
+    return max(candidates, key=latest_marker)
+
+
 def component_paths(
     run_dir: Path, component_id: str, component_name: str = ""
 ) -> dict[str, list[Path] | Path]:
@@ -123,15 +152,27 @@ def component_paths(
         }
     if component_id == "semantic_dirscan":
         workdir = run_dir / "tool_data" / "semantic"
+        project_dir = semantic_project_dir(workdir)
+        project_states = (
+            list(project_dir.glob("runs/**/runtime_state.json"))
+            if project_dir is not None
+            else []
+        )
+        project_logs = (
+            [project_dir / "gui.log"] if project_dir is not None else []
+        )
         return {
             "workdir": workdir,
             "states": [
                 workdir / "sttool_bridge_state.json",
                 workdir / "launcher_state.json",
-                *workdir.glob("projects/**/runtime_state.json"),
+                *project_states,
             ],
-            "logs": [*workdir.glob("projects/**/gui.log")],
-            "results": [workdir / "projects", workdir / "reports"],
+            "logs": project_logs,
+            "results": [
+                project_dir if project_dir is not None else workdir / "projects",
+                workdir / "reports",
+            ],
         }
     if component_id == "tscan_plus":
         workdir = run_dir / "tool_data" / "tscan"
@@ -182,6 +223,174 @@ def component_paths(
         "logs": [component_activity],
         "results": [run_dir / "results"],
     }
+
+
+def human_status(value: object) -> str:
+    text = str(value or "").strip()
+    return {
+        "starting": "\u542f\u52a8\u4e2d",
+        "running": "\u8fd0\u884c\u4e2d",
+        "waiting_assets": "\u7b49\u5f85\u8d44\u4ea7",
+        "waiting": "\u7b49\u5f85\u4e2d",
+        "completed": "\u5df2\u5b8c\u6210",
+        "finished": "\u5df2\u5b8c\u6210",
+        "done": "\u5df2\u5b8c\u6210",
+        "failed": "\u5931\u8d25",
+        "stopped": "\u5df2\u505c\u6b62",
+        "exited": "\u5df2\u9000\u51fa",
+        "pending": "\u5f85\u8fd0\u884c",
+    }.get(text, text or "\u672a\u77e5")
+
+
+def summarize_list(
+    lines: list[str],
+    label: str,
+    values: object,
+    *,
+    limit: int = 40,
+) -> None:
+    if not isinstance(values, list):
+        return
+    lines.append(f"{label}\uff1a{len(values)} \u6761")
+    for item in values[:limit]:
+        if isinstance(item, dict):
+            value = (
+                item.get("url")
+                or item.get("endpoint")
+                or item.get("value")
+                or item.get("path")
+                or item.get("name")
+                or json.dumps(item, ensure_ascii=False)
+            )
+        else:
+            value = item
+        lines.append(f"  \u2022 {value}")
+    if len(values) > limit:
+        lines.append(
+            f"  \u2026\u2026\u5176\u4f59 {len(values) - limit} \u6761\u8bf7\u6253\u5f00\u539f\u59cb\u72b6\u6001\u6587\u4ef6\u67e5\u770b"
+        )
+
+
+def render_component_state(path: Path, component_id: str) -> str:
+    state = load_json(path)
+    if not state:
+        return f"{path.name}\uff1a\u72b6\u6001\u6587\u4ef6\u4e3a\u7a7a\u6216\u6682\u65f6\u65e0\u6cd5\u8bfb\u53d6\u3002"
+    lines: list[str] = []
+    if component_id == "semantic_dirscan":
+        if path.name == "sttool_bridge_state.json":
+            lines.append("\u3010\u8d44\u4ea7\u540c\u6b65\u6982\u89c8\u3011")
+            lines.append(f"\u9879\u76ee\uff1a{state.get('project') or '-'}")
+            lines.append(f"\u66f4\u65b0\u65f6\u95f4\uff1a{state.get('updated_at') or '-'}")
+            lines.append(
+                "AssetCommander\uff1a"
+                + human_status(state.get("asset_workflow_status"))
+            )
+            handoff = state.get("asset_handoff_ready")
+            if handoff is not None:
+                handoff_text = "\u662f" if handoff else "\u5426"
+                lines.append(
+                    f"\u8d44\u4ea7\u5df2\u653e\u884c\u7ed9\u8def\u5f84\u53d1\u73b0\uff1a{handoff_text}"
+                )
+            summarize_list(
+                lines,
+                "\u5df2\u7eb3\u5165\u626b\u63cf\u76ee\u6807",
+                state.get("targets"),
+            )
+            summarize_list(
+                lines,
+                "\u7b49\u5f85\u653e\u884c\u76ee\u6807",
+                state.get("queued_asset_targets"),
+            )
+            rejected = int(state.get("rejected") or 0)
+            if rejected:
+                lines.append(f"\u56e0\u6388\u6743\u8303\u56f4\u88ab\u8fc7\u6ee4\uff1a{rejected} \u6761")
+            error = str(state.get("last_error") or "").strip()
+            if error:
+                lines.append(f"\u6700\u8fd1\u9519\u8bef\uff1a{error}")
+            markers = state.get("source_markers")
+            if isinstance(markers, dict):
+                lines.append("\u6570\u636e\u6765\u6e90\uff1a")
+                for name, marker in markers.items():
+                    if isinstance(marker, dict):
+                        lines.append(
+                            f"  \u2022 {name}\uff1a{int(marker.get('size') or 0)} \u5b57\u8282\uff0c"
+                            f"\u66f4\u65b0\u65f6\u95f4\u6807\u8bb0 {marker.get('mtime_ns') or '-'}"
+                        )
+            return "\n".join(lines)
+        if path.name == "runtime_state.json":
+            lines.append("\u3010\u5f53\u524d\u626b\u63cf\u8fdb\u5ea6\u3011")
+            lines.append(f"\u72b6\u6001\uff1a{human_status(state.get('phase'))}")
+            lines.append(f"\u76ee\u6807\uff1a{state.get('target') or '-'}")
+            lines.append(f"\u5f53\u524d URL\uff1a{state.get('current_url') or '-'}")
+            depth = state.get("current_depth")
+            lines.append(f"\u5f53\u524d\u6df1\u5ea6\uff1a{depth if depth is not None else '-'}")
+            lines.append(f"\u5df2\u5b8c\u6210\u7236\u8def\u5f84\uff1a{int(state.get('completed_targets') or 0)}")
+            lines.append(f"\u5f85\u626b\u63cf\u961f\u5217\uff1a{int(state.get('queue_size') or 0)}")
+            lines.append(f"\u626b\u63cf\u8f6e\u6b21\uff1a{int(state.get('round_count') or 0)}")
+            lines.append(f"\u5f53\u524d\u5b57\u5178\uff1a{state.get('wordlist') or '-'}")
+            overview = state.get("overview")
+            if isinstance(overview, dict):
+                lines.append(
+                    "\u98ce\u9669\u7ebf\u7d22\uff1a"
+                    f"\u9ad8\u4ef7\u503c {int(overview.get('high_value_count') or 0)}\uff0c"
+                    f"\u8ba4\u8bc1\u63d0\u9192 {int(overview.get('auth_warning_count') or 0)}"
+                )
+            summarize_list(
+                lines,
+                "\u91cd\u70b9\u53d1\u73b0",
+                state.get("top_findings"),
+                limit=20,
+            )
+            return "\n".join(lines)
+        if path.name == "launcher_state.json":
+            return "\n".join(
+                [
+                    "\u3010\u542f\u52a8\u5668\u8bb0\u5f55\u3011",
+                    f"\u6700\u540e\u5de5\u7a0b\uff1a{state.get('last_project') or '-'}",
+                    f"\u5de5\u7a0b\u76ee\u5f55\uff1a{state.get('last_project_dir') or '-'}",
+                ]
+            )
+    lines.append(f"\u3010\u72b6\u6001\u6982\u89c8\uff1a{path.name}\u3011")
+    for key, label in (
+        ("status", "\u72b6\u6001"),
+        ("stage", "\u5f53\u524d\u6b65\u9aa4"),
+        ("current_step", "\u5f53\u524d\u6b65\u9aa4"),
+        ("detail", "\u8bf4\u660e"),
+        ("error", "\u9519\u8bef"),
+        ("updated_at", "\u66f4\u65b0\u65f6\u95f4"),
+        ("generation", "\u8d44\u4ea7\u4ee3\u6b21"),
+        ("consumed_generation", "\u5df2\u6d88\u8d39\u4ee3\u6b21"),
+    ):
+        value = state.get(key)
+        if value in {None, ""}:
+            continue
+        lines.append(
+            f"{label}\uff1a{human_status(value) if key == 'status' else value}"
+        )
+    steps = state.get("steps")
+    if isinstance(steps, dict) and steps:
+        lines.append("\u6b65\u9aa4\u72b6\u6001\uff1a")
+        for name, value in steps.items():
+            if isinstance(value, dict):
+                status = human_status(value.get("status"))
+                detail = str(value.get("detail") or "").strip()
+                lines.append(
+                    f"  \u2022 {name}\uff1a{status}"
+                    + (f"\uff1b{detail}" if detail else "")
+                )
+    for key, label in (
+        ("targets", "\u76ee\u6807"),
+        ("urls", "URL"),
+        ("domains", "\u57df\u540d"),
+        ("ips", "IP"),
+    ):
+        summarize_list(lines, label, state.get(key), limit=20)
+    if len(lines) == 1:
+        lines.append(
+            "\u8be5\u72b6\u6001\u6587\u4ef6\u6ca1\u6709\u53ef\u76f4\u63a5\u5c55\u793a\u7684\u6458\u8981\u5b57\u6bb5\uff1b"
+            "\u53ef\u70b9\u51fb\u201c\u6253\u5f00\u539f\u59cb\u72b6\u6001\u201d\u67e5\u770b\u3002"
+        )
+    return "\n".join(lines)
 
 
 def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
@@ -334,13 +543,13 @@ class ComponentLogDialog(tk.Toplevel):
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
         ttk.Label(
             container,
-            text="状态文件、组件日志和结果预览会自动刷新。",
+            text="\u9ed8\u8ba4\u5c55\u793a\u9762\u5411\u4eba\u7684\u8fd0\u884c\u6982\u89c8\u548c\u5355\u5de5\u5177\u65e5\u5fd7\uff1b\u539f\u59cb JSON \u53ef\u5355\u72ec\u6253\u5f00\u3002",
         ).grid(row=1, column=0, sticky="w", pady=(0, 8))
 
         self.text = scrolledtext.ScrolledText(
             container,
-            wrap="none",
-            font=("Consolas", 10),
+            wrap="word",
+            font=("Microsoft YaHei UI", 10),
             state="disabled",
         )
         self.text.grid(row=2, column=0, sticky="nsew")
@@ -353,6 +562,11 @@ class ComponentLogDialog(tk.Toplevel):
         ttk.Button(actions, text="打开日志文件", command=self._open_log).pack(
             side="left", padx=(8, 0)
         )
+        ttk.Button(
+            actions,
+            text="\u6253\u5f00\u539f\u59cb\u72b6\u6001",
+            command=self._open_state,
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="打开结果", command=self._open_result).pack(
             side="left", padx=(8, 0)
         )
@@ -365,24 +579,36 @@ class ComponentLogDialog(tk.Toplevel):
         values = self.sources.get(key, [])
         if not isinstance(values, list):
             return []
-        return [path for path in values if path.exists()]
+        existing = [path for path in values if path.exists()]
+        return sorted(
+            existing,
+            key=lambda path: path.stat().st_mtime_ns if path.exists() else 0,
+        )
 
     def _content(self) -> str:
         refresh_component_activity_log(
             self.run_dir, self.component_id, self.component_name
         )
         sections: list[str] = []
-        for path in self._existing("states"):
-            sections.append(
-                f"===== 状态：{path} =====\n"
-                + json.dumps(load_json(path), ensure_ascii=False, indent=2)
+        states = self._existing("states")
+        if states:
+            overview = "\n\n".join(
+                render_component_state(path, self.component_id) for path in states
             )
+            sections.append("===== \u8fd0\u884c\u6982\u89c8 =====\n" + overview)
         for path in self._existing("logs")[-8:]:
             if path.is_file():
                 content = tail_text(path)
-                sections.append(f"===== 日志：{path} =====\n{content}")
+                sections.append(
+                    f"===== \u5355\u5de5\u5177\u65e5\u5fd7\uff1a{path.name} =====\n{content}"
+                )
+        if states:
+            sections.append(
+                "\u539f\u59cb JSON \u5df2\u4ece\u4e3b\u89c6\u56fe\u9690\u85cf\u3002"
+                "\u5982\u9700\u8c03\u8bd5\uff0c\u8bf7\u70b9\u51fb\u201c\u6253\u5f00\u539f\u59cb\u72b6\u6001\u201d\u3002"
+            )
         if not sections:
-            sections.append("该组件的状态或日志文件尚未生成。")
+            sections.append("\u8be5\u7ec4\u4ef6\u7684\u72b6\u6001\u6216\u65e5\u5fd7\u6587\u4ef6\u5c1a\u672a\u751f\u6210\u3002")
         return "\n\n".join(sections)
 
     def _refresh(self) -> None:
@@ -420,6 +646,17 @@ class ComponentLogDialog(tk.Toplevel):
             messagebox.showinfo("组件日志", "日志文件尚未生成。", parent=self)
             return
         os.startfile(logs[-1])
+
+    def _open_state(self) -> None:
+        states = [path for path in self._existing("states") if path.is_file()]
+        if not states:
+            messagebox.showinfo(
+                "\u7ec4\u4ef6\u65e5\u5fd7",
+                "\u539f\u59cb\u72b6\u6001\u6587\u4ef6\u5c1a\u672a\u751f\u6210\u3002",
+                parent=self,
+            )
+            return
+        os.startfile(states[-1])
 
     def _open_result(self) -> None:
         results = self._existing("results")

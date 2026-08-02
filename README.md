@@ -112,3 +112,10 @@ STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对�
 - 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
 - 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID 和完成时间；项目日志可双击“项目增量调度/Agent”查看。
 - `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。
+
+
+### Human-readable per-tool logs
+
+Double-clicking a project tool now opens a tool-specific view instead of placing raw state JSON at the top of the window. The view shows a readable runtime overview first, followed by only that tool's own logs. For AI path discovery this includes synchronized targets, queued targets, AssetCommander handoff state, current URL/depth, completed parent paths, pending queue size and key findings.
+
+Raw JSON is still available through the **Open raw state** button for debugging, but it no longer dominates the normal operator view.

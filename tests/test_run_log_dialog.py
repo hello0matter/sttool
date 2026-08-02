@@ -11,6 +11,7 @@ from sttool.run_log_dialog import (
     component_paths,
     component_runtime,
     component_summary_status,
+    render_component_state,
 )
 
 
@@ -227,6 +228,90 @@ class RunLogDialogTests(unittest.TestCase):
         self.assertIn("资产总线", filtered)
         self.assertIn("Agent 批次", filtered)
         self.assertNotIn("fscan 基础探测已结束", filtered)
+
+
+    def test_semantic_component_uses_only_the_current_project_log(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            workdir = run_dir / "tool_data" / "semantic"
+            current = workdir / "projects" / "current"
+            old = workdir / "projects" / "old"
+            (current / "runs" / "one").mkdir(parents=True)
+            old.mkdir(parents=True)
+            (workdir / "launcher_state.json").write_text(
+                json.dumps({"last_project": "current"}),
+                encoding="utf-8",
+            )
+            current_log = current / "gui.log"
+            old_log = old / "gui.log"
+            current_state = current / "runs" / "one" / "runtime_state.json"
+            current_log.write_text("current log", encoding="utf-8")
+            old_log.write_text("old log", encoding="utf-8")
+            current_state.write_text(json.dumps({"phase": "running"}), encoding="utf-8")
+
+            sources = component_paths(run_dir, "semantic_dirscan")
+
+            self.assertEqual(sources["logs"], [current_log])
+            self.assertIn(current_state, sources["states"])
+            self.assertNotIn(old_log, sources["logs"])
+            self.assertEqual(sources["results"][0], current)
+
+    def test_semantic_bridge_state_is_rendered_for_people_not_as_raw_json(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "sttool_bridge_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "project": "demo",
+                        "updated_at": "2026-08-02T16:10:22+08:00",
+                        "targets": [
+                            "http://10.17.200.115/",
+                            "http://10.17.200.115:8081/",
+                        ],
+                        "queued_asset_targets": ["https://api.example.test/"],
+                        "asset_workflow_status": "completed",
+                        "asset_handoff_ready": True,
+                        "source_markers": {
+                            "fscan_result": {"size": 1837, "mtime_ns": 123}
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            rendered = render_component_state(state_path, "semantic_dirscan")
+
+            self.assertIn("\u8d44\u4ea7\u540c\u6b65\u6982\u89c8", rendered)
+            self.assertIn("\u5df2\u7eb3\u5165\u626b\u63cf\u76ee\u6807\uff1a2 \u6761", rendered)
+            self.assertIn("\u7b49\u5f85\u653e\u884c\u76ee\u6807\uff1a1 \u6761", rendered)
+            self.assertIn("http://10.17.200.115:8081/", rendered)
+            self.assertNotIn('"schema_version"', rendered)
+
+    def test_semantic_runtime_state_has_readable_progress(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "runtime_state.json"
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "phase": "running",
+                        "target": "https://example.test/",
+                        "current_url": "https://example.test/admin/",
+                        "current_depth": 1,
+                        "completed_targets": 3,
+                        "queue_size": 4,
+                        "round_count": 3,
+                        "wordlist": "selected-api.txt",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rendered = render_component_state(state_path, "semantic_dirscan")
+
+            self.assertIn("\u5f53\u524d\u626b\u63cf\u8fdb\u5ea6", rendered)
+            self.assertIn("\u5f85\u626b\u63cf\u961f\u5217\uff1a4", rendered)
+            self.assertIn("https://example.test/admin/", rendered)
 
 
 if __name__ == "__main__":
