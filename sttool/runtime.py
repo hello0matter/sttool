@@ -406,12 +406,19 @@ class RuntimeManager:
             "按界面取证、版本识别、CVE 快速排查、安全验证、自动化扫描和结果整理的顺序推进。"
         )
         today = datetime.now().astimezone().date().isoformat()
+        scope_note = ""
+        if request.scope.strip() == "*":
+            scope_note = (
+                "授权解释：* 表示当前项目目标、所选工具发现或回传的项目资产，"
+                "以及由这些 IPv4 资产派生的对应 /24 网段均在本项目授权范围内；"
+                "所选工具可以继续消费这些资产，但不得扩展到无关互联网目标。\n"
+            )
         return f"""你正在协助执行一个已获授权的渗透测试项目。不要只输出可能漏洞清单；对能够安全验证的项目，应完成实际验证并保存证据。
 
 项目名称：{request.project_name}
 目标：{request.target}
 授权范围：{request.scope}
-当前日期：{today}
+{scope_note}当前日期：{today}
 本次运行目录：{run_dir}
 工具根目录：{self.st_root}
 
