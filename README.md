@@ -114,6 +114,11 @@ STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对�
 - `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。
 
 
+## 项目成果入口
+
+“运行实例”页面提供独立的 **项目成果** 按钮，与“项目日志”分开。成果窗口会显示阶段/最终状态、项目摘要预览和所有可用成果文件，可双击打开 `risk_summary.md`、`findings.md`、`cve_triage.md`、fscan/nuclei 结果及 Tscan 状态。大型资产清单在预览中自动折叠，完整内容仍可一键打开。即使当前没有漏洞结果，也会显示可读的运行中/暂无线索说明，不再留空白页。
+
+
 ### Human-readable per-tool logs
 
 Double-clicking a project tool now opens a tool-specific view instead of placing raw state JSON at the top of the window. The view shows a readable runtime overview first, followed by only that tool's own logs. For AI path discovery this includes synchronized targets, queued targets, AssetCommander handoff state, current URL/depth, completed parent paths, pending queue size and key findings.

@@ -17,6 +17,7 @@ from .models import (
     normalize_provider,
 )
 from .registry import availability
+from .project_results_dialog import ProjectResultsDialog
 from .run_log_dialog import RunLogDialog, component_summary_status
 from .runtime import LaunchError, RuntimeManager, safe_project_name
 from .secret_store import SecretStoreError, load_api_key, save_api_key
@@ -321,6 +322,11 @@ class LauncherApp(tk.Tk):
         ttk.Button(actions, text="打开运行目录", command=self._open_selected_run).pack(
             side="left", padx=(8, 0)
         )
+        ttk.Button(
+            actions,
+            text="项目成果",
+            command=self._open_project_results,
+        ).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="项目日志", command=self._open_run_log).pack(
             side="left", padx=(8, 0)
         )
@@ -869,6 +875,13 @@ class LauncherApp(tk.Tk):
             messagebox.showinfo("打开目录", "请先选择一个运行实例")
             return
         os.startfile(state.run_dir)
+
+    def _open_project_results(self) -> None:
+        state = self._selected_state()
+        if state is None:
+            messagebox.showinfo("\u9879\u76ee\u6210\u679c", "\u8bf7\u5148\u9009\u62e9\u4e00\u4e2a\u8fd0\u884c\u5b9e\u4f8b")
+            return
+        ProjectResultsDialog(self, state)
 
     def _open_run_log(self) -> None:
         state = self._selected_state()
