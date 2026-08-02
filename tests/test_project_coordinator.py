@@ -6,6 +6,7 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+from sttool.agent_launcher import write_agent_batch_script
 from sttool.asset_bus import AssetBus, parse_fscan_output
 from sttool.models import ProcessRecord
 from sttool.runtime import now_text, process_creation_token
@@ -16,11 +17,11 @@ from sttool.project_coordinator import (
     component_process_alive,
     coordinator_wait_stage,
     mark_agent_batch_finished,
+    schedule_agent_retry,
     render_risk_summary,
     response_text,
     tracked_process_alive,
     tscan_source_ready,
-    write_agent_batch_script,
 )
 
 
@@ -259,9 +260,85 @@ class ProjectCoordinatorTests(unittest.TestCase):
             script = script_path.read_text(encoding="utf-8-sig")
             self.assertIn(
                 "& codexx --yolo -m 'gpt-5.6-sol' "
-                "-c 'model_reasoning_effort=\"high\"' $prompt",
+                "-c 'model_reasoning_effort=\"high\"' $bootstrapPrompt",
                 script,
             )
+
+
+    def test_failed_batch_uses_exit_state_and_is_retryable(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            (batch_dir / "agent_exit.json").write_text(
+                json.dumps({"exit_code": 1, "error": "startup failed"}),
+                encoding="utf-8",
+            )
+            batches: list[object] = [
+                {
+                    "batch": 1,
+                    "pid": 123,
+                    "run_dir": str(batch_dir),
+                    "status": "running",
+                    "generation_to": 2,
+                }
+            ]
+
+            finished = mark_agent_batch_finished(run_dir, batches, 123)
+            state: dict[str, object] = {}
+            delay = schedule_agent_retry(state, "exit 1")
+
+            self.assertIsNotNone(finished)
+            self.assertEqual(finished["status"], "failed")
+            self.assertEqual(delay, 60)
+            self.assertFalse(
+                agent_launch_ready(
+                    active_pid=0,
+                    generation=2,
+                    consumed_generation=0,
+                    asset_ready=True,
+                    fscan_ready=True,
+                    quiet=True,
+                    batch_count=1,
+                    max_batches=8,
+                    retry_ready=False,
+                )
+            )
+            self.assertEqual(
+                coordinator_wait_stage(
+                    active_pid=0,
+                    generation=2,
+                    consumed_generation=0,
+                    asset_ready=True,
+                    fscan_ready=True,
+                    quiet=True,
+                    batch_count=1,
+                    max_batches=8,
+                    retry_ready=False,
+                    retry_seconds=60,
+                )[0],
+                "agent_backoff",
+            )
+
+    def test_agent_batch_script_uses_short_prompt_file_bootstrap(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            large_prompt = "x" * 100_000
+            (batch_dir / "prompt.txt").write_text(large_prompt, encoding="utf-8")
+
+            script_path, _pid_path = write_agent_batch_script(
+                batch_dir, "codex", "demo"
+            )
+            script = script_path.read_text(encoding="utf-8-sig")
+
+            self.assertNotIn(large_prompt, script)
+            self.assertNotIn("Get-Content -Raw", script)
+            self.assertIn(str((batch_dir / "prompt.txt").resolve()), script)
+            self.assertIn("& codex --yolo $bootstrapPrompt", script)
+            self.assertIn("agent_exit.json", script)
+            self.assertIn("exit 0", script)
 
 
 if __name__ == "__main__":

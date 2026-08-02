@@ -9,6 +9,10 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
+from sttool.agent_runtime import (
+    agent_terminal_window_name,
+    is_agent_shell_process_info,
+)
 from sttool.models import LaunchRequest, ProcessRecord, RunState, ToolDefinition
 from sttool.registry import availability, default_tools
 from sttool.runtime import (
@@ -664,10 +668,12 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertIn(f"Set-Location -LiteralPath '{run_dir}'", script)
             self.assertIn("agent_shell.pid", script)
+            self.assertIn("agent_exit.json", script)
+            self.assertIn(str((run_dir / "agent_prompt.txt").resolve()), script)
             self.assertIn("Set-Content -LiteralPath $agentPidPath -Value $PID", script)
             self.assertIn("Remove-Item -LiteralPath $agentPidPath", script)
-            self.assertIn("& codexx --yolo $prompt", script)
-            self.assertIn("Get-Content -Raw -Encoding UTF8", script)
+            self.assertIn("& codexx --yolo $bootstrapPrompt", script)
+            self.assertNotIn("Get-Content -Raw -Encoding UTF8", script)
             self.assertNotIn("--model", script)
             self.assertNotIn("--add-dir", script)
             self.assertNotIn("openai_base_url", script)
@@ -713,7 +719,10 @@ class RuntimeTests(unittest.TestCase):
                 )
 
             self.assertEqual(record.pid, os.getpid())
-            self.assertEqual(captured[:4], ["wt.exe", "-w", "new", "new-tab"])
+            self.assertEqual(
+                captured[:4],
+                ["wt.exe", "-w", agent_terminal_window_name(root), "new-tab"],
+            )
             self.assertIn("--startingDirectory", captured)
             self.assertTrue(
                 any(
@@ -745,7 +754,7 @@ class RuntimeTests(unittest.TestCase):
                 encoding="utf-8-sig"
             )
 
-            self.assertIn("& codex --yolo $prompt", script)
+            self.assertIn("& codex --yolo $bootstrapPrompt", script)
             self.assertNotIn("& codexx", script)
 
     def test_codex_recovery_script_resumes_without_replaying_prompt(self) -> None:
@@ -776,6 +785,56 @@ class RuntimeTests(unittest.TestCase):
             self.assertNotIn("Get-Content", script)
             self.assertNotIn("--model", script)
             self.assertNotIn("openai_base_url", script)
+
+    def test_large_agent_prompt_stays_out_of_windows_command_line(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            large_prompt = "x" * 100_000
+            (run_dir / "agent_prompt.txt").write_text(large_prompt, encoding="utf-8")
+            manager = RuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="tool-model",
+                selected_tools=(),
+                user_prompt=large_prompt,
+                authorization_confirmed=True,
+            )
+
+            script = manager._agent_script(request, run_dir).read_text(
+                encoding="utf-8-sig"
+            )
+
+            self.assertNotIn(large_prompt, script)
+            self.assertIn(str((run_dir / "agent_prompt.txt").resolve()), script)
+            self.assertIn("$bootstrapPrompt", script)
+            self.assertIn("exit 0", script)
+
+    def test_agent_shell_filter_is_limited_to_current_run_scripts(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run-a"
+            other_run = Path(temporary) / "run-b"
+            current = {
+                "name": "pwsh.exe",
+                "exe": "C:/Program Files/PowerShell/7/pwsh.exe",
+                "cmdline": ["pwsh.exe", "-File", str(run_dir / "launch_agent.ps1")],
+            }
+            other = {
+                **current,
+                "cmdline": ["pwsh.exe", "-File", str(other_run / "launch_agent.ps1")],
+            }
+            manual = {
+                **current,
+                "cmdline": ["pwsh.exe", "-Command", "codexx --yolo"],
+            }
+
+            self.assertTrue(is_agent_shell_process_info(current, run_dir))
+            self.assertFalse(is_agent_shell_process_info(other, run_dir))
+            self.assertFalse(is_agent_shell_process_info(manual, run_dir))
 
     def test_preflight_rejects_invalid_api_base_url(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -1105,7 +1164,7 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertIn(
                 "& codexx --yolo -m 'gpt-5.6-sol' "
-                "-c 'model_reasoning_effort=\"high\"' $prompt",
+                "-c 'model_reasoning_effort=\"high\"' $bootstrapPrompt",
                 script,
             )
 

@@ -16,7 +16,7 @@ python -m pip install -e .
 python .\main.py
 ```
 
-即使用 `python .\main.py`，GUI 模式也会自动切换到 `pythonw.exe`；命令行窗口只会保留原本就已经打开的终端。Codexx/Codex Agent 是需要交互的独立终端，不属于后台 Python 窗口。
+即使用 `python .\main.py`，GUI 模式也会自动切换到 `pythonw.exe`；命令行窗口只会保留原本就已经打开的终端。Codexx/Codex Agent 是需要交互的终端标签页，不属于后台 Python 窗口。STTool 的 Agent 统一复用一个命名 Windows Terminal 窗口，每个项目批次使用独立标签页，可用 Ctrl+Tab 切换，避免任务栏堆积大量窗口。
 
 不带参数就是 GUI。环境检测：
 
@@ -78,8 +78,9 @@ projects/<项目>/runs/<时间戳-编号>/
 
 - **恢复实例**：复用原运行目录，保留已有配置、进度和结果，只重启 AssetCommander、路径发现器、TscanPlus 等常驻工具以及 Agent。Codexx 使用 `codexx --yolo resume --last` 恢复当前目录最近一次会话，不会重复提交初始提示词；也不会自动重跑一次性的 fscan/nuclei。
 - **新实例重跑**：读取该历史实例的项目配置，在重新确认授权后创建一个全新的运行目录。
+- **停止实例**：结束当前实例记录的全部进程并保留运行目录和断点。Agent 会按当前运行目录识别其 PowerShell 根进程并结束 Codex/Codexx/Node 子进程，不会按进程名全局终止其他项目或用户手工启动的会话。
 
-两种操作都要求本次重新勾选授权确认，避免历史授权被静默沿用。
+“恢复实例”和“新实例重跑”都要求本次重新勾选授权确认，避免历史授权被静默沿用。
 
 每个新运行实例都会生成 `activity.log`。在“运行实例”中选择记录后点击 **项目日志**，或直接双击该记录，可以查看自动刷新的组件状态、当前步骤、等待原因、结果文件大小以及启动/退出/恢复/停止事件。组件表支持双击打开独立日志，合并展示该组件的状态 JSON、运行日志和结果入口；主日志支持滚动和“跟随最新”。
 
@@ -110,7 +111,7 @@ STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对�
 - `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
 - AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。
 - 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
-- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID 和完成时间；项目日志可双击“项目增量调度/Agent”查看。
+- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID、真实退出状态和完成时间；启动脚本只向 CLI 传递读取 `prompt.txt` 的短引导，避免 Windows 命令行长度限制。失败批次按 60 秒、5 分钟、15 分钟退避重试；项目日志可双击“项目增量调度/Agent”查看。
 - `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。
 
 

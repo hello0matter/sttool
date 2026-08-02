@@ -20,6 +20,11 @@ from typing import Iterable
 from urllib.parse import urlsplit
 
 from .activity import append_activity
+from .agent_runtime import (
+    agent_shell_pids_for_run,
+    agent_terminal_window_name,
+    prompt_file_bootstrap,
+)
 from .models import (
     LaunchRequest,
     ProcessRecord,
@@ -268,6 +273,33 @@ def terminate_process_tree(pid: int) -> None:
         os.killpg(pid, signal.SIGTERM)
     except (OSError, ProcessLookupError):
         pass
+
+
+def terminate_agent_process_tree(pid: int) -> None:
+    if not pid_alive(pid):
+        return
+    try:
+        process = psutil.Process(pid)
+        descendants = process.children(recursive=True)
+    except (psutil.Error, OSError, ValueError):
+        terminate_process_tree(pid)
+        return
+    for child in reversed(descendants):
+        try:
+            child.terminate()
+        except (psutil.Error, OSError):
+            continue
+    _gone, alive = psutil.wait_procs(descendants, timeout=2)
+    for child in alive:
+        try:
+            child.kill()
+        except (psutil.Error, OSError):
+            continue
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline and pid_alive(pid):
+        time.sleep(0.1)
+    if pid_alive(pid):
+        terminate_process_tree(pid)
 
 
 class RuntimeManager:
@@ -549,13 +581,15 @@ class RuntimeManager:
         prompt_path = run_dir / "agent_prompt.txt"
         script_path = run_dir / "launch_agent.ps1"
         pid_path = run_dir / "agent_shell.pid"
+        exit_path = run_dir / "agent_exit.json"
         run_quote = self._ps_quote(str(run_dir))
-        prompt_quote = self._ps_quote(str(prompt_path))
         pid_quote = self._ps_quote(str(pid_path))
+        exit_quote = self._ps_quote(str(exit_path))
         title = self._ps_quote(
             f"STTool {request.project_name} - "
             f"{self.provider_display_name(request.provider)}"
         )
+        bootstrap = self._ps_quote(prompt_file_bootstrap(prompt_path))
         if request.provider in {"codexx", "codex"}:
             command_name = request.provider
             options = " ".join(
@@ -567,22 +601,22 @@ class RuntimeManager:
             invocation = (
                 f"& {command_name} {options} resume --last"
                 if resume
-                else f"& {command_name} {options} $prompt"
+                else f"& {command_name} {options} $bootstrapPrompt"
             )
         else:
-            invocation = "& claude --continue" if resume else "& claude $prompt"
-        prompt_setup = (
-            ""
-            if resume
-            else f"$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath {prompt_quote}\n"
-        )
+            invocation = (
+                "& claude --continue" if resume else "& claude $bootstrapPrompt"
+            )
+        prompt_setup = "" if resume else f"$bootstrapPrompt = {bootstrap}\n"
         script = (
             "$ErrorActionPreference = 'Stop'\n"
             f"$agentPidPath = {pid_quote}\n"
+            f"$agentExitPath = {exit_quote}\n"
             "Set-Content -LiteralPath $agentPidPath -Value $PID -Encoding ascii\n"
             "$agentExitCode = 1\n"
+            "$agentError = ''\n"
             "try {\n"
-            "$utf8 = [System.Text.UTF8Encoding]::new()\n"
+            "$utf8 = [System.Text.UTF8Encoding]::new($false)\n"
             "[Console]::InputEncoding = $utf8\n"
             "[Console]::OutputEncoding = $utf8\n"
             "$OutputEncoding = $utf8\n"
@@ -590,11 +624,16 @@ class RuntimeManager:
             f"Set-Location -LiteralPath {run_quote}\n"
             f"{prompt_setup}"
             f"{invocation}\n"
-            "$agentExitCode = $LASTEXITCODE\n"
+            "$agentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }\n"
+            "} catch {\n"
+            "$agentError = ($_ | Out-String).Trim()\n"
+            "if ($null -ne $LASTEXITCODE) { $agentExitCode = [int]$LASTEXITCODE }\n"
             "} finally {\n"
+            "$exitState = @{ exit_code = $agentExitCode; completed_at = (Get-Date).ToString('o'); error = $agentError } | ConvertTo-Json -Compress\n"
+            "[System.IO.File]::WriteAllText($agentExitPath, $exitState, [System.Text.UTF8Encoding]::new($false))\n"
             "Remove-Item -LiteralPath $agentPidPath -Force -ErrorAction SilentlyContinue\n"
             "}\n"
-            "exit $agentExitCode\n"
+            "exit 0\n"
         )
         script_path.write_text(script, encoding="utf-8-sig")
         return script_path
@@ -619,7 +658,7 @@ class RuntimeManager:
         command = [
             terminal,
             "-w",
-            "new",
+            agent_terminal_window_name(self.app_dir),
             "new-tab",
             "--title",
             title,
@@ -936,6 +975,8 @@ class RuntimeManager:
                 str(request.wait_for_fscan).lower(),
                 "--ai-summary",
                 str(request.ai_summary_enabled).lower(),
+                "--terminal-window",
+                agent_terminal_window_name(self.app_dir),
             ],
             str(self.app_dir),
             False,
@@ -1379,10 +1420,11 @@ class RuntimeManager:
                 managed_pids.append(int(pid_path.read_text(encoding="ascii").strip()))
             except (OSError, UnicodeError, ValueError):
                 pass
+        managed_pids.extend(agent_shell_pids_for_run(run_dir))
         for pid in dict.fromkeys(managed_pids):
             if process_belongs_to_run(pid, run_dir):
-                append_activity(state.run_dir, f"正在停止 Agent 关联进程，PID {pid}。")
-                terminate_process_tree(pid)
+                append_activity(state.run_dir, f"正在停止 Agent 关联进程树，PID {pid}。")
+                terminate_agent_process_tree(pid)
             elif pid_alive(pid):
                 append_activity(
                     state.run_dir,

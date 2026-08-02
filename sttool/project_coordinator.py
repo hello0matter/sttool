@@ -1,17 +1,18 @@
 from __future__ import annotations
 
 import argparse
+import atexit
 import json
 import os
-import shutil
 import sqlite3
-import subprocess
 import time
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
 
 from .activity import append_activity
+from .agent_launcher import launch_agent_batch
+from .agent_runtime import claim_coordinator_owner, release_coordinator_owner
 from .asset_bus import (
     AssetBus,
     atomic_json_write,
@@ -24,15 +25,10 @@ from .asset_bus import (
 )
 from .models import ProcessRecord
 from .runtime import (
-    agent_cli_arguments,
     pid_alive,
     process_creation_token,
     process_record_alive,
 )
-
-
-CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
-CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 
 
 def file_marker(path: Path) -> tuple[int, int] | None:
@@ -65,9 +61,11 @@ def agent_launch_ready(
     batch_count: int,
     max_batches: int,
     auto_agent: bool = True,
+    retry_ready: bool = True,
 ) -> bool:
     return (
         auto_agent
+        and retry_ready
         and active_pid <= 0
         and generation > consumed_generation
         and asset_ready
@@ -88,11 +86,15 @@ def coordinator_wait_stage(
     batch_count: int,
     max_batches: int,
     auto_agent: bool = True,
+    retry_ready: bool = True,
+    retry_seconds: int = 0,
 ) -> tuple[str, str]:
     if active_pid > 0:
         return "agent_running", f"Agent PID {active_pid} 正在处理当前批次"
     if not auto_agent:
         return "manual_agent", "自动 Agent 已关闭；资产与摘要仍会持续更新"
+    if not retry_ready:
+        return "agent_backoff", f"Agent 启动失败，等待 {max(retry_seconds, 1)} 秒后自动重试"
     if not asset_ready:
         return "waiting_asset_commander", "等待 AssetCommander 完成资产收集与碰撞"
     if not fscan_ready:
@@ -106,20 +108,57 @@ def coordinator_wait_stage(
     return "ready_for_agent", "资产已稳定，准备启动下一个 Agent 批次"
 
 
-def mark_agent_batch_finished(run_dir: Path, batches: list[object], pid: int) -> None:
+def mark_agent_batch_finished(
+    run_dir: Path, batches: list[object], pid: int
+) -> dict[str, object] | None:
     completed_at = now_text()
     for item in reversed(batches):
         if not isinstance(item, dict) or int(item.get("pid") or 0) != pid:
             continue
-        item["status"] = "completed"
-        item["completed_at"] = completed_at
         batch_dir = Path(str(item.get("run_dir") or ""))
+        exit_state = read_json(batch_dir / "agent_exit.json")
+        has_exit_state = bool(exit_state)
+        try:
+            exit_code = int(exit_state.get("exit_code") or 0)
+        except (TypeError, ValueError):
+            exit_code = 1
+        status = "failed" if has_exit_state and exit_code != 0 else "completed"
+        item.update(status=status, completed_at=completed_at, exit_code=exit_code)
+        error = str(exit_state.get("error") or "").strip()
+        if error:
+            item["error"] = error
         metadata_path = batch_dir / "batch.json"
         metadata = read_json(metadata_path)
         if metadata:
-            metadata.update(status="completed", completed_at=completed_at)
+            metadata.update(
+                status=status,
+                completed_at=completed_at,
+                exit_code=exit_code,
+            )
+            if error:
+                metadata["error"] = error
             atomic_json_write(metadata_path, metadata)
-        break
+        return item
+    return None
+
+
+def schedule_agent_retry(state: dict[str, object], reason: str) -> int:
+    failure_count = int(state.get("agent_failure_count") or 0) + 1
+    delays = (60, 300, 900)
+    delay = delays[min(failure_count - 1, len(delays) - 1)]
+    state.update(
+        agent_failure_count=failure_count,
+        agent_retry_not_before=time.time() + delay,
+        agent_last_failure=reason,
+    )
+    return delay
+
+
+def clear_agent_retry(state: dict[str, object]) -> None:
+    state["agent_failure_count"] = 0
+    state["agent_retry_not_before"] = 0
+    state.pop("agent_last_failure", None)
+    state.pop("agent_launch_error", None)
 
 
 def component_process_alive(run_dir: Path, component_id: str) -> bool:
@@ -390,121 +429,6 @@ def ai_enhance_summary(summary: str) -> tuple[str, str]:
     return summary, f"项目 AI 摘要调用失败，保留本地摘要：{detail}"
 
 
-def powershell_quote(value: str) -> str:
-    return "'" + value.replace("'", "''") + "'"
-
-
-def write_agent_batch_script(
-    batch_dir: Path,
-    provider: str,
-    project_name: str,
-    agent_model: str = "",
-    reasoning_effort: str = "",
-) -> tuple[Path, Path]:
-    prompt_path = batch_dir / "prompt.txt"
-    script_path = batch_dir / "launch.ps1"
-    pid_path = batch_dir / "agent.pid"
-    if provider in {"codex", "codexx"}:
-        options = " ".join(
-            item if item in {"--yolo", "-m", "-c"} else powershell_quote(item)
-            for item in agent_cli_arguments(provider, agent_model, reasoning_effort)
-        )
-        invocation = f"& {provider} {options} $prompt"
-    else:
-        invocation = "& claude $prompt"
-    script = (
-        "$ErrorActionPreference = 'Stop'\n"
-        "$utf8 = [System.Text.UTF8Encoding]::new()\n"
-        "[Console]::InputEncoding = $utf8\n"
-        "[Console]::OutputEncoding = $utf8\n"
-        "$OutputEncoding = $utf8\n"
-        f"$Host.UI.RawUI.WindowTitle = {powershell_quote(f'STTool {project_name} - {provider} 增量批次')}\n"
-        f"Set-Content -LiteralPath {powershell_quote(str(pid_path))} -Value $PID -Encoding ascii\n"
-        "try {\n"
-        f"Set-Location -LiteralPath {powershell_quote(str(batch_dir.parents[1]))}\n"
-        f"$prompt = Get-Content -Raw -Encoding UTF8 -LiteralPath {powershell_quote(str(prompt_path))}\n"
-        f"{invocation}\n"
-        "} finally {\n"
-        f"Remove-Item -LiteralPath {powershell_quote(str(pid_path))} -Force -ErrorAction SilentlyContinue\n"
-        "}\n"
-    )
-    script_path.write_text(script, encoding="utf-8-sig")
-    return script_path, pid_path
-
-
-def launch_agent_batch(
-    run_dir: Path,
-    provider: str,
-    project_name: str,
-    batch_number: int,
-    prompt: str,
-    agent_model: str = "",
-    reasoning_effort: str = "",
-) -> tuple[int, Path]:
-    batch_dir = run_dir / "agent_batches" / f"{batch_number:04d}"
-    batch_dir.mkdir(parents=True, exist_ok=True)
-    (batch_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-    script, pid_path = write_agent_batch_script(
-        batch_dir, provider, project_name, agent_model, reasoning_effort
-    )
-    try:
-        pid_path.unlink()
-    except FileNotFoundError:
-        pass
-    shell = shutil.which("pwsh.exe") or "powershell.exe"
-    terminal = shutil.which("wt.exe")
-    if terminal:
-        command = [
-            terminal,
-            "-w",
-            "new",
-            "new-tab",
-            "--title",
-            f"STTool {project_name} - {provider} 批次 {batch_number}",
-            "--startingDirectory",
-            str(run_dir),
-            shell,
-            "-NoLogo",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-File",
-            str(script),
-        ]
-        launcher = subprocess.Popen(
-            command, cwd=run_dir, creationflags=CREATE_NEW_PROCESS_GROUP
-        )
-    else:
-        launcher = subprocess.Popen(
-            [shell, "-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)],
-            cwd=run_dir,
-            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE,
-        )
-    deadline = time.monotonic() + 12
-    while time.monotonic() < deadline:
-        try:
-            pid = int(pid_path.read_text(encoding="ascii").strip())
-        except (OSError, UnicodeError, ValueError):
-            pid = 0
-        if pid and pid_alive(pid):
-            metadata = {
-                "batch": batch_number,
-                "pid": pid,
-                "creation_token": process_creation_token(pid),
-                "provider": provider,
-                "agent_model": agent_model.strip(),
-                "reasoning_effort": reasoning_effort,
-                "started_at": now_text(),
-                "prompt": str(batch_dir / "prompt.txt"),
-                "script": str(script),
-            }
-            atomic_json_write(batch_dir / "batch.json", metadata)
-            return pid, batch_dir
-        if launcher.poll() is not None:
-            break
-        time.sleep(0.1)
-    raise RuntimeError("Agent 终端已启动，但未检测到批次 PowerShell 进程")
-
-
 def build_batch_prompt(
     run_dir: Path,
     base_prompt: str,
@@ -567,6 +491,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wait-asset-commander", type=parse_bool, default=True)
     parser.add_argument("--wait-fscan", type=parse_bool, default=True)
     parser.add_argument("--ai-summary", type=parse_bool, default=True)
+    parser.add_argument("--terminal-window", default="")
     return parser.parse_args()
 
 
@@ -585,6 +510,12 @@ def main() -> int:
     fscan_path = run_dir / "results" / "fscan.txt"
     semantic_state = run_dir / "tool_data" / "semantic" / "sttool_bridge_state.json"
     tscan_database = run_dir / "tool_data" / "tscan" / "app" / "config" / "config.db"
+    owner_path = state_path.parent / "owner.json"
+    owner = claim_coordinator_owner(owner_path, run_dir)
+    if owner is None:
+        append_activity(run_dir, "检测到同一运行实例已有项目协调器，本次重复启动已退出。")
+        return 0
+    atexit.register(release_coordinator_owner, owner_path, owner)
     bus = AssetBus(bus_path, args.scope)
     state = read_json(state_path)
     state.setdefault("schema_version", 1)
@@ -594,6 +525,8 @@ def main() -> int:
     state.setdefault("agent_consumed_generation", 0)
     state.setdefault("active_agent_pid", 0)
     state.setdefault("active_agent_creation_token", 0)
+    state["agent_failure_count"] = 0
+    state["agent_retry_not_before"] = 0
     state.update(
         status="running",
         stage="collecting_assets",
@@ -694,14 +627,28 @@ def main() -> int:
         if active_pid and not tracked_process_alive(
             active_pid, active_creation_token, run_dir
         ):
-            append_activity(
-                run_dir,
-                f"Agent 批次 PID {active_pid} 已结束，协调器将记录完成状态并等待新资产。",
-            )
-            mark_agent_batch_finished(run_dir, batches, active_pid)
+            finished_pid = active_pid
+            finished = mark_agent_batch_finished(run_dir, batches, finished_pid)
             state["active_agent_pid"] = 0
             state["active_agent_creation_token"] = 0
             active_pid = 0
+            if finished and finished.get("status") == "failed":
+                exit_code = int(finished.get("exit_code") or 1)
+                delay = schedule_agent_retry(state, f"Agent 退出码 {exit_code}")
+                append_activity(
+                    run_dir,
+                    f"Agent 批次 PID {finished_pid} 启动或运行失败（退出码 {exit_code}），{delay} 秒后重试当前资产。",
+                )
+            else:
+                generation_to = int((finished or {}).get("generation_to") or 0)
+                state["agent_consumed_generation"] = max(
+                    int(state.get("agent_consumed_generation") or 0), generation_to
+                )
+                clear_agent_retry(state)
+                append_activity(
+                    run_dir,
+                    f"Agent 批次 PID {finished_pid} 已结束并记录完成，等待新资产。",
+                )
 
         tools = selected_tools(run_dir)
         asset_ready = (
@@ -716,6 +663,9 @@ def main() -> int:
         )
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
         consumed = int(state.get("agent_consumed_generation") or 0)
+        retry_not_before = float(state.get("agent_retry_not_before") or 0)
+        retry_seconds = max(int(retry_not_before - time.time()), 0)
+        retry_ready = retry_seconds <= 0
         should_launch = agent_launch_ready(
             active_pid=active_pid,
             generation=bus.generation,
@@ -726,6 +676,7 @@ def main() -> int:
             batch_count=len(batches),
             max_batches=args.max_agent_batches,
             auto_agent=args.auto_agent,
+            retry_ready=retry_ready,
         )
         if should_launch:
             summary = render_risk_summary(
@@ -757,10 +708,16 @@ def main() -> int:
                     prompt,
                     args.agent_model,
                     args.reasoning_effort,
+                    args.terminal_window,
                 )
             except Exception as exc:
-                state["agent_launch_error"] = f"{type(exc).__name__}: {exc}"
-                append_activity(run_dir, f"Agent 批次 {batch_number} 启动失败：{exc}")
+                error = f"{type(exc).__name__}: {exc}"
+                state["agent_launch_error"] = error
+                delay = schedule_agent_retry(state, error)
+                append_activity(
+                    run_dir,
+                    f"Agent 批次 {batch_number} 启动失败：{exc}；{delay} 秒后重试。",
+                )
             else:
                 batch = {
                     "batch": batch_number,
@@ -774,7 +731,7 @@ def main() -> int:
                 batches.append(batch)
                 state["active_agent_pid"] = pid
                 state["active_agent_creation_token"] = process_creation_token(pid)
-                state["agent_consumed_generation"] = bus.generation
+                state["active_agent_generation"] = bus.generation
                 state["stage"] = "agent_running"
                 state.pop("agent_launch_error", None)
                 append_activity(
@@ -782,6 +739,9 @@ def main() -> int:
                     f"资产已稳定，启动 Agent 批次 {batch_number}，消费资产代次 {consumed + 1}-{bus.generation}。",
                 )
 
+        retry_not_before = float(state.get("agent_retry_not_before") or 0)
+        retry_seconds = max(int(retry_not_before - time.time()), 0)
+        retry_ready = retry_seconds <= 0
         stage, stage_detail = coordinator_wait_stage(
             active_pid=int(state.get("active_agent_pid") or 0),
             generation=bus.generation,
@@ -792,6 +752,8 @@ def main() -> int:
             batch_count=len(batches),
             max_batches=args.max_agent_batches,
             auto_agent=args.auto_agent,
+            retry_ready=retry_ready,
+            retry_seconds=retry_seconds,
         )
         state.update(
             status="running",
