@@ -95,7 +95,11 @@ def reconcile_component_state(
             value["status"] = process_status
             current_step = str(value.get("current_step") or "")
             steps = value.get("steps")
-            if current_step and isinstance(steps, dict):
+            if (
+                process_status in {"interrupted", "stopped"}
+                and current_step
+                and isinstance(steps, dict)
+            ):
                 step = steps.get(current_step)
                 if isinstance(step, dict) and step.get("status") == "running":
                     step.update(
@@ -901,6 +905,14 @@ class RuntimeManager:
                 dead = [item.name for item in started if not pid_alive(item.pid)]
                 if dead:
                     raise LaunchError(f"组件启动后立即退出: {', '.join(dead)}")
+                for item in started:
+                    if item.component_id == "asset_commander":
+                        reconcile_component_state(
+                            run_dir,
+                            item.component_id,
+                            "running",
+                            f"组件进程 PID {item.pid} 正在运行",
+                        )
             except Exception as exc:
                 append_activity(run_dir, f"启动失败，正在回滚已启动组件：{exc}")
                 for item in reversed(started):
@@ -1012,6 +1024,14 @@ class RuntimeManager:
                 dead = [item.name for item in started if not pid_alive(item.pid)]
                 if dead:
                     raise LaunchError(f"恢复组件启动后立即退出: {', '.join(dead)}")
+                for item in started:
+                    if item.component_id == "asset_commander":
+                        reconcile_component_state(
+                            run_dir,
+                            item.component_id,
+                            "running",
+                            f"组件进程 PID {item.pid} 正在运行",
+                        )
             except Exception as exc:
                 append_activity(run_dir, f"恢复失败：{exc}")
                 for item in reversed(started):

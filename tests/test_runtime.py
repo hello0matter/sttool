@@ -86,6 +86,37 @@ class OfflineRuntimeManager(RuntimeManager):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_reconcile_asset_commander_running_preserves_active_step(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            workflow_path = (
+                run_dir / "tool_data" / "asset_commander" / "workflow_state.json"
+            )
+            workflow_path.parent.mkdir(parents=True)
+            workflow_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "current_step": "collision",
+                        "steps": {"collision": {"status": "running", "detail": "active"}},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            reconcile_component_state(
+                run_dir,
+                "asset_commander",
+                "running",
+                "component process is running",
+            )
+
+            workflow = json.loads(workflow_path.read_text(encoding="utf-8"))
+            self.assertEqual(workflow["status"], "running")
+            self.assertEqual(workflow["process_status"], "running")
+            self.assertEqual(workflow["steps"]["collision"]["status"], "running")
+            self.assertEqual(workflow["steps"]["collision"]["detail"], "active")
+
     def test_reconcile_asset_commander_marks_stale_scan_interrupted(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
