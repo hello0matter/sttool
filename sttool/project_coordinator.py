@@ -22,20 +22,12 @@ from .asset_bus import (
     read_json,
     target_assets,
 )
+from .models import ProcessRecord
+from .runtime import pid_alive, process_creation_token, process_record_alive
 
 
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-
-
-def pid_alive(pid: int) -> bool:
-    if pid <= 0:
-        return False
-    try:
-        os.kill(pid, 0)
-    except OSError:
-        return False
-    return True
 
 
 def file_marker(path: Path) -> tuple[int, int] | None:
@@ -122,15 +114,36 @@ def mark_agent_batch_finished(
         break
 
 
-def process_for_component(run_dir: Path, component_id: str) -> int:
+def component_process_alive(run_dir: Path, component_id: str) -> bool:
     value = read_json(run_dir / "run.json")
     processes = value.get("processes", [])
     if not isinstance(processes, list):
-        return 0
+        return False
     for item in reversed(processes):
-        if isinstance(item, dict) and item.get("component_id") == component_id:
-            return int(item.get("pid") or 0)
-    return 0
+        if not isinstance(item, dict) or item.get("component_id") != component_id:
+            continue
+        try:
+            record = ProcessRecord.from_dict(item)
+        except (TypeError, ValueError):
+            return False
+        return process_record_alive(record, run_dir)
+    return False
+
+
+def tracked_process_alive(pid: int, creation_token: int, run_dir: Path) -> bool:
+    if not pid_alive(pid):
+        return False
+    if creation_token:
+        return process_creation_token(pid) == creation_token
+    legacy = ProcessRecord(
+        component_id="agent_batch",
+        name="Agent batch",
+        pid=pid,
+        command=[],
+        cwd=str(run_dir),
+        started_at="",
+    )
+    return process_record_alive(legacy, run_dir)
 
 
 def semantic_assets(path: Path) -> list[tuple[str, str]]:
@@ -425,6 +438,7 @@ def launch_agent_batch(
             metadata = {
                 "batch": batch_number,
                 "pid": pid,
+                "creation_token": process_creation_token(pid),
                 "provider": provider,
                 "started_at": now_text(),
                 "prompt": str(batch_dir / "prompt.txt"),
@@ -479,6 +493,10 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def tscan_source_ready(database: Path) -> bool:
+    return database.is_file() and (database.parents[1] / ".sttool_initialized").is_file()
+
+
 def main() -> int:
     args = parse_args()
     run_dir = args.run_dir.resolve()
@@ -496,6 +514,7 @@ def main() -> int:
     state.setdefault("agent_batches", [])
     state.setdefault("agent_consumed_generation", 0)
     state.setdefault("active_agent_pid", 0)
+    state.setdefault("active_agent_creation_token", 0)
     state.update(status="running", stage="collecting_assets", updated_at=now_text())
     bus.ingest(target_assets(args.target), "project_target")
     atomic_json_write(state_path, state)
@@ -517,6 +536,10 @@ def main() -> int:
             markers = {}
             state["source_markers"] = markers
         for source, path in sources.items():
+            if source == "tscan" and not tscan_source_ready(path):
+                state["tscan_waiting_for_workspace"] = True
+                continue
+            state.pop("tscan_waiting_for_workspace", None)
             marker = file_marker(path)
             rendered_marker = list(marker) if marker else None
             if markers.get(source) == rendered_marker:
@@ -553,20 +576,28 @@ def main() -> int:
             state["summary_status"] = "已刷新本地阶段性风险摘要"
 
         active_pid = int(state.get("active_agent_pid") or 0)
+        active_creation_token = int(state.get("active_agent_creation_token") or 0)
         batches = state.get("agent_batches")
         if not isinstance(batches, list):
             batches = []
             state["agent_batches"] = batches
-        if active_pid and not pid_alive(active_pid):
-            append_activity(run_dir, f"Agent 批次进程 PID {active_pid} 已结束。")
+        if active_pid and not tracked_process_alive(
+            active_pid, active_creation_token, run_dir
+        ):
+            append_activity(
+                run_dir,
+                f"Agent ?? PID {active_pid} ?????????????",
+            )
             mark_agent_batch_finished(run_dir, batches, active_pid)
             state["active_agent_pid"] = 0
+            state["active_agent_creation_token"] = 0
             active_pid = 0
 
         tools = selected_tools(run_dir)
         asset_ready = "asset_commander" not in tools or asset_commander_ready(run_dir)
-        fscan_pid = process_for_component(run_dir, "fscan")
-        fscan_ready = "fscan" not in tools or (fscan_path.is_file() and not pid_alive(fscan_pid))
+        fscan_ready = "fscan" not in tools or (
+            fscan_path.is_file() and not component_process_alive(run_dir, "fscan")
+        )
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
         consumed = int(state.get("agent_consumed_generation") or 0)
         should_launch = agent_launch_ready(
@@ -615,6 +646,7 @@ def main() -> int:
                 }
                 batches.append(batch)
                 state["active_agent_pid"] = pid
+                state["active_agent_creation_token"] = process_creation_token(pid)
                 state["agent_consumed_generation"] = bus.generation
                 state["stage"] = "agent_running"
                 state.pop("agent_launch_error", None)

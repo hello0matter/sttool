@@ -11,6 +11,8 @@ import sys
 import tempfile
 import threading
 import time
+
+import psutil
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
@@ -181,6 +183,53 @@ def pid_alive(pid: int) -> bool:
         return True
     except (OSError, ProcessLookupError):
         return False
+
+
+def process_creation_token(pid: int) -> int:
+    if pid <= 0:
+        return 0
+    try:
+        return int(psutil.Process(pid).create_time() * 1_000_000)
+    except (psutil.Error, OSError, ValueError):
+        return 0
+
+
+def _normalized_process_text(value: object) -> str:
+    return str(value or "").replace("/", "\\").rstrip("\\").casefold()
+
+
+def process_belongs_to_run(pid: int, run_dir: str | Path) -> bool:
+    if not pid_alive(pid):
+        return False
+    marker = _normalized_process_text(Path(run_dir).resolve())
+    if not marker:
+        return False
+    try:
+        process = psutil.Process(pid)
+        details = [process.exe(), process.cwd(), *process.cmdline()]
+    except (psutil.Error, OSError, ValueError):
+        return False
+    return marker in _normalized_process_text(" ".join(details))
+
+
+def process_record_alive(
+    process: ProcessRecord,
+    run_dir: str | Path | None = None,
+) -> bool:
+    if not pid_alive(process.pid):
+        return False
+    actual_token = process_creation_token(process.pid)
+    if process.creation_token:
+        return bool(actual_token and actual_token == process.creation_token)
+
+    # Legacy run.json files did not persist a process creation token. Only migrate
+    # them when the live process can be proven to belong to this run. A bare PID
+    # match is never sufficient because Windows can reuse PIDs across projects.
+    expected_run_dir = Path(run_dir or process.cwd).resolve()
+    if not process_belongs_to_run(process.pid, expected_run_dir):
+        return False
+    process.creation_token = actual_token
+    return bool(actual_token)
 
 
 def terminate_process_tree(pid: int) -> None:
@@ -560,6 +609,7 @@ class RuntimeManager:
                     command=command,
                     cwd=str(run_dir),
                     started_at=now_text(),
+                    creation_token=process_creation_token(shell_pid),
                 )
             time.sleep(0.1)
         if launcher.poll() is None:
@@ -591,6 +641,7 @@ class RuntimeManager:
             command=[executable, *args],
             cwd=cwd,
             started_at=now_text(),
+            creation_token=process_creation_token(process.pid),
         )
 
     def _run_context(
@@ -724,12 +775,12 @@ class RuntimeManager:
             try:
                 record = self._launch_tool(tool, context)
                 state.process = record
-                state.status = "running" if pid_alive(record.pid) else "completed"
+                state.status = "running" if process_record_alive(record, run_dir) else "completed"
                 state.updated_at = now_text()
                 atomic_json_write(state_path, state.to_dict())
                 append_activity(run_dir, f"工具已启动，PID {record.pid}。")
             except Exception as exc:
-                if record is not None and pid_alive(record.pid):
+                if record is not None and process_record_alive(record, run_dir):
                     terminate_process_tree(record.pid)
                 state.process = record
                 state.status = "failed"
@@ -745,7 +796,11 @@ class RuntimeManager:
     def refresh_standalone(self, state: StandaloneRunState) -> StandaloneRunState:
         if state.status in {"failed", "stopped"} or state.process is None:
             return state
-        next_status = "running" if pid_alive(state.process.pid) else "completed"
+        next_status = (
+            "running"
+            if process_record_alive(state.process, state.run_dir)
+            else "completed"
+        )
         if next_status == state.status:
             return state
         previous = state.status
@@ -956,7 +1011,11 @@ class RuntimeManager:
                 state.processes = started
                 atomic_json_write(state_path, state.to_dict())
                 time.sleep(0.8)
-                dead = [item.name for item in started if not pid_alive(item.pid)]
+                dead = [
+                    item.name
+                    for item in started
+                    if not process_record_alive(item, run_dir)
+                ]
                 if dead:
                     raise LaunchError(f"组件启动后立即退出: {', '.join(dead)}")
                 for item in started:
@@ -1040,7 +1099,7 @@ class RuntimeManager:
             active_components = {
                 process.component_id
                 for process in state.processes
-                if pid_alive(process.pid)
+                if process_record_alive(process, run_dir)
             }
             recoverable = [
                 tool
@@ -1072,7 +1131,11 @@ class RuntimeManager:
                         f"项目增量调度器已恢复，PID {record.pid}；将按断点继续资产与 Agent 批次。",
                     )
                 time.sleep(0.8)
-                dead = [item.name for item in started if not pid_alive(item.pid)]
+                dead = [
+                    item.name
+                    for item in started
+                    if not process_record_alive(item, run_dir)
+                ]
                 if dead:
                     raise LaunchError(f"恢复组件启动后立即退出: {', '.join(dead)}")
                 for item in started:
@@ -1127,7 +1190,7 @@ class RuntimeManager:
             if process.status == "stopped":
                 continue
             previous_status = process.status
-            if pid_alive(process.pid):
+            if process_record_alive(process, state.run_dir):
                 process.status = "running"
                 running += 1
             else:
@@ -1172,16 +1235,26 @@ class RuntimeManager:
             except (OSError, UnicodeError, ValueError):
                 pass
         for pid in dict.fromkeys(managed_pids):
-            if pid_alive(pid):
-                append_activity(state.run_dir, f"正在停止 Agent 批次进程，PID {pid}。")
+            if process_belongs_to_run(pid, run_dir):
+                append_activity(state.run_dir, f"???? Agent ?????PID {pid}?")
                 terminate_process_tree(pid)
-        for process in reversed(state.processes):
-            if pid_alive(process.pid):
+            elif pid_alive(pid):
                 append_activity(
                     state.run_dir,
-                    f"正在停止组件：{process.name}，PID {process.pid}。",
+                    f"?? PID {pid}?????????????????????",
+                )
+        for process in reversed(state.processes):
+            if process_record_alive(process, run_dir):
+                append_activity(
+                    state.run_dir,
+                    f"???????{process.name}?PID {process.pid}?",
                 )
                 terminate_process_tree(process.pid)
+            elif pid_alive(process.pid):
+                append_activity(
+                    state.run_dir,
+                    f"???? {process.name} ? PID {process.pid}?PID ?????????",
+                )
             process.status = "stopped"
             reconcile_component_state(
                 state.run_dir,

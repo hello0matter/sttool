@@ -61,6 +61,7 @@ class ProcessRecord:
     started_at: str
     status: str = "running"
     exit_code: int | None = None
+    creation_token: int = 0
 
     @classmethod
     def from_dict(cls, value: dict[str, Any]) -> "ProcessRecord":

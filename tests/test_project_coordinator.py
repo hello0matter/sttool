@@ -1,23 +1,66 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sttool.asset_bus import AssetBus, parse_fscan_output
+from sttool.models import ProcessRecord
+from sttool.runtime import now_text, process_creation_token
 from sttool.project_coordinator import (
     agent_launch_ready,
     asset_commander_ready,
     build_batch_prompt,
+    component_process_alive,
     coordinator_wait_stage,
     mark_agent_batch_finished,
     render_risk_summary,
     response_text,
+    tracked_process_alive,
+    tscan_source_ready,
 )
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_agent_pid_token_rejects_pid_reused_by_another_process(self) -> None:
+        token = process_creation_token(os.getpid())
+        self.assertTrue(tracked_process_alive(os.getpid(), token, Path.cwd()))
+        self.assertFalse(
+            tracked_process_alive(os.getpid(), token + 1, Path.cwd())
+        )
+
+    def test_component_process_alive_rejects_foreign_pid_token(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            record = ProcessRecord(
+                component_id="fscan",
+                name="fscan",
+                pid=os.getpid(),
+                command=["fscan.exe"],
+                cwd=str(run_dir),
+                started_at=now_text(),
+                creation_token=process_creation_token(os.getpid()) + 1,
+            )
+            (run_dir / "run.json").write_text(
+                json.dumps({"processes": [record.__dict__]}), encoding="utf-8"
+            )
+
+            self.assertFalse(component_process_alive(run_dir, "fscan"))
+
+    def test_tscan_source_waits_for_sanitized_workspace_marker(self) -> None:
+        with TemporaryDirectory() as temporary:
+            database = Path(temporary) / "app" / "config" / "config.db"
+            database.parent.mkdir(parents=True)
+            database.write_bytes(b"historical database")
+
+            self.assertFalse(tscan_source_ready(database))
+            (database.parents[1] / ".sttool_initialized").write_text(
+                "ready\n", encoding="utf-8"
+            )
+            self.assertTrue(tscan_source_ready(database))
+
     def test_agent_waits_for_asset_commander_fscan_and_quiet_window(self) -> None:
         base = {
             "active_pid": 0,

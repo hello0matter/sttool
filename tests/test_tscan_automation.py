@@ -143,6 +143,8 @@ class TscanAutomationTests(unittest.TestCase):
             )
             connection.execute("create table subdomain (SubDomain text)")
             connection.execute("insert into subdomain values ('old.example.com')")
+            connection.execute("create table info (Project text, Tab text)")
+            connection.execute("insert into info values ('Default', 'book.szbayy.com:3143')")
             connection.commit()
             connection.close()
             state_path = root / "run" / "tool_data" / "tscan" / "state.json"
@@ -157,9 +159,11 @@ class TscanAutomationTests(unittest.TestCase):
                 "select SubDomainTarget, Status, AssertNum from project"
             ).fetchone()
             rows = connection.execute("select count(*) from subdomain").fetchone()[0]
+            info_rows = connection.execute("select count(*) from info").fetchone()[0]
             connection.close()
             self.assertEqual(project, ("", "", 0))
             self.assertEqual(rows, 0)
+            self.assertEqual(info_rows, 0)
             source_connection = sqlite3.connect(database)
             source_project = source_connection.execute(
                 "select SubDomainTarget, Status, AssertNum from project"

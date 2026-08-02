@@ -16,6 +16,8 @@ from sttool.runtime import (
     atomic_json_write,
     now_text,
     pid_alive,
+    process_creation_token,
+    process_record_alive,
     reconcile_component_state,
     safe_project_name,
     target_values,
@@ -60,6 +62,7 @@ class OfflineRuntimeManager(RuntimeManager):
             command=[sys.executable, "-c", "import time; time.sleep(30)"],
             cwd=cwd,
             started_at=now_text(),
+            creation_token=process_creation_token(process.pid),
         )
 
     def _launch_agent_in_windows_terminal(
@@ -86,6 +89,81 @@ class OfflineRuntimeManager(RuntimeManager):
 
 
 class RuntimeTests(unittest.TestCase):
+    def test_process_record_rejects_reused_pid_creation_token(self) -> None:
+        token = process_creation_token(os.getpid())
+        self.assertGreater(token, 0)
+        record = ProcessRecord(
+            component_id="foreign",
+            name="Foreign process",
+            pid=os.getpid(),
+            command=[sys.executable],
+            cwd=str(Path.cwd()),
+            started_at=now_text(),
+            creation_token=token + 1,
+        )
+
+        self.assertFalse(process_record_alive(record, Path.cwd()))
+
+    def test_legacy_process_record_is_migrated_only_when_run_matches(self) -> None:
+        record = ProcessRecord(
+            component_id="legacy",
+            name="Legacy process",
+            pid=os.getpid(),
+            command=[sys.executable],
+            cwd=str(Path.cwd()),
+            started_at=now_text(),
+        )
+
+        self.assertTrue(process_record_alive(record, Path.cwd()))
+        self.assertEqual(record.creation_token, process_creation_token(os.getpid()))
+        with TemporaryDirectory() as temporary:
+            foreign = ProcessRecord(
+                component_id="foreign",
+                name="Foreign process",
+                pid=os.getpid(),
+                command=[sys.executable],
+                cwd=temporary,
+                started_at=now_text(),
+            )
+            self.assertFalse(process_record_alive(foreign, temporary))
+            self.assertEqual(foreign.creation_token, 0)
+
+    def test_stop_does_not_terminate_pid_owned_by_another_run(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            record = ProcessRecord(
+                component_id="foreign",
+                name="Foreign process",
+                pid=os.getpid(),
+                command=[sys.executable],
+                cwd=str(run_dir),
+                started_at=now_text(),
+                creation_token=process_creation_token(os.getpid()) + 1,
+            )
+            state = RunState(
+                run_id="run",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[record],
+            )
+            manager = RuntimeManager(run_dir, [], st_root=run_dir)
+
+            with patch("sttool.runtime.terminate_process_tree") as terminate:
+                manager.stop(state)
+
+            terminate.assert_not_called()
+            self.assertEqual(state.processes[0].status, "stopped")
+            activity = (run_dir / "activity.log").read_text(encoding="utf-8")
+            self.assertIn("PID ????????", activity)
+
     def test_reconcile_asset_commander_running_preserves_active_step(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -791,6 +869,60 @@ class RuntimeTests(unittest.TestCase):
                     Path(state.run_dir) / "tool_data" / "coordinator" / "state.json"
                 )
                 self.assertFalse(coordinator_state.exists())
+            finally:
+                manager.cleanup()
+
+    def test_recover_restarts_component_when_pid_belongs_to_other_process(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "projects" / "demo" / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            tool = ToolDefinition(
+                tool_id="persistent",
+                name="Persistent",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                cwd="{run_dir}/persistent",
+                restart_on_recovery=True,
+            )
+            manager = OfflineRuntimeManager(root, [tool], st_root=root)
+            foreign = ProcessRecord(
+                component_id="persistent",
+                name="Persistent",
+                pid=os.getpid(),
+                command=[sys.executable],
+                cwd=str(run_dir),
+                started_at=now_text(),
+                creation_token=process_creation_token(os.getpid()) + 1,
+            )
+            state = RunState(
+                run_id="run-1",
+                project_name="demo",
+                target="https://example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=["persistent"],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[foreign],
+            )
+
+            recovered = manager.recover(state, authorization_confirmed=True)
+            try:
+                persistent = next(
+                    item
+                    for item in recovered.processes
+                    if item.component_id == "persistent"
+                )
+                self.assertNotEqual(persistent.pid, os.getpid())
+                self.assertTrue(process_record_alive(persistent, run_dir))
+                self.assertIn(
+                    "persistent", recovered.recovery_history[-1]["components"]
+                )
             finally:
                 manager.cleanup()
 

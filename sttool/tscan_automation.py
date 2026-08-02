@@ -43,6 +43,7 @@ _TSCAN_RUNTIME_TABLES = {
     "dirscan",
     "hostcrack",
     "icpinfo",
+    "info",
     "ipscan",
     "jsfinder",
     "nessus",
