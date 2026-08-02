@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any
 
+from .workflow_settings import (
+    DEFAULT_WORK_MODE,
+    normalize_workflow_settings,
+    normalized_reasoning_effort,
+)
+
 
 DEFAULT_API_BASE_URL = "https://api.1314mc.net/v1"
 
@@ -49,6 +55,16 @@ class LaunchRequest:
     authorization_confirmed: bool
     api_base_url: str = DEFAULT_API_BASE_URL
     api_key: str = field(default="", repr=False, compare=False)
+    agent_model: str = ""
+    reasoning_effort: str = ""
+    work_mode: str = DEFAULT_WORK_MODE
+    auto_agent: bool = True
+    wait_for_asset_commander: bool = True
+    wait_for_fscan: bool = True
+    asset_settle_seconds: int = 20
+    max_agent_batches: int = 8
+    coordinator_poll_seconds: int = 2
+    ai_summary_enabled: bool = True
 
 
 @dataclass
@@ -107,10 +123,20 @@ class RunState:
     recovery_history: list[dict[str, Any]] = field(default_factory=list)
     error: str = ""
     api_base_url: str = DEFAULT_API_BASE_URL
+    agent_model: str = ""
+    reasoning_effort: str = ""
+    work_mode: str = DEFAULT_WORK_MODE
+    auto_agent: bool = True
+    wait_for_asset_commander: bool = True
+    wait_for_fscan: bool = True
+    asset_settle_seconds: int = 20
+    max_agent_batches: int = 8
+    coordinator_poll_seconds: int = 2
+    ai_summary_enabled: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        value["schema_version"] = 2
+        value["schema_version"] = 3
         return value
 
     @classmethod
@@ -121,9 +147,11 @@ class RunState:
             for key, item in value.items()
             if key in cls.__dataclass_fields__ and key != "processes"
         }
-        fields["provider"] = normalize_provider(
-            fields.get("provider"), schema_version
+        fields["provider"] = normalize_provider(fields.get("provider"), schema_version)
+        fields["reasoning_effort"] = normalized_reasoning_effort(
+            fields.get("reasoning_effort")
         )
+        fields.update(normalize_workflow_settings(fields))
         fields["processes"] = [
             ProcessRecord.from_dict(item) for item in value.get("processes", [])
         ]

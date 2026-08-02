@@ -29,6 +29,7 @@ from .models import (
     normalize_provider,
 )
 from .registry import DEFAULT_ST_ROOT, availability
+from .workflow_settings import normalized_reasoning_effort
 
 
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
@@ -40,13 +41,30 @@ class LaunchError(RuntimeError):
     pass
 
 
+def agent_cli_arguments(
+    provider: str, agent_model: str = "", reasoning_effort: str = ""
+) -> list[str]:
+    if provider not in {"codex", "codexx"}:
+        return []
+    arguments = ["--yolo"]
+    model = agent_model.strip()
+    if model:
+        arguments.extend(("-m", model))
+    effort = normalized_reasoning_effort(reasoning_effort)
+    if effort:
+        arguments.extend(("-c", f'model_reasoning_effort="{effort}"'))
+    return arguments
+
+
 def now_text() -> str:
     return datetime.now().astimezone().isoformat(timespec="seconds")
 
 
 def atomic_json_write(path: Path, value: object) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(value, handle, ensure_ascii=False, indent=2)
@@ -173,7 +191,9 @@ def pid_alive(pid: int) -> bool:
             return False
         try:
             code = ctypes.c_ulong()
-            if not ctypes.windll.kernel32.GetExitCodeProcess(process, ctypes.byref(code)):
+            if not ctypes.windll.kernel32.GetExitCodeProcess(
+                process, ctypes.byref(code)
+            ):
                 return False
             return code.value == 259
         finally:
@@ -287,7 +307,9 @@ class RuntimeManager:
             return True, "已安装；登录状态检测中"
 
         health_action = "auth" if provider == "claude" else "login"
-        command = f"& {command_name} {health_action} status *> $null; exit $LASTEXITCODE"
+        command = (
+            f"& {command_name} {health_action} status *> $null; exit $LASTEXITCODE"
+        )
         try:
             try:
                 result = subprocess.run(
@@ -328,7 +350,19 @@ class RuntimeManager:
             or parsed_api_url.username is not None
             or parsed_api_url.password is not None
         ):
-            raise LaunchError("AI API URL 必须是有效的 HTTP/HTTPS 地址，且不能包含账号密码")
+            raise LaunchError(
+                "AI API URL 必须是有效的 HTTP/HTTPS 地址，且不能包含账号密码"
+            )
+        if request.reasoning_effort != normalized_reasoning_effort(
+            request.reasoning_effort
+        ):
+            raise LaunchError("推理强度必须为 CLI 默认、low、medium、high 或 xhigh")
+        if not 1 <= request.asset_settle_seconds <= 600:
+            raise LaunchError("资产稳定等待必须在 1-600 秒之间")
+        if not 1 <= request.max_agent_batches <= 100:
+            raise LaunchError("Agent 批次数必须在 1-100 之间")
+        if not 1 <= request.coordinator_poll_seconds <= 60:
+            raise LaunchError("协调器刷新间隔必须在 1-60 秒之间")
 
         selected: list[ToolDefinition] = []
         for tool_id in request.selected_tools:
@@ -432,7 +466,9 @@ class RuntimeManager:
                 for environment_name, json_key in secret_sources[source_path]:
                     secret = str(value.get(json_key, ""))
                     if os.environ.get(environment_name) or secret:
-                        environment[environment_name] = os.environ.get(environment_name) or secret
+                        environment[environment_name] = (
+                            os.environ.get(environment_name) or secret
+                        )
                     value[json_key] = ""
                 if not (preserve_existing and destination_path.exists()):
                     atomic_json_write(destination_path, value)
@@ -454,8 +490,9 @@ class RuntimeManager:
                 shutil.copy2(source_path, destination_path)
         return environment
 
-
-    def _build_prompt(self, request: LaunchRequest, run_dir: Path, selected: list[ToolDefinition]) -> str:
+    def _build_prompt(
+        self, request: LaunchRequest, run_dir: Path, selected: list[ToolDefinition]
+    ) -> str:
         tool_lines = (
             "\n".join(f"- {tool.name}: {tool.description}" for tool in selected)
             or "- 未选择额外 GUI 工具"
@@ -521,10 +558,16 @@ class RuntimeManager:
         )
         if request.provider in {"codexx", "codex"}:
             command_name = request.provider
+            options = " ".join(
+                item if item in {"--yolo", "-m", "-c"} else self._ps_quote(item)
+                for item in agent_cli_arguments(
+                    request.provider, request.agent_model, request.reasoning_effort
+                )
+            )
             invocation = (
-                f"& {command_name} --yolo resume --last"
+                f"& {command_name} {options} resume --last"
                 if resume
-                else f"& {command_name} --yolo $prompt"
+                else f"& {command_name} {options} $prompt"
             )
         else:
             invocation = "& claude --continue" if resume else "& claude $prompt"
@@ -775,7 +818,9 @@ class RuntimeManager:
             try:
                 record = self._launch_tool(tool, context)
                 state.process = record
-                state.status = "running" if process_record_alive(record, run_dir) else "completed"
+                state.status = (
+                    "running" if process_record_alive(record, run_dir) else "completed"
+                )
                 state.updated_at = now_text()
                 atomic_json_write(state_path, state.to_dict())
                 append_activity(run_dir, f"工具已启动，PID {record.pid}。")
@@ -808,7 +853,9 @@ class RuntimeManager:
         state.process.status = "running" if next_status == "running" else "exited"
         state.updated_at = now_text()
         atomic_json_write(Path(state.run_dir) / "standalone.json", state.to_dict())
-        append_activity(state.run_dir, f"单独执行状态变化：{previous} -> {next_status}。")
+        append_activity(
+            state.run_dir, f"单独执行状态变化：{previous} -> {next_status}。"
+        )
         return state
 
     def _launch_agent(
@@ -871,6 +918,24 @@ class RuntimeManager:
                 request.project_name.strip(),
                 "--provider",
                 request.provider,
+                "--agent-model",
+                request.agent_model.strip(),
+                "--reasoning-effort",
+                request.reasoning_effort,
+                "--settle-seconds",
+                str(request.asset_settle_seconds),
+                "--max-agent-batches",
+                str(request.max_agent_batches),
+                "--poll-seconds",
+                str(request.coordinator_poll_seconds),
+                "--auto-agent",
+                str(request.auto_agent).lower(),
+                "--wait-asset-commander",
+                str(request.wait_for_asset_commander).lower(),
+                "--wait-fscan",
+                str(request.wait_for_fscan).lower(),
+                "--ai-summary",
+                str(request.ai_summary_enabled).lower(),
             ],
             str(self.app_dir),
             False,
@@ -902,7 +967,9 @@ class RuntimeManager:
         requested_tools = [
             str(item) for item in value.get("selected_tools", state.selected_tools)
         ]
-        skipped_tools = [tool_id for tool_id in requested_tools if tool_id not in self.tools]
+        skipped_tools = [
+            tool_id for tool_id in requested_tools if tool_id not in self.tools
+        ]
         selected_tools = tuple(
             tool_id for tool_id in requested_tools if tool_id in self.tools
         )
@@ -924,6 +991,32 @@ class RuntimeManager:
                 authorization_confirmed=authorization_confirmed,
                 api_base_url=str(value.get("api_base_url", state.api_base_url)),
                 api_key=api_key,
+                agent_model=str(value.get("agent_model", state.agent_model)),
+                reasoning_effort=normalized_reasoning_effort(
+                    value.get("reasoning_effort", state.reasoning_effort)
+                ),
+                work_mode=str(value.get("work_mode", state.work_mode)),
+                auto_agent=bool(value.get("auto_agent", state.auto_agent)),
+                wait_for_asset_commander=bool(
+                    value.get(
+                        "wait_for_asset_commander", state.wait_for_asset_commander
+                    )
+                ),
+                wait_for_fscan=bool(value.get("wait_for_fscan", state.wait_for_fscan)),
+                asset_settle_seconds=int(
+                    value.get("asset_settle_seconds", state.asset_settle_seconds)
+                ),
+                max_agent_batches=int(
+                    value.get("max_agent_batches", state.max_agent_batches)
+                ),
+                coordinator_poll_seconds=int(
+                    value.get(
+                        "coordinator_poll_seconds", state.coordinator_poll_seconds
+                    )
+                ),
+                ai_summary_enabled=bool(
+                    value.get("ai_summary_enabled", state.ai_summary_enabled)
+                ),
             ),
             skipped_tools,
         )
@@ -963,18 +1056,38 @@ class RuntimeManager:
                 updated_at=created_at,
                 status="starting",
                 api_base_url=request.api_base_url.strip().rstrip("/"),
+                agent_model=request.agent_model.strip(),
+                reasoning_effort=request.reasoning_effort,
+                work_mode=request.work_mode,
+                auto_agent=request.auto_agent,
+                wait_for_asset_commander=request.wait_for_asset_commander,
+                wait_for_fscan=request.wait_for_fscan,
+                asset_settle_seconds=request.asset_settle_seconds,
+                max_agent_batches=request.max_agent_batches,
+                coordinator_poll_seconds=request.coordinator_poll_seconds,
+                ai_summary_enabled=request.ai_summary_enabled,
             )
             state_path = run_dir / "run.json"
             atomic_json_write(state_path, state.to_dict())
 
             project_value = {
-                "schema_version": 2,
+                "schema_version": 3,
                 "name": request.project_name.strip(),
                 "target": request.target.strip(),
                 "scope": request.scope.strip(),
                 "provider": request.provider,
                 "model": request.model.strip(),
                 "api_base_url": request.api_base_url.strip().rstrip("/"),
+                "agent_model": request.agent_model.strip(),
+                "reasoning_effort": request.reasoning_effort,
+                "work_mode": request.work_mode,
+                "auto_agent": request.auto_agent,
+                "wait_for_asset_commander": request.wait_for_asset_commander,
+                "wait_for_fscan": request.wait_for_fscan,
+                "asset_settle_seconds": request.asset_settle_seconds,
+                "max_agent_batches": request.max_agent_batches,
+                "coordinator_poll_seconds": request.coordinator_poll_seconds,
+                "ai_summary_enabled": request.ai_summary_enabled,
                 "selected_tools": list(request.selected_tools),
                 "user_prompt": request.user_prompt,
                 "last_run_id": run_id,
@@ -982,13 +1095,19 @@ class RuntimeManager:
             }
             atomic_json_write(project_dir / "project.json", project_value)
             atomic_json_write(run_dir / "project.json", project_value)
-            (run_dir / "scope.txt").write_text(request.scope.strip() + "\n", encoding="utf-8")
+            (run_dir / "scope.txt").write_text(
+                request.scope.strip() + "\n", encoding="utf-8"
+            )
             prompt = self._build_prompt(request, run_dir, selected)
             (run_dir / "agent_prompt.txt").write_text(prompt, encoding="utf-8")
             self._agent_script(request, run_dir)
+            if request.auto_agent:
+                policy_text = "Agent 将按本次工作模式由增量调度器自动启动"
+            else:
+                policy_text = "本次已关闭自动 Agent，协调器只持续汇总资产和摘要"
             append_activity(
                 run_dir,
-                "项目配置已保存；先启动资产与检测工具，Agent 将由增量调度器在资产稳定后启动。",
+                f"项目配置已保存；先启动资产与检测工具；{policy_text}。",
             )
 
             started: list[ProcessRecord] = []
@@ -1070,11 +1189,19 @@ class RuntimeManager:
                     user_prompt=request.user_prompt,
                     authorization_confirmed=request.authorization_confirmed,
                     api_base_url=(
-                        request.api_base_url
-                        if api_base_url is None
-                        else api_base_url
+                        request.api_base_url if api_base_url is None else api_base_url
                     ),
                     api_key=api_key,
+                    agent_model=request.agent_model,
+                    reasoning_effort=request.reasoning_effort,
+                    work_mode=request.work_mode,
+                    auto_agent=request.auto_agent,
+                    wait_for_asset_commander=request.wait_for_asset_commander,
+                    wait_for_fscan=request.wait_for_fscan,
+                    asset_settle_seconds=request.asset_settle_seconds,
+                    max_agent_batches=request.max_agent_batches,
+                    coordinator_poll_seconds=request.coordinator_poll_seconds,
+                    ai_summary_enabled=request.ai_summary_enabled,
                 )
             recovery_request = LaunchRequest(
                 project_name=request.project_name,
@@ -1091,6 +1218,16 @@ class RuntimeManager:
                 authorization_confirmed=request.authorization_confirmed,
                 api_base_url=request.api_base_url,
                 api_key=api_key,
+                agent_model=request.agent_model,
+                reasoning_effort=request.reasoning_effort,
+                work_mode=request.work_mode,
+                auto_agent=request.auto_agent,
+                wait_for_asset_commander=request.wait_for_asset_commander,
+                wait_for_fscan=request.wait_for_fscan,
+                asset_settle_seconds=request.asset_settle_seconds,
+                max_agent_batches=request.max_agent_batches,
+                coordinator_poll_seconds=request.coordinator_poll_seconds,
+                ai_summary_enabled=request.ai_summary_enabled,
             )
             selected = self.preflight(recovery_request)
             self.refresh(state)
@@ -1115,9 +1252,7 @@ class RuntimeManager:
             try:
                 for tool in recoverable:
                     append_activity(run_dir, f"正在恢复工具：{tool.name}。")
-                    record = self._launch_tool(
-                        tool, context, preserve_existing=True
-                    )
+                    record = self._launch_tool(tool, context, preserve_existing=True)
                     started.append(record)
                     append_activity(
                         run_dir, f"工具已恢复：{tool.name}，PID {record.pid}。"
@@ -1164,6 +1299,16 @@ class RuntimeManager:
             state.provider = request.provider
             state.model = request.model.strip()
             state.api_base_url = request.api_base_url.strip().rstrip("/")
+            state.agent_model = request.agent_model.strip()
+            state.reasoning_effort = request.reasoning_effort
+            state.work_mode = request.work_mode
+            state.auto_agent = request.auto_agent
+            state.wait_for_asset_commander = request.wait_for_asset_commander
+            state.wait_for_fscan = request.wait_for_fscan
+            state.asset_settle_seconds = request.asset_settle_seconds
+            state.max_agent_batches = request.max_agent_batches
+            state.coordinator_poll_seconds = request.coordinator_poll_seconds
+            state.ai_summary_enabled = request.ai_summary_enabled
             state.selected_tools = list(request.selected_tools)
             state.recovery_count += 1
             state.recovery_history.append(
@@ -1236,24 +1381,24 @@ class RuntimeManager:
                 pass
         for pid in dict.fromkeys(managed_pids):
             if process_belongs_to_run(pid, run_dir):
-                append_activity(state.run_dir, f"???? Agent ?????PID {pid}?")
+                append_activity(state.run_dir, f"正在停止 Agent 关联进程，PID {pid}。")
                 terminate_process_tree(pid)
             elif pid_alive(pid):
                 append_activity(
                     state.run_dir,
-                    f"?? PID {pid}?????????????????????",
+                    f"跳过 PID {pid}：进程存在但无法证明属于当前运行实例。",
                 )
         for process in reversed(state.processes):
             if process_record_alive(process, run_dir):
                 append_activity(
                     state.run_dir,
-                    f"???????{process.name}?PID {process.pid}?",
+                    f"正在停止组件：{process.name}（PID {process.pid}）。",
                 )
                 terminate_process_tree(process.pid)
             elif pid_alive(process.pid):
                 append_activity(
                     state.run_dir,
-                    f"???? {process.name} ? PID {process.pid}?PID ?????????",
+                    f"跳过组件 {process.name} 的 PID {process.pid}：PID 已被其他进程占用。",
                 )
             process.status = "stopped"
             reconcile_component_state(

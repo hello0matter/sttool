@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import argparse
 import json
@@ -23,7 +23,12 @@ from .asset_bus import (
     target_assets,
 )
 from .models import ProcessRecord
-from .runtime import pid_alive, process_creation_token, process_record_alive
+from .runtime import (
+    agent_cli_arguments,
+    pid_alive,
+    process_creation_token,
+    process_record_alive,
+)
 
 
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
@@ -59,9 +64,11 @@ def agent_launch_ready(
     quiet: bool,
     batch_count: int,
     max_batches: int,
+    auto_agent: bool = True,
 ) -> bool:
     return (
-        active_pid <= 0
+        auto_agent
+        and active_pid <= 0
         and generation > consumed_generation
         and asset_ready
         and fscan_ready
@@ -80,9 +87,12 @@ def coordinator_wait_stage(
     quiet: bool,
     batch_count: int,
     max_batches: int,
+    auto_agent: bool = True,
 ) -> tuple[str, str]:
     if active_pid > 0:
         return "agent_running", f"Agent PID {active_pid} 正在处理当前批次"
+    if not auto_agent:
+        return "manual_agent", "自动 Agent 已关闭；资产与摘要仍会持续更新"
     if not asset_ready:
         return "waiting_asset_commander", "等待 AssetCommander 完成资产收集与碰撞"
     if not fscan_ready:
@@ -96,9 +106,7 @@ def coordinator_wait_stage(
     return "ready_for_agent", "资产已稳定，准备启动下一个 Agent 批次"
 
 
-def mark_agent_batch_finished(
-    run_dir: Path, batches: list[object], pid: int
-) -> None:
+def mark_agent_batch_finished(run_dir: Path, batches: list[object], pid: int) -> None:
     completed_at = now_text()
     for item in reversed(batches):
         if not isinstance(item, dict) or int(item.get("pid") or 0) != pid:
@@ -159,22 +167,46 @@ def tscan_findings(database: Path) -> list[dict[str, str]]:
         return []
     findings: list[dict[str, str]] = []
     try:
-        connection = sqlite3.connect(f"file:{database.as_posix()}?mode=ro", uri=True, timeout=1)
+        connection = sqlite3.connect(
+            f"file:{database.as_posix()}?mode=ro", uri=True, timeout=1
+        )
     except sqlite3.Error:
         return findings
     try:
         tables = {
             str(row[0])
-            for row in connection.execute("select name from sqlite_master where type='table'")
+            for row in connection.execute(
+                "select name from sqlite_master where type='table'"
+            )
         }
-        for table in ("poccheck", "unauth", "pwdcrack", "dirscan", "swagger", "awvs", "nessus"):
+        for table in (
+            "poccheck",
+            "unauth",
+            "pwdcrack",
+            "dirscan",
+            "swagger",
+            "awvs",
+            "nessus",
+        ):
             if table not in tables:
                 continue
-            columns = [str(row[1]) for row in connection.execute(f'pragma table_info("{table}")')]
+            columns = [
+                str(row[1])
+                for row in connection.execute(f'pragma table_info("{table}")')
+            ]
             lowered = {name.lower(): name for name in columns}
             candidates = [
                 lowered[key]
-                for key in ("target", "url", "host", "vuln", "pocvul", "message", "title", "status")
+                for key in (
+                    "target",
+                    "url",
+                    "host",
+                    "vuln",
+                    "pocvul",
+                    "message",
+                    "title",
+                    "status",
+                )
                 if key in lowered
             ]
             if not candidates:
@@ -186,10 +218,17 @@ def tscan_findings(database: Path) -> list[dict[str, str]]:
                     f'SELECT {selected_sql} FROM "{table}" ORDER BY rowid DESC LIMIT 100'
                 )
                 for row in rows:
-                    value = {selected[index]: str(item or "") for index, item in enumerate(row)}
-                    rendered = " | ".join(item for item in value.values() if item.strip())
+                    value = {
+                        selected[index]: str(item or "")
+                        for index, item in enumerate(row)
+                    }
+                    rendered = " | ".join(
+                        item for item in value.values() if item.strip()
+                    )
                     if rendered:
-                        findings.append({"source": f"tscan:{table}", "detail": rendered})
+                        findings.append(
+                            {"source": f"tscan:{table}", "detail": rendered}
+                        )
             except sqlite3.Error:
                 continue
     finally:
@@ -206,7 +245,9 @@ def render_risk_summary(
     bundle = bus.bundle()
     records = [item for item in bus.value.get("assets", []) if isinstance(item, dict)]
     sources = {
-        str(item.get("value")): ", ".join(str(value) for value in item.get("sources", []))
+        str(item.get("value")): ", ".join(
+            str(value) for value in item.get("sources", [])
+        )
         for item in records
     }
     findings = tscan_findings(database)
@@ -289,7 +330,7 @@ def ai_enhance_summary(summary: str) -> tuple[str, str]:
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
     model = os.environ.get("OPENAI_MODEL", "").strip()
     if not api_key or not base_url or not model:
-        return summary, "\u9879\u76ee AI \u672a\u5b8c\u6574\u914d\u7f6e\uff0c\u5df2\u751f\u6210\u672c\u5730\u7ed3\u6784\u5316\u6458\u8981"
+        return summary, "项目 AI 未完整配置，已生成本地结构化摘要"
     if base_url.endswith("/responses"):
         root = base_url[: -len("/responses")]
     elif base_url.endswith("/chat/completions"):
@@ -297,12 +338,11 @@ def ai_enhance_summary(summary: str) -> tuple[str, str]:
     else:
         root = base_url
     system_prompt = (
-        "\u4f60\u662f\u6388\u6743\u5b89\u5168\u6d4b\u8bd5\u9879\u76ee\u7684\u98ce\u9669\u6458\u8981\u52a9\u624b\u3002"
-        "\u53ea\u5f52\u7eb3\u5df2\u6709\u8bc1\u636e\uff0c\u4e0d\u5938\u5927\uff0c\u4e0d\u751f\u6210\u56fa\u5b9a\u62a5\u544a\u6a21\u677f\u3002"
+        "你是授权安全测试项目的风险摘要助手。"
+        "只归纳已有证据，不夸大，不生成固定报告模板。"
     )
     user_prompt = (
-        "\u8bf7\u4f18\u5316\u4e0b\u9762\u7684\u9879\u76ee\u98ce\u9669\u6210\u679c\u6458\u8981\uff0c\u4fdd\u7559\u5168\u90e8 Web \u76ee\u6807\u548c\u8bc1\u636e\u72b6\u6001\uff1a\n\n"
-        + summary
+        "请优化下面的项目风险成果摘要，保留全部 Web 目标和证据状态：\n\n" + summary
     )
     attempts = (
         (
@@ -342,12 +382,12 @@ def ai_enhance_summary(summary: str) -> tuple[str, str]:
                 value = json.loads(response.read().decode("utf-8"))
             content = response_text(value)
             if content:
-                return content + "\n", "\u9879\u76ee AI \u5df2\u4f18\u5316\u98ce\u9669\u6458\u8981"
+                return content + "\n", "项目 AI 已优化风险摘要"
             errors.append(f"{Path(endpoint).name}:empty")
         except (OSError, URLError, ValueError, KeyError, IndexError, TypeError) as exc:
             errors.append(f"{Path(endpoint).name}:{type(exc).__name__}")
     detail = ",".join(errors)
-    return summary, f"\u9879\u76ee AI \u6458\u8981\u8c03\u7528\u5931\u8d25\uff0c\u4fdd\u7559\u672c\u5730\u6458\u8981\uff1a{detail}"
+    return summary, f"项目 AI 摘要调用失败，保留本地摘要：{detail}"
 
 
 def powershell_quote(value: str) -> str:
@@ -358,15 +398,20 @@ def write_agent_batch_script(
     batch_dir: Path,
     provider: str,
     project_name: str,
+    agent_model: str = "",
+    reasoning_effort: str = "",
 ) -> tuple[Path, Path]:
     prompt_path = batch_dir / "prompt.txt"
     script_path = batch_dir / "launch.ps1"
     pid_path = batch_dir / "agent.pid"
-    invocation = (
-        f"& {provider} --yolo $prompt"
-        if provider in {"codex", "codexx"}
-        else "& claude $prompt"
-    )
+    if provider in {"codex", "codexx"}:
+        options = " ".join(
+            item if item in {"--yolo", "-m", "-c"} else powershell_quote(item)
+            for item in agent_cli_arguments(provider, agent_model, reasoning_effort)
+        )
+        invocation = f"& {provider} {options} $prompt"
+    else:
+        invocation = "& claude $prompt"
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         "$utf8 = [System.Text.UTF8Encoding]::new()\n"
@@ -393,11 +438,15 @@ def launch_agent_batch(
     project_name: str,
     batch_number: int,
     prompt: str,
+    agent_model: str = "",
+    reasoning_effort: str = "",
 ) -> tuple[int, Path]:
     batch_dir = run_dir / "agent_batches" / f"{batch_number:04d}"
     batch_dir.mkdir(parents=True, exist_ok=True)
     (batch_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
-    script, pid_path = write_agent_batch_script(batch_dir, provider, project_name)
+    script, pid_path = write_agent_batch_script(
+        batch_dir, provider, project_name, agent_model, reasoning_effort
+    )
     try:
         pid_path.unlink()
     except FileNotFoundError:
@@ -421,7 +470,9 @@ def launch_agent_batch(
             "-File",
             str(script),
         ]
-        launcher = subprocess.Popen(command, cwd=run_dir, creationflags=CREATE_NEW_PROCESS_GROUP)
+        launcher = subprocess.Popen(
+            command, cwd=run_dir, creationflags=CREATE_NEW_PROCESS_GROUP
+        )
     else:
         launcher = subprocess.Popen(
             [shell, "-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)],
@@ -440,6 +491,8 @@ def launch_agent_batch(
                 "pid": pid,
                 "creation_token": process_creation_token(pid),
                 "provider": provider,
+                "agent_model": agent_model.strip(),
+                "reasoning_effort": reasoning_effort,
                 "started_at": now_text(),
                 "prompt": str(batch_dir / "prompt.txt"),
                 "script": str(script),
@@ -481,20 +534,46 @@ def build_batch_prompt(
     )
 
 
+def parse_bool(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    raise argparse.ArgumentTypeError("expected true or false")
+
+
 def parse_args() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="STTool project asset bus and delayed Agent coordinator")
+    parser = argparse.ArgumentParser(
+        description="STTool project asset bus and delayed Agent coordinator"
+    )
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--target", required=True)
     parser.add_argument("--scope", default="*")
     parser.add_argument("--project", required=True)
-    parser.add_argument("--provider", choices=("codex", "codexx", "claude"), required=True)
+    parser.add_argument(
+        "--provider", choices=("codex", "codexx", "claude"), required=True
+    )
+    parser.add_argument("--agent-model", default="")
+    parser.add_argument(
+        "--reasoning-effort",
+        choices=("", "low", "medium", "high", "xhigh"),
+        default="",
+    )
     parser.add_argument("--settle-seconds", type=float, default=20)
     parser.add_argument("--max-agent-batches", type=int, default=8)
+    parser.add_argument("--poll-seconds", type=float, default=2)
+    parser.add_argument("--auto-agent", type=parse_bool, default=True)
+    parser.add_argument("--wait-asset-commander", type=parse_bool, default=True)
+    parser.add_argument("--wait-fscan", type=parse_bool, default=True)
+    parser.add_argument("--ai-summary", type=parse_bool, default=True)
     return parser.parse_args()
 
 
 def tscan_source_ready(database: Path) -> bool:
-    return database.is_file() and (database.parents[1] / ".sttool_initialized").is_file()
+    return (
+        database.is_file() and (database.parents[1] / ".sttool_initialized").is_file()
+    )
 
 
 def main() -> int:
@@ -515,10 +594,38 @@ def main() -> int:
     state.setdefault("agent_consumed_generation", 0)
     state.setdefault("active_agent_pid", 0)
     state.setdefault("active_agent_creation_token", 0)
-    state.update(status="running", stage="collecting_assets", updated_at=now_text())
+    state.update(
+        status="running",
+        stage="collecting_assets",
+        workflow={
+            "auto_agent": args.auto_agent,
+            "wait_for_asset_commander": args.wait_asset_commander,
+            "wait_for_fscan": args.wait_fscan,
+            "settle_seconds": args.settle_seconds,
+            "max_agent_batches": args.max_agent_batches,
+            "poll_seconds": args.poll_seconds,
+            "ai_summary": args.ai_summary,
+            "agent_model": args.agent_model,
+            "reasoning_effort": args.reasoning_effort,
+        },
+        updated_at=now_text(),
+    )
     bus.ingest(target_assets(args.target), "project_target")
     atomic_json_write(state_path, state)
-    append_activity(run_dir, "项目增量调度器已启动：先收集资产，Agent 将在资产稳定后启动。")
+    if args.auto_agent:
+        wait_items = []
+        if args.wait_asset_commander:
+            wait_items.append("AssetCommander")
+        if args.wait_fscan:
+            wait_items.append("fscan")
+        wait_text = "、".join(wait_items) or "资产稳定窗口"
+        launch_policy = f"Agent 将等待 {wait_text} 后自动启动"
+    else:
+        launch_policy = "自动 Agent 已关闭，只持续汇总资产与风险摘要"
+    append_activity(
+        run_dir,
+        f"项目增量调度器已启动：{launch_policy}；资产稳定等待 {args.settle_seconds:g} 秒，最多 {args.max_agent_batches} 个批次。",
+    )
 
     sources = {
         "asset_commander": asset_export,
@@ -551,7 +658,9 @@ def main() -> int:
                 if source == "asset_commander":
                     assets = parse_asset_export(path)
                 elif source == "fscan":
-                    assets = parse_fscan_output(path.read_text(encoding="utf-8", errors="replace"))
+                    assets = parse_fscan_output(
+                        path.read_text(encoding="utf-8", errors="replace")
+                    )
                 elif source == "semantic_dirscan":
                     assets = semantic_assets(path)
                 else:
@@ -563,16 +672,17 @@ def main() -> int:
             if added:
                 changed = True
                 last_new = time.monotonic()
-                append_activity(run_dir, f"资产总线接收 {source} 新增资产 {added} 条，代次 {bus.generation}。")
+                append_activity(
+                    run_dir,
+                    f"资产总线接收 {source} 新增资产 {added} 条，代次 {bus.generation}。",
+                )
         if changed:
             state["asset_generation"] = bus.generation
             state["last_new_asset_at"] = now_text()
             local_summary = render_risk_summary(
                 run_dir, bus, tscan_database, "资产增量收集中"
             )
-            (run_dir / "risk_summary.md").write_text(
-                local_summary, encoding="utf-8"
-            )
+            (run_dir / "risk_summary.md").write_text(local_summary, encoding="utf-8")
             state["summary_status"] = "已刷新本地阶段性风险摘要"
 
         active_pid = int(state.get("active_agent_pid") or 0)
@@ -586,7 +696,7 @@ def main() -> int:
         ):
             append_activity(
                 run_dir,
-                f"Agent ?? PID {active_pid} ?????????????",
+                f"Agent 批次 PID {active_pid} 已结束，协调器将记录完成状态并等待新资产。",
             )
             mark_agent_batch_finished(run_dir, batches, active_pid)
             state["active_agent_pid"] = 0
@@ -594,9 +704,15 @@ def main() -> int:
             active_pid = 0
 
         tools = selected_tools(run_dir)
-        asset_ready = "asset_commander" not in tools or asset_commander_ready(run_dir)
-        fscan_ready = "fscan" not in tools or (
-            fscan_path.is_file() and not component_process_alive(run_dir, "fscan")
+        asset_ready = (
+            not args.wait_asset_commander
+            or "asset_commander" not in tools
+            or asset_commander_ready(run_dir)
+        )
+        fscan_ready = (
+            not args.wait_fscan
+            or "fscan" not in tools
+            or (fscan_path.is_file() and not component_process_alive(run_dir, "fscan"))
         )
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
         consumed = int(state.get("agent_consumed_generation") or 0)
@@ -609,6 +725,7 @@ def main() -> int:
             quiet=quiet,
             batch_count=len(batches),
             max_batches=args.max_agent_batches,
+            auto_agent=args.auto_agent,
         )
         if should_launch:
             summary = render_risk_summary(
@@ -617,12 +734,20 @@ def main() -> int:
                 tscan_database,
                 "阶段性" if batches else "首次资产稳定",
             )
-            enhanced, ai_status = ai_enhance_summary(summary)
+            if args.ai_summary:
+                enhanced, ai_status = ai_enhance_summary(summary)
+            else:
+                enhanced = summary
+                ai_status = "全局设置已关闭工具协作 AI 摘要优化"
             (run_dir / "risk_summary.md").write_text(enhanced, encoding="utf-8")
             state["summary_status"] = ai_status
-            base_prompt = (run_dir / "agent_prompt.txt").read_text(encoding="utf-8", errors="replace")
+            base_prompt = (run_dir / "agent_prompt.txt").read_text(
+                encoding="utf-8", errors="replace"
+            )
             batch_number = len(batches) + 1
-            prompt = build_batch_prompt(run_dir, base_prompt, bus, consumed, batch_number)
+            prompt = build_batch_prompt(
+                run_dir, base_prompt, bus, consumed, batch_number
+            )
             try:
                 pid, batch_dir = launch_agent_batch(
                     run_dir,
@@ -630,6 +755,8 @@ def main() -> int:
                     args.project,
                     batch_number,
                     prompt,
+                    args.agent_model,
+                    args.reasoning_effort,
                 )
             except Exception as exc:
                 state["agent_launch_error"] = f"{type(exc).__name__}: {exc}"
@@ -664,6 +791,7 @@ def main() -> int:
             quiet=quiet,
             batch_count=len(batches),
             max_batches=args.max_agent_batches,
+            auto_agent=args.auto_agent,
         )
         state.update(
             status="running",
@@ -674,6 +802,9 @@ def main() -> int:
                 "asset_commander": asset_ready,
                 "fscan": fscan_ready,
                 "quiet": quiet,
+                "auto_agent": args.auto_agent,
+                "wait_for_asset_commander": args.wait_asset_commander,
+                "wait_for_fscan": args.wait_fscan,
             },
             detail=(
                 f"{stage_detail}；资产代次 {bus.generation}；"
@@ -683,7 +814,7 @@ def main() -> int:
             updated_at=now_text(),
         )
         atomic_json_write(state_path, state)
-        time.sleep(2)
+        time.sleep(max(args.poll_seconds, 1))
 
 
 if __name__ == "__main__":

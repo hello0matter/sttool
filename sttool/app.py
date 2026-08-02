@@ -23,6 +23,10 @@ from .secret_store import SecretStoreError, load_api_key, save_api_key
 from .tool_details import ToolDetailsDialog
 from .tool_editor import ToolEditorDialog
 from .tool_store import ToolStore
+from .workflow_settings import (
+    normalize_workflow_settings,
+    normalized_reasoning_effort,
+)
 
 
 BG = "#f4f5f7"
@@ -62,6 +66,13 @@ class LauncherApp(tk.Tk):
             )
         )
         self.default_model = str(launcher_settings.get("model") or "gpt-5.5")
+        self.agent_model = str(launcher_settings.get("agent_model") or "")
+        self.reasoning_effort = normalized_reasoning_effort(
+            launcher_settings.get("reasoning_effort")
+        )
+        self.workflow_settings = normalize_workflow_settings(
+            launcher_settings.get("workflow")
+        )
         self.secret_load_error = ""
         try:
             self.api_key = load_api_key(self.launcher_secrets_path)
@@ -107,17 +118,31 @@ class LauncherApp(tk.Tk):
     def _configure_style(self) -> None:
         style = ttk.Style(self)
         style.theme_use("clam")
-        style.configure(".", font=("Microsoft YaHei UI", 10), background=BG, foreground=TEXT)
+        style.configure(
+            ".", font=("Microsoft YaHei UI", 10), background=BG, foreground=TEXT
+        )
         style.configure("TFrame", background=BG)
         style.configure("Panel.TFrame", background=PANEL)
         style.configure("TLabel", background=BG, foreground=TEXT)
         style.configure("Panel.TLabel", background=PANEL, foreground=TEXT)
         style.configure("Muted.TLabel", background=PANEL, foreground=MUTED)
-        style.configure("Title.TLabel", background=BG, foreground=TEXT, font=("Microsoft YaHei UI", 18, "bold"))
-        style.configure("Accent.TButton", background=ACCENT, foreground="white", padding=(16, 9))
-        style.map("Accent.TButton", background=[("active", "#125541"), ("disabled", "#98a2b3")])
+        style.configure(
+            "Title.TLabel",
+            background=BG,
+            foreground=TEXT,
+            font=("Microsoft YaHei UI", 18, "bold"),
+        )
+        style.configure(
+            "Accent.TButton", background=ACCENT, foreground="white", padding=(16, 9)
+        )
+        style.map(
+            "Accent.TButton",
+            background=[("active", "#125541"), ("disabled", "#98a2b3")],
+        )
         style.configure("Danger.TButton", foreground=DANGER)
-        style.configure("Treeview", rowheight=30, background=PANEL, fieldbackground=PANEL)
+        style.configure(
+            "Treeview", rowheight=30, background=PANEL, fieldbackground=PANEL
+        )
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
         style.configure("TNotebook", background=BG, borderwidth=0)
         style.configure("TNotebook.Tab", padding=(16, 8))
@@ -128,15 +153,15 @@ class LauncherApp(tk.Tk):
         ttk.Label(header, text="渗透项目总控台", style="Title.TLabel").pack(side="left")
         header_settings = ttk.Frame(header)
         header_settings.pack(side="right")
-        self.health_label = ttk.Label(header_settings, text="CLI 检测中", foreground=MUTED)
+        self.health_label = ttk.Label(
+            header_settings, text="CLI 检测中", foreground=MUTED
+        )
         self.health_label.pack(anchor="e")
         ttk.Button(
             header_settings,
-            text="工具协作 AI 设置",
+            text="全局设置",
             command=self._open_ai_settings,
-        ).pack(
-            anchor="e", pady=(6, 0)
-        )
+        ).pack(anchor="e", pady=(6, 0))
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=24, pady=(0, 20))
@@ -151,8 +176,12 @@ class LauncherApp(tk.Tk):
         self._build_tools_tab()
 
     @staticmethod
-    def _field(parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, width: int = 42) -> ttk.Entry:
-        ttk.Label(parent, text=label, style="Panel.TLabel").grid(row=row, column=0, sticky="w", pady=(0, 5))
+    def _field(
+        parent: ttk.Frame, row: int, label: str, variable: tk.StringVar, width: int = 42
+    ) -> ttk.Entry:
+        ttk.Label(parent, text=label, style="Panel.TLabel").grid(
+            row=row, column=0, sticky="w", pady=(0, 5)
+        )
         entry = ttk.Entry(parent, textvariable=variable, width=width)
         entry.grid(row=row + 1, column=0, sticky="ew", pady=(0, 14))
         return entry
@@ -173,16 +202,35 @@ class LauncherApp(tk.Tk):
         self.provider_var = tk.StringVar(value="codexx")
         self.auth_var = tk.BooleanVar(value=False)
 
-        ttk.Label(left, text="项目配置", style="Panel.TLabel", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 14))
-        ttk.Label(left, text="项目名称", style="Panel.TLabel").grid(row=1, column=0, sticky="w", pady=(0, 5))
-        project_box = ttk.Combobox(left, textvariable=self.project_var, values=self.manager.list_projects())
+        ttk.Label(
+            left,
+            text="项目配置",
+            style="Panel.TLabel",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 14))
+        ttk.Label(left, text="项目名称", style="Panel.TLabel").grid(
+            row=1, column=0, sticky="w", pady=(0, 5)
+        )
+        project_box = ttk.Combobox(
+            left, textvariable=self.project_var, values=self.manager.list_projects()
+        )
         project_box.grid(row=2, column=0, sticky="ew", pady=(0, 14))
         project_box.bind("<<ComboboxSelected>>", lambda _event: self._load_project())
         self._field(left, 3, "主要目标（URL、域名或 IP）", self.target_var)
         self._field(left, 5, "授权范围", self.scope_var)
 
-        ttk.Label(left, text="补充任务", style="Panel.TLabel").grid(row=7, column=0, sticky="w", pady=(0, 5))
-        self.prompt_text = tk.Text(left, width=1, height=8, wrap="word", relief="solid", borderwidth=1, font=("Microsoft YaHei UI", 10))
+        ttk.Label(left, text="补充任务", style="Panel.TLabel").grid(
+            row=7, column=0, sticky="w", pady=(0, 5)
+        )
+        self.prompt_text = tk.Text(
+            left,
+            width=1,
+            height=8,
+            wrap="word",
+            relief="solid",
+            borderwidth=1,
+            font=("Microsoft YaHei UI", 10),
+        )
         self.prompt_text.grid(row=8, column=0, sticky="nsew", pady=(0, 12))
         left.rowconfigure(8, weight=1)
         ttk.Checkbutton(
@@ -191,14 +239,36 @@ class LauncherApp(tk.Tk):
             variable=self.auth_var,
         ).grid(row=9, column=0, sticky="w")
 
-        ttk.Label(right, text="AI Agent", style="Panel.TLabel", font=("Microsoft YaHei UI", 12, "bold")).grid(row=0, column=0, sticky="w", pady=(0, 14))
+        ttk.Label(
+            right,
+            text="AI Agent",
+            style="Panel.TLabel",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).grid(row=0, column=0, sticky="w", pady=(0, 14))
         provider_row = ttk.Frame(right, style="Panel.TFrame")
         provider_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
-        ttk.Radiobutton(provider_row, text="Codexx CLI", value="codexx", variable=self.provider_var, command=self._provider_changed).pack(side="left", padx=(0, 18))
-        ttk.Radiobutton(provider_row, text="Codex CLI", value="codex", variable=self.provider_var, command=self._provider_changed).pack(side="left")
+        ttk.Radiobutton(
+            provider_row,
+            text="Codexx CLI",
+            value="codexx",
+            variable=self.provider_var,
+            command=self._provider_changed,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(
+            provider_row,
+            text="Codex CLI",
+            value="codex",
+            variable=self.provider_var,
+            command=self._provider_changed,
+        ).pack(side="left")
 
         ttk.Separator(right).grid(row=2, column=0, sticky="ew", pady=(2, 16))
-        ttk.Label(right, text="随项目启动", style="Panel.TLabel", font=("Microsoft YaHei UI", 12, "bold")).grid(row=3, column=0, sticky="w", pady=(0, 10))
+        ttk.Label(
+            right,
+            text="随项目启动",
+            style="Panel.TLabel",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).grid(row=3, column=0, sticky="w", pady=(0, 10))
         self.tool_frame = ttk.Frame(right, style="Panel.TFrame")
         self.tool_frame.grid(row=4, column=0, sticky="nsew")
         right.rowconfigure(4, weight=1)
@@ -206,16 +276,21 @@ class LauncherApp(tk.Tk):
 
         action = ttk.Frame(right, style="Panel.TFrame")
         action.grid(row=5, column=0, sticky="ew", pady=(18, 0))
-        self.start_button = ttk.Button(action, text="启动新实例", style="Accent.TButton", command=self._start)
+        self.start_button = ttk.Button(
+            action, text="启动新实例", style="Accent.TButton", command=self._start
+        )
         self.start_button.pack(side="left")
-        ttk.Button(action, text="打开项目目录", command=self._open_project_dir).pack(side="left", padx=(10, 0))
-        self.launch_status = ttk.Label(right, text="每次启动都会创建独立运行目录", style="Muted.TLabel")
+        ttk.Button(action, text="打开项目目录", command=self._open_project_dir).pack(
+            side="left", padx=(10, 0)
+        )
+        self.launch_status = ttk.Label(
+            right, text="每次启动都会创建独立运行目录", style="Muted.TLabel"
+        )
         self.launch_status.grid(row=6, column=0, sticky="w", pady=(12, 0))
 
     def _render_tool_choices(self) -> None:
         selected = {
-            tool_id: variable.get()
-            for tool_id, variable in self.tool_vars.items()
+            tool_id: variable.get() for tool_id, variable in self.tool_vars.items()
         }
         for child in self.tool_frame.winfo_children():
             child.destroy()
@@ -243,9 +318,9 @@ class LauncherApp(tk.Tk):
         actions = ttk.Frame(self.runs_tab, style="Panel.TFrame")
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 12))
         ttk.Button(actions, text="刷新", command=self._refresh_runs).pack(side="left")
-        ttk.Button(
-            actions, text="打开运行目录", command=self._open_selected_run
-        ).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="打开运行目录", command=self._open_selected_run).pack(
+            side="left", padx=(8, 0)
+        )
         ttk.Button(actions, text="项目日志", command=self._open_run_log).pack(
             side="left", padx=(8, 0)
         )
@@ -253,9 +328,9 @@ class LauncherApp(tk.Tk):
             actions, text="恢复实例", command=self._recover_selected_run
         )
         self.recover_button.pack(side="left", padx=(8, 0))
-        ttk.Button(
-            actions, text="新实例重跑", command=self._load_selected_as_new
-        ).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="新实例重跑", command=self._load_selected_as_new).pack(
+            side="left", padx=(8, 0)
+        )
         ttk.Button(
             actions,
             text="停止实例",
@@ -264,14 +339,32 @@ class LauncherApp(tk.Tk):
         ).pack(side="right")
 
         columns = ("project", "run_id", "provider", "status", "components", "created")
-        self.run_tree = ttk.Treeview(self.runs_tab, columns=columns, show="headings", selectmode="browse")
-        headings = {"project": "项目", "run_id": "实例", "provider": "Agent", "status": "状态", "components": "组件", "created": "启动时间"}
-        widths = {"project": 150, "run_id": 155, "provider": 90, "status": 90, "components": 260, "created": 170}
+        self.run_tree = ttk.Treeview(
+            self.runs_tab, columns=columns, show="headings", selectmode="browse"
+        )
+        headings = {
+            "project": "项目",
+            "run_id": "实例",
+            "provider": "Agent",
+            "status": "状态",
+            "components": "组件",
+            "created": "启动时间",
+        }
+        widths = {
+            "project": 150,
+            "run_id": 155,
+            "provider": 90,
+            "status": 90,
+            "components": 260,
+            "created": 170,
+        }
         for column in columns:
             self.run_tree.heading(column, text=headings[column])
             self.run_tree.column(column, width=widths[column], minwidth=70)
         self.run_tree.grid(row=1, column=0, sticky="nsew")
-        scrollbar = ttk.Scrollbar(self.runs_tab, orient="vertical", command=self.run_tree.yview)
+        scrollbar = ttk.Scrollbar(
+            self.runs_tab, orient="vertical", command=self.run_tree.yview
+        )
         scrollbar.grid(row=1, column=1, sticky="ns")
         self.run_tree.configure(yscrollcommand=scrollbar.set)
         self.run_tree.tag_configure("running", foreground=ACCENT)
@@ -289,15 +382,27 @@ class LauncherApp(tk.Tk):
 
         actions = ttk.Frame(self.tools_tab, style="Panel.TFrame")
         actions.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        ttk.Button(actions, text="详情与结果", command=self._show_tool_details).pack(
+            side="left"
+        )
+        ttk.Button(actions, text="添加工具", command=self._add_tool).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="编辑", command=self._edit_tool).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="删除", command=self._delete_tool).pack(
+            side="left", padx=(8, 0)
+        )
         ttk.Button(
-            actions, text="详情与结果", command=self._show_tool_details
-        ).pack(side="left")
-        ttk.Button(actions, text="添加工具", command=self._add_tool).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="编辑", command=self._edit_tool).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="删除", command=self._delete_tool).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="重置内置位置", command=self._reset_tool_location).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="打开位置", command=self._open_tool_location).pack(side="left", padx=(8, 0))
-        ttk.Button(actions, text="刷新检测", command=self._reload_tools).pack(side="right")
+            actions, text="重置内置位置", command=self._reset_tool_location
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(actions, text="打开位置", command=self._open_tool_location).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="刷新检测", command=self._reload_tools).pack(
+            side="right"
+        )
 
         columns = ("name", "category", "state", "mode", "path")
         self.tools_tree = ttk.Treeview(
@@ -389,6 +494,20 @@ class LauncherApp(tk.Tk):
             api_base_url=self.api_base_url_var.get().strip(),
             model=self.default_model,
             api_key=self.api_key,
+            agent_model=self.agent_model,
+            reasoning_effort=self.reasoning_effort,
+            work_mode=str(self.workflow_settings["work_mode"]),
+            auto_agent=bool(self.workflow_settings["auto_agent"]),
+            wait_for_asset_commander=bool(
+                self.workflow_settings["wait_for_asset_commander"]
+            ),
+            wait_for_fscan=bool(self.workflow_settings["wait_for_fscan"]),
+            asset_settle_seconds=int(self.workflow_settings["asset_settle_seconds"]),
+            max_agent_batches=int(self.workflow_settings["max_agent_batches"]),
+            coordinator_poll_seconds=int(
+                self.workflow_settings["coordinator_poll_seconds"]
+            ),
+            ai_summary_enabled=bool(self.workflow_settings["ai_summary_enabled"]),
         )
 
     def _edit_tool(self) -> None:
@@ -457,9 +576,13 @@ class LauncherApp(tk.Tk):
         if tool is None:
             return
         if self.tool_store.is_builtin(tool.tool_id):
-            messagebox.showinfo("不能删除", "内置工具可以修改位置，但不能删除。", parent=self)
+            messagebox.showinfo(
+                "不能删除", "内置工具可以修改位置，但不能删除。", parent=self
+            )
             return
-        if not messagebox.askyesno("删除工具", f"确定删除 {tool.name} 吗？", parent=self):
+        if not messagebox.askyesno(
+            "删除工具", f"确定删除 {tool.name} 吗？", parent=self
+        ):
             return
         try:
             self.tool_store.remove_custom(tool.tool_id)
@@ -502,12 +625,20 @@ class LauncherApp(tk.Tk):
 
         def worker() -> None:
             healthy, detail = self.manager.provider_health(provider)
-            self.after(0, lambda: self.health_label.configure(text=f"{self._provider_text(provider)}: {detail}", foreground=ACCENT if healthy else DANGER))
+            self.after(
+                0,
+                lambda: self.health_label.configure(
+                    text=f"{self._provider_text(provider)}: {detail}",
+                    foreground=ACCENT if healthy else DANGER,
+                ),
+            )
 
         threading.Thread(target=worker, daemon=True).start()
 
     def _request(self) -> LaunchRequest:
-        selected = tuple(tool_id for tool_id, variable in self.tool_vars.items() if variable.get())
+        selected = tuple(
+            tool_id for tool_id, variable in self.tool_vars.items() if variable.get()
+        )
         return LaunchRequest(
             project_name=self.project_var.get(),
             target=self.target_var.get(),
@@ -519,6 +650,20 @@ class LauncherApp(tk.Tk):
             authorization_confirmed=self.auth_var.get(),
             api_base_url=self.api_base_url_var.get(),
             api_key=self.api_key,
+            agent_model=self.agent_model,
+            reasoning_effort=self.reasoning_effort,
+            work_mode=str(self.workflow_settings["work_mode"]),
+            auto_agent=bool(self.workflow_settings["auto_agent"]),
+            wait_for_asset_commander=bool(
+                self.workflow_settings["wait_for_asset_commander"]
+            ),
+            wait_for_fscan=bool(self.workflow_settings["wait_for_fscan"]),
+            asset_settle_seconds=int(self.workflow_settings["asset_settle_seconds"]),
+            max_agent_batches=int(self.workflow_settings["max_agent_batches"]),
+            coordinator_poll_seconds=int(
+                self.workflow_settings["coordinator_poll_seconds"]
+            ),
+            ai_summary_enabled=bool(self.workflow_settings["ai_summary_enabled"]),
         )
 
     def _start(self) -> None:
@@ -553,7 +698,9 @@ class LauncherApp(tk.Tk):
             return
         assert state is not None
         self.run_states[self._state_key(state)] = state
-        self.launch_status.configure(text=f"实例 {state.run_id} 已完整启动", foreground=ACCENT)
+        self.launch_status.configure(
+            text=f"实例 {state.run_id} 已完整启动", foreground=ACCENT
+        )
         self._refresh_runs()
         self.notebook.select(self.runs_tab)
 
@@ -573,7 +720,9 @@ class LauncherApp(tk.Tk):
         selected = self.run_tree.selection()
         selected_id = selected[0] if selected else ""
         self.run_tree.delete(*self.run_tree.get_children())
-        for state in sorted(self.run_states.values(), key=lambda item: item.created_at, reverse=True):
+        for state in sorted(
+            self.run_states.values(), key=lambda item: item.created_at, reverse=True
+        ):
             state_key = self._state_key(state)
             components = ", ".join(
                 f"{item.name}:{component_summary_status(Path(state.run_dir), item.component_id, item.status)}"
@@ -583,7 +732,14 @@ class LauncherApp(tk.Tk):
                 "",
                 "end",
                 iid=state_key,
-                values=(state.project_name, state.run_id, self._provider_text(state.provider), self._status_text(state), components, state.created_at.replace("T", " ")[:19]),
+                values=(
+                    state.project_name,
+                    state.run_id,
+                    self._provider_text(state.provider),
+                    self._status_text(state),
+                    components,
+                    state.created_at.replace("T", " ")[:19],
+                ),
                 tags=(state.status,),
             )
         if selected_id and self.run_tree.exists(selected_id):
@@ -641,26 +797,18 @@ class LauncherApp(tk.Tk):
                 recovered = self.manager.recover(
                     state,
                     authorization_confirmed=True,
-                    api_base_url=self.api_base_url_var.get(),
-                    model=self.default_model,
                     api_key=self.api_key,
                 )
             except LaunchError as exc:
                 error = str(exc)
-                self.after(
-                    0, lambda error=error: self._recover_finished(None, error)
-                )
+                self.after(0, lambda error=error: self._recover_finished(None, error))
             except Exception as exc:
                 error = f"意外错误: {exc}"
-                self.after(
-                    0, lambda error=error: self._recover_finished(None, error)
-                )
+                self.after(0, lambda error=error: self._recover_finished(None, error))
             else:
                 self.after(
                     0,
-                    lambda recovered=recovered: self._recover_finished(
-                        recovered, ""
-                    ),
+                    lambda recovered=recovered: self._recover_finished(recovered, ""),
                 )
 
         threading.Thread(target=worker, daemon=True).start()
@@ -685,31 +833,22 @@ class LauncherApp(tk.Tk):
     def _load_selected_as_new(self) -> None:
         state = self._selected_state()
         if state is None:
-            messagebox.showinfo(
-                "新实例重跑", "请先选择一个历史运行实例"
-            )
+            messagebox.showinfo("新实例重跑", "请先选择一个历史运行实例")
             return
         path = Path(state.run_dir) / "project.json"
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, json.JSONDecodeError) as exc:
-            messagebox.showerror(
-                "新实例重跑", f"读取历史配置失败: {exc}"
-            )
+            messagebox.showerror("新实例重跑", f"读取历史配置失败: {exc}")
             return
         if not isinstance(value, dict):
-            messagebox.showerror(
-                "新实例重跑", "历史项目配置格式无效"
-            )
+            messagebox.showerror("新实例重跑", "历史项目配置格式无效")
             return
         self._apply_project_value(value)
         self.notebook.select(self.launch_tab)
         messagebox.showinfo(
             "新实例重跑",
-            (
-                "历史配置已载入。请重新确认授权复选框，"
-                "再点击“启动完整项目”。"
-            ),
+            ("历史配置已载入。请重新确认授权复选框，再点击“启动完整项目”。"),
         )
 
     def _stop_selected_run(self) -> None:
@@ -717,7 +856,9 @@ class LauncherApp(tk.Tk):
         if state is None:
             messagebox.showinfo("停止实例", "请先选择一个运行实例")
             return
-        if not messagebox.askyesno("停止实例", f"确定停止 {state.project_name} / {state.run_id} 的全部进程吗？"):
+        if not messagebox.askyesno(
+            "停止实例", f"确定停止 {state.project_name} / {state.run_id} 的全部进程吗？"
+        ):
             return
         self.manager.stop(state)
         self._refresh_runs()
@@ -757,6 +898,18 @@ class LauncherApp(tk.Tk):
         if provider not in {"codexx", "codex"}:
             provider = "codexx"
         self.provider_var.set(provider)
+        if value.get("api_base_url"):
+            self.api_base_url_var.set(str(value["api_base_url"]))
+        if value.get("model"):
+            self.default_model = str(value["model"])
+        if "agent_model" in value:
+            self.agent_model = str(value.get("agent_model") or "")
+        if "reasoning_effort" in value:
+            self.reasoning_effort = normalized_reasoning_effort(
+                value.get("reasoning_effort")
+            )
+        if "work_mode" in value:
+            self.workflow_settings = normalize_workflow_settings(value)
         selected = set(value.get("selected_tools", []))
         for tool_id, variable in self.tool_vars.items():
             variable.set(tool_id in selected)
@@ -783,25 +936,36 @@ class LauncherApp(tk.Tk):
             api_base_url=self.api_base_url_var.get(),
             model=self.default_model,
             api_key=self.api_key,
+            agent_model=self.agent_model,
+            reasoning_effort=self.reasoning_effort,
+            workflow_settings=self.workflow_settings,
         )
         self.wait_window(dialog)
         if dialog.result is None:
             return
         try:
-            save_api_key(self.launcher_secrets_path, dialog.result["api_key"])
+            save_api_key(self.launcher_secrets_path, str(dialog.result["api_key"]))
         except SecretStoreError as exc:
-            messagebox.showerror("工具协作 AI 设置", str(exc), parent=self)
+            messagebox.showerror("STTool 全局设置", str(exc), parent=self)
             return
-        self.api_key = dialog.result["api_key"]
-        self.api_base_url_var.set(dialog.result["api_base_url"])
-        self.default_model = dialog.result["model"]
+        self.api_key = str(dialog.result["api_key"])
+        self.api_base_url_var.set(str(dialog.result["api_base_url"]))
+        self.default_model = str(dialog.result["model"])
+        self.agent_model = str(dialog.result["agent_model"])
+        self.reasoning_effort = normalized_reasoning_effort(
+            dialog.result["reasoning_effort"]
+        )
+        self.workflow_settings = normalize_workflow_settings(dialog.result["workflow"])
         self._save_launcher_settings()
 
     def _save_launcher_settings(self) -> None:
         value = {
-            "schema_version": 1,
+            "schema_version": 2,
             "api_base_url": self.api_base_url_var.get().strip().rstrip("/"),
             "model": self.default_model,
+            "agent_model": self.agent_model,
+            "reasoning_effort": self.reasoning_effort,
+            "workflow": self.workflow_settings,
             "last_project": self.project_var.get().strip(),
         }
         temporary = self.launcher_settings_path.with_suffix(".json.tmp")

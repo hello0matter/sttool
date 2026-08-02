@@ -20,6 +20,7 @@ from sttool.project_coordinator import (
     response_text,
     tracked_process_alive,
     tscan_source_ready,
+    write_agent_batch_script,
 )
 
 
@@ -27,9 +28,7 @@ class ProjectCoordinatorTests(unittest.TestCase):
     def test_agent_pid_token_rejects_pid_reused_by_another_process(self) -> None:
         token = process_creation_token(os.getpid())
         self.assertTrue(tracked_process_alive(os.getpid(), token, Path.cwd()))
-        self.assertFalse(
-            tracked_process_alive(os.getpid(), token + 1, Path.cwd())
-        )
+        self.assertFalse(tracked_process_alive(os.getpid(), token + 1, Path.cwd()))
 
     def test_component_process_alive_rejects_foreign_pid_token(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -78,7 +77,9 @@ class ProjectCoordinatorTests(unittest.TestCase):
             self.assertFalse(agent_launch_ready(**values), field)
         self.assertTrue(agent_launch_ready(**base))
 
-    def test_active_agent_and_consumed_generation_prevent_duplicate_launch(self) -> None:
+    def test_active_agent_and_consumed_generation_prevent_duplicate_launch(
+        self,
+    ) -> None:
         self.assertFalse(
             agent_launch_ready(
                 active_pid=123,
@@ -170,9 +171,7 @@ class ProjectCoordinatorTests(unittest.TestCase):
             )
             bus.ingest(assets, "fscan")
 
-            summary = render_risk_summary(
-                run_dir, bus, run_dir / "missing.db", "test"
-            )
+            summary = render_risk_summary(run_dir, bus, run_dir / "missing.db", "test")
             prompt = build_batch_prompt(run_dir, "base", bus, 0, 1)
 
             for url in (
@@ -211,9 +210,7 @@ class ProjectCoordinatorTests(unittest.TestCase):
             "responses result",
         )
         self.assertEqual(
-            response_text(
-                {"choices": [{"message": {"content": "chat result"}}]}
-            ),
+            response_text({"choices": [{"message": {"content": "chat result"}}]}),
             "chat result",
         )
         self.assertEqual(
@@ -231,6 +228,40 @@ class ProjectCoordinatorTests(unittest.TestCase):
             ),
             "first result\nsecond result",
         )
+
+    def test_manual_mode_keeps_collecting_without_launching_agent(self) -> None:
+        values = {
+            "active_pid": 0,
+            "generation": 2,
+            "consumed_generation": 0,
+            "asset_ready": True,
+            "fscan_ready": True,
+            "quiet": True,
+            "batch_count": 0,
+            "max_batches": 8,
+            "auto_agent": False,
+        }
+        self.assertFalse(agent_launch_ready(**values))
+        self.assertEqual(coordinator_wait_stage(**values)[0], "manual_agent")
+
+    def test_agent_batch_script_applies_explicit_cli_overrides(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            script_path, _pid_path = write_agent_batch_script(
+                batch_dir,
+                "codexx",
+                "demo",
+                "gpt-5.6-sol",
+                "high",
+            )
+            script = script_path.read_text(encoding="utf-8-sig")
+            self.assertIn(
+                "& codexx --yolo -m 'gpt-5.6-sol' "
+                "-c 'model_reasoning_effort=\"high\"' $prompt",
+                script,
+            )
 
 
 if __name__ == "__main__":
