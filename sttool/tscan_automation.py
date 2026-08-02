@@ -5,7 +5,9 @@ import ipaddress
 import json
 import os
 import re
+import shutil
 import socket
+import sqlite3
 import subprocess
 import tempfile
 import time
@@ -32,6 +34,153 @@ PORT_SCAN = "\u7aef\u53e3\u626b\u63cf"
 FINGERPRINT_IDENTIFICATION = "\u6307\u7eb9\u8bc6\u522b"
 ONLY_ONE_ACCOUNT = "\u4ec5\u7834\u89e3\u4e00\u4e2a\u8d26\u6237"
 ASSET_WAIT_SECONDS = 1.0
+
+
+_TSCAN_RUNTIME_TABLES = {
+    "awvs",
+    "bypass",
+    "cyber",
+    "dirscan",
+    "hostcrack",
+    "icpinfo",
+    "ipscan",
+    "jsfinder",
+    "nessus",
+    "poccheck",
+    "pwdcrack",
+    "subdomain",
+    "swagger",
+    "unauth",
+    "urlscan",
+}
+_TSCAN_PROJECT_RESET_FIELDS = {
+    "TaskDomain": "",
+    "TaskIp": "",
+    "TaskUrl": "",
+    "IpScanTarget": "",
+    "UrlScanTarget": "",
+    "SubDomainTarget": "",
+    "PocTarget": "",
+    "PwdTarget": "",
+    "CyberTarget": "",
+    "DirTarget": "",
+    "JsTarget": "",
+    "BypassTarget": "",
+    "HostTargetIp": "",
+    "HostTargetSub": "",
+    "IpScanResume": "",
+    "UrlScanResume": "",
+    "SubDomainResume": "",
+    "PocResume": "",
+    "PwdResume": "",
+    "DirResume": "",
+    "JsResume": "",
+    "InfoResume": "",
+    "DirAsset": "",
+    "VulInfo": "",
+    "AssertNum": 0,
+    "VulNum": 0,
+    "Status": "",
+}
+
+
+def sanitize_tscan_database(path: Path) -> None:
+    if not path.is_file():
+        return
+    connection = sqlite3.connect(path)
+    try:
+        tables = {
+            str(row[0])
+            for row in connection.execute(
+                "select name from sqlite_master where type='table'"
+            )
+        }
+        for table in sorted(_TSCAN_RUNTIME_TABLES & tables):
+            connection.execute(f'DELETE FROM "{table}"')
+        if "sqlite_sequence" in tables:
+            placeholders = ",".join("?" for _ in _TSCAN_RUNTIME_TABLES)
+            connection.execute(
+                f"DELETE FROM sqlite_sequence WHERE name IN ({placeholders})",
+                tuple(sorted(_TSCAN_RUNTIME_TABLES)),
+            )
+        if "project" in tables:
+            columns = {
+                str(row[1])
+                for row in connection.execute('pragma table_info("project")')
+            }
+            updates = [
+                (name, value)
+                for name, value in _TSCAN_PROJECT_RESET_FIELDS.items()
+                if name in columns
+            ]
+            if updates:
+                assignments = ", ".join(f'"{name}" = ?' for name, _value in updates)
+                connection.execute(
+                    f'UPDATE "project" SET {assignments}',
+                    tuple(value for _name, value in updates),
+                )
+        connection.commit()
+    finally:
+        connection.close()
+    for suffix in ("-wal", "-shm"):
+        try:
+            Path(str(path) + suffix).unlink()
+        except FileNotFoundError:
+            pass
+
+
+def _copy_or_link(source: Path, destination: Path, *, private: bool = False) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    if destination.exists():
+        return
+    if private:
+        shutil.copy2(source, destination)
+        return
+    try:
+        os.link(source, destination)
+    except OSError:
+        shutil.copy2(source, destination)
+
+
+def prepare_tscan_workspace(source_exe: Path, state_path: Path) -> Path:
+    source_root = source_exe.resolve().parent
+    workspace = state_path.resolve().parent / "app"
+    workspace.mkdir(parents=True, exist_ok=True)
+    unique_name = f"TscanPlus_{state_path.parents[2].name}.exe"
+    runtime_exe = workspace / unique_name
+    _copy_or_link(source_exe.resolve(), runtime_exe)
+
+    (workspace / "Awvs").mkdir(parents=True, exist_ok=True)
+    for directory_name in ("config", "ToolKit"):
+        source_directory = source_root / directory_name
+        if not source_directory.is_dir():
+            continue
+        for source in source_directory.rglob("*"):
+            relative = source.relative_to(source_root)
+            destination = workspace / relative
+            if source.is_dir():
+                destination.mkdir(parents=True, exist_ok=True)
+                continue
+            lower_name = source.name.lower()
+            toolkit_result = relative.as_posix().lower() == "toolkit/fscan/result.txt"
+            private = (
+                toolkit_result
+                or lower_name.startswith("config.db")
+                or lower_name.startswith("config.yaml")
+                or lower_name.endswith(".tmp")
+            )
+            if lower_name in {"config.db-wal", "config.db-shm"}:
+                continue
+            _copy_or_link(source, destination, private=private)
+            if toolkit_result:
+                destination.write_text("", encoding="utf-8")
+    (workspace / "ScreenShot").mkdir(exist_ok=True)
+    database = workspace / "config" / "config.db"
+    initialized = workspace / ".sttool_initialized"
+    if not initialized.exists():
+        sanitize_tscan_database(database)
+        initialized.write_text(now_text() + "\n", encoding="utf-8")
+    return runtime_exe
 
 
 def now_text() -> str:
@@ -141,6 +290,45 @@ def read_asset_bundle(path: Path, target: str = "") -> dict[str, list[str]]:
     return bundle
 
 
+
+
+def read_asset_bus_bundle(
+    path: Path,
+    target: str = "",
+    after_generation: int = 0,
+) -> tuple[int, dict[str, list[str]]]:
+    value = read_json(path)
+    generation = int(value.get("generation") or 0)
+    fallback = target_asset_bundle(target) if after_generation <= 0 else {
+        "ips": [],
+        "domains": [],
+        "urls": [],
+    }
+    result = {key: list(values) for key, values in fallback.items()}
+    mapping = {"ip": "ips", "domain": "domains", "url": "urls"}
+    assets = value.get("assets", [])
+    if isinstance(assets, list):
+        for item in assets:
+            if not isinstance(item, dict):
+                continue
+            if int(item.get("first_generation") or 0) <= after_generation:
+                continue
+            key = mapping.get(str(item.get("type") or ""))
+            asset_value = str(item.get("value") or "")
+            if key and asset_value:
+                result[key].append(asset_value)
+    return generation, {key: _unique(values) for key, values in result.items()}
+
+
+def merge_asset_bundles(*bundles: dict[str, list[str]]) -> dict[str, list[str]]:
+    return {
+        key: _unique(
+            [value for bundle in bundles for value in bundle.get(key, [])]
+        )
+        for key in ("ips", "domains", "urls")
+    }
+
+
 def filter_assets_by_scope(
     bundle: dict[str, list[str]], scope: str
 ) -> dict[str, list[str]]:
@@ -190,6 +378,24 @@ def normalize_poc_urls(
         if parsed.scheme in {"http", "https"} and parsed.hostname:
             normalized.append(raw)
     return _unique(normalized)
+
+
+def web_fingerprint_targets(urls: list[str], domains: list[str], target: str) -> list[str]:
+    values: list[str] = []
+    for value in normalize_poc_urls(urls, domains, target):
+        parsed = urlsplit(value)
+        if not parsed.hostname:
+            continue
+        host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        default = (parsed.scheme == "http" and port == 80) or (
+            parsed.scheme == "https" and port == 443
+        )
+        values.append(host if port is None or default else f"{host}:{port}")
+    return _unique(values)
 
 
 def password_targets(ips: list[str]) -> list[str]:
@@ -301,7 +507,8 @@ def free_local_port() -> int:
 
 
 class BrowserPolicy:
-    def __init__(self, port: int) -> None:
+    def __init__(self, port: int, executable_name: str = POLICY_NAME) -> None:
+        self.executable_name = executable_name
         self.value = (
             f"--remote-debugging-port={port} --remote-allow-origins=* "
             "--force-renderer-accessibility"
@@ -321,12 +528,12 @@ class BrowserPolicy:
                     continue
                 try:
                     try:
-                        previous = winreg.QueryValueEx(key, POLICY_NAME)
+                        previous = winreg.QueryValueEx(key, self.executable_name)
                         existed = True
                     except FileNotFoundError:
                         previous = None
                         existed = False
-                    winreg.SetValueEx(key, POLICY_NAME, 0, winreg.REG_SZ, self.value)
+                    winreg.SetValueEx(key, self.executable_name, 0, winreg.REG_SZ, self.value)
                     self.entries.append((root, view_flag, existed, previous))
                 finally:
                     winreg.CloseKey(key)
@@ -343,10 +550,10 @@ class BrowserPolicy:
                 continue
             try:
                 if existed and previous is not None:
-                    winreg.SetValueEx(key, POLICY_NAME, 0, previous[1], previous[0])
+                    winreg.SetValueEx(key, self.executable_name, 0, previous[1], previous[0])
                 else:
                     try:
-                        winreg.DeleteValue(key, POLICY_NAME)
+                        winreg.DeleteValue(key, self.executable_name)
                     except FileNotFoundError:
                         pass
             finally:
@@ -448,8 +655,20 @@ def try_set_switch(page: Page, label: str, enabled: bool) -> bool | None:
 
 
 def click_tab(page: Page, name: str) -> None:
-    visible(page.locator(f'.n-tabs-tab[data-name="{name}"]')).click(force=True)
-    page.wait_for_timeout(250)
+    tab = visible(page.locator(f'.n-tabs-tab[data-name="{name}"]'))
+    safe_click(page, tab)
+    try:
+        page.wait_for_function(
+            """(name) => {
+              const tabs = [...document.querySelectorAll(`.n-tabs-tab[data-name="${name}"]`)];
+              return tabs.some((tab) => tab.getAttribute('aria-selected') === 'true'
+                || tab.classList.contains('n-tabs-tab--active'));
+            }""",
+            name,
+            timeout=2500,
+        )
+    except Exception:
+        page.wait_for_timeout(250)
 
 
 def set_labeled_input(page: Page, label: str, value: str) -> bool:
@@ -571,7 +790,7 @@ def configure_textarea_scan(
     if not normalized:
         reason = "没有可导入的目标"
     elif start_scan:
-        button.click(force=True)
+        safe_click(page, button)
         clicked = True
         acknowledged, snapshot = wait_for_stage_ack(
             page, button, progress_method=progress_method
@@ -601,7 +820,9 @@ def configure_information_collection(
     }
     clicked = False
     if start_scan and info_target:
-        visible(page.get_by_role("button", name="查询", exact=True)).click(force=True)
+        safe_click(
+            page, visible(page.get_by_role("button", name="查询", exact=True))
+        )
         clicked = True
         page.wait_for_timeout(300)
     return {"target": info_target, "options": options, "query_clicked": clicked}
@@ -618,7 +839,7 @@ def configure_asset_discovery(
 
     web_radio = visible(page.locator('input[type="radio"][value="web"]'))
     if not web_radio.is_checked():
-        web_radio.click(force=True)
+        safe_click(page, web_radio)
 
     set_labeled_input(page, "\u7ebf\u7a0b", "200")
 
@@ -634,7 +855,7 @@ def configure_asset_discovery(
     snapshot: object = None
     if start_scan and scan_target:
         scan_button = visible(page.get_by_role("button", name="Scan", exact=True))
-        scan_button.click(force=True)
+        safe_click(page, scan_button)
         scan_clicked = True
         acknowledged, snapshot = wait_for_stage_ack(
             page, scan_button, progress_method="IsIpScanRunning"
@@ -643,7 +864,7 @@ def configure_asset_discovery(
     return {
         "targets": _unique(targets),
         "profile": "web",
-        "thread_count": 100,
+        "thread_count": 200,
         "options": options,
         "scan_clicked": scan_clicked,
         "acknowledged": acknowledged,
@@ -671,7 +892,9 @@ def select_available_pocs(page: Page) -> int:
           const selectedBefore = enabled.filter(
             (element) => element.getAttribute('aria-checked') === 'true'
           ).length;
-          if (!selectedBefore) enabled[0].click();
+          for (const element of enabled) {
+            if (element.getAttribute('aria-checked') !== 'true') element.click();
+          }
           return { available: enabled.length, selected: selectedBefore };
         }"""
     )
@@ -703,7 +926,7 @@ def configure_poc_check(
     reason = ""
     if start_scan and normalized and selected_pocs:
         check_button = visible(page.get_by_role("button", name="Check", exact=True))
-        check_button.click(force=True)
+        safe_click(page, check_button)
         clicked = True
         acknowledged, snapshot = wait_for_stage_ack(
             page, check_button, progress_method="GetPocCheckProgressSnapshot"
@@ -743,7 +966,7 @@ def configure_password_crack(
     reason = ""
     if start_scan and normalized:
         crack_button = visible(page.get_by_role("button", name="Crack", exact=True))
-        crack_button.click(force=True)
+        safe_click(page, crack_button)
         clicked = True
         acknowledged, snapshot = wait_for_stage_ack(
             page, crack_button, progress_method="GetPwdCrackProgressSnapshot"
@@ -785,6 +1008,75 @@ def required_inputs_configured(page: Page, placeholders: list[str]) -> bool:
     )
 
 
+def classify_connection_feedback(message: str) -> tuple[bool | None, str]:
+    normalized = message.strip()
+    lowered = normalized.lower()
+    if any(
+        keyword in lowered
+        for keyword in (
+            "refused",
+            "failed",
+            "failure",
+            "timeout",
+            "timed out",
+            "unreachable",
+            "unauthorized",
+            "forbidden",
+            "invalid key",
+            "连接失败",
+            "连接错误",
+            "无法连接",
+            "超时",
+            "未授权",
+            "密钥无效",
+        )
+    ):
+        return False, normalized
+    if any(
+        keyword in lowered
+        for keyword in (
+            "success",
+            "connected",
+            "connection ok",
+            "连接成功",
+            "测试成功",
+        )
+    ):
+        return True, normalized
+    return None, normalized
+
+
+def connection_feedback(page: Page) -> tuple[bool | None, str]:
+    texts = page.evaluate(
+        """() => [...document.querySelectorAll(
+          '.n-message, .n-notification, .n-alert, [role="alert"]'
+        )].filter((element) => {
+          const rect = element.getBoundingClientRect();
+          const style = getComputedStyle(element);
+          return rect.width > 0 && rect.height > 0
+            && style.display !== 'none' && style.visibility !== 'hidden';
+        }).map((element) => (element.innerText || '').trim()).filter(Boolean)"""
+    )
+    message = " | ".join(str(item) for item in texts) if isinstance(texts, list) else ""
+    return classify_connection_feedback(message)
+
+
+def wait_for_connection_feedback(
+    page: Page, timeout_ms: int = 5000, poll_ms: int = 200
+) -> tuple[bool | None, str]:
+    deadline = time.monotonic() + max(timeout_ms, 0) / 1000
+    last_message = ""
+    while True:
+        connected, message = connection_feedback(page)
+        if message:
+            last_message = message
+        if connected is not None:
+            return connected, message
+        if time.monotonic() >= deadline:
+            return None, last_message
+        page.wait_for_timeout(max(poll_ms, 50))
+
+
 def configure_awvs_scan(
     page: Page, targets: list[str], start_scan: bool
 ) -> dict[str, object]:
@@ -799,32 +1091,40 @@ def configure_awvs_scan(
     )
     connection_tested = False
     clicked = False
+    acknowledged = False
+    snapshot: object = None
+    feedback = ""
     reason = ""
     if not normalized:
         reason = "没有可导入的 HTTP/HTTPS URL"
     elif not configured:
         reason = "AWVS API 或 API Key 尚未配置"
     elif start_scan:
-        visible(page.get_by_role("button", name="连接测试", exact=True)).click(
-            force=True
+        safe_click(
+            page,
+            visible(page.get_by_role("button", name="连接测试", exact=True)),
         )
         connection_tested = True
-        page.wait_for_timeout(800)
-        start_button = visible(
-            page.get_by_role("button", name="开始扫描", exact=True)
-        )
-        start_button.click(force=True)
-        clicked = True
-        acknowledged, snapshot = wait_for_stage_ack(page, start_button)
-        if not acknowledged:
-            reason = "已点击启动，但 Tscan 未确认 AWVS 任务进入运行状态"
+        connected, feedback = wait_for_connection_feedback(page)
+        if connected is not True:
+            reason = feedback or "AWVS 连接测试未确认成功，不启动扫描"
+        else:
+            start_button = visible(
+                page.get_by_role("button", name="开始扫描", exact=True)
+            )
+            safe_click(page, start_button)
+            clicked = True
+            acknowledged, snapshot = wait_for_stage_ack(page, start_button)
+            if not acknowledged:
+                reason = "已点击启动，但 Tscan 未确认 AWVS 任务进入运行状态"
     return {
         "target_count": len(normalized),
         "configured": configured,
         "connection_tested": connection_tested,
+        "connection_feedback": feedback,
         "scan_clicked": clicked,
-        "acknowledged": locals().get("acknowledged", False),
-        "progress": locals().get("snapshot"),
+        "acknowledged": acknowledged,
+        "progress": snapshot,
         "reason": reason,
     }
 
@@ -847,33 +1147,39 @@ def configure_nessus_scan(
     )
     connection_tested = False
     clicked = False
+    acknowledged = False
+    snapshot: object = None
+    feedback = ""
     reason = ""
     if not normalized:
         reason = "没有可导入的域名或 IP"
     elif not configured:
         reason = "Nessus API、Access Key 或 Secret Key 尚未配置"
     elif start_scan:
-        visible(page.get_by_role("button", name="测试", exact=True)).click(force=True)
+        safe_click(page, visible(page.get_by_role("button", name="测试", exact=True)))
         connection_tested = True
-        page.wait_for_timeout(800)
-        start_button = visible(
-            page.get_by_role("button", name="开始扫描", exact=True)
-        )
-        start_button.click(force=True)
-        clicked = True
-        acknowledged, snapshot = wait_for_stage_ack(page, start_button)
-        if not acknowledged:
-            reason = "已点击启动，但 Tscan 未确认 Nessus 任务进入运行状态"
+        connected, feedback = wait_for_connection_feedback(page)
+        if connected is not True:
+            reason = feedback or "Nessus 连接测试未确认成功，不启动扫描"
+        else:
+            start_button = visible(
+                page.get_by_role("button", name="开始扫描", exact=True)
+            )
+            safe_click(page, start_button)
+            clicked = True
+            acknowledged, snapshot = wait_for_stage_ack(page, start_button)
+            if not acknowledged:
+                reason = "已点击启动，但 Tscan 未确认 Nessus 任务进入运行状态"
     return {
         "target_count": len(normalized),
         "configured": configured,
         "connection_tested": connection_tested,
+        "connection_feedback": feedback,
         "scan_clicked": clicked,
-        "acknowledged": locals().get("acknowledged", False),
-        "progress": locals().get("snapshot"),
+        "acknowledged": acknowledged,
+        "progress": snapshot,
         "reason": reason,
     }
-
 
 def stage_status_from_result(
     result: object, start_scan: bool
@@ -887,7 +1193,10 @@ def stage_status_from_result(
             for key in ("scan_clicked", "check_clicked", "crack_clicked")
         ):
             return "not_started"
-        if any(keyword in reason for keyword in ("配置", "API", "Key", "License")):
+        if any(
+            keyword in reason
+            for keyword in ("配置", "连接", "API", "Key", "License")
+        ):
             return "waiting_configuration"
         return "skipped"
     if not start_scan:
@@ -906,6 +1215,231 @@ def stage_status_from_result(
     return "skipped"
 
 
+def dismiss_transient_messages(page: Page) -> int:
+    return int(
+        page.evaluate(
+            """() => {
+              let closed = 0;
+              for (const selector of [
+                '.n-message .n-base-close',
+                '.n-notification .n-base-close',
+                '.n-message .n-message__close',
+                '.n-notification .n-notification__close'
+              ]) {
+                for (const button of document.querySelectorAll(selector)) {
+                  const rect = button.getBoundingClientRect();
+                  if (rect.width > 0 && rect.height > 0) {
+                    button.click();
+                    closed += 1;
+                  }
+                }
+              }
+              return closed;
+            }"""
+        )
+        or 0
+    )
+
+
+def safe_click(page: Page, locator: Locator) -> None:
+    dismiss_transient_messages(page)
+    locator.scroll_into_view_if_needed()
+    locator.click(force=True)
+    page.wait_for_timeout(180)
+
+
+def dispatch_stages_on_page(
+    page: Page,
+    target: str,
+    assets: dict[str, list[str]],
+    start_scan: bool,
+    state_path: Path,
+    state: dict[str, object],
+    batch_id: str,
+) -> dict[str, object]:
+    stages: dict[str, dict[str, object]] = {}
+
+    def run_stage(name: str, detail: str, callback) -> None:
+        update_stage(state_path, state, name, detail)
+        try:
+            result = callback()
+        except Exception as exc:
+            stages[name] = {"status": "failed", "error": str(exc)}
+            append_activity(state_path, f"{detail}失败：{exc}")
+        else:
+            stage_status = stage_status_from_result(result, start_scan)
+            stages[name] = {"status": stage_status, "result": result}
+            reason = result.get("reason") if isinstance(result, dict) else ""
+            if reason:
+                append_activity(state_path, f"{detail}：{reason}")
+            else:
+                append_activity(state_path, f"{detail}：{stage_status}")
+        state["stages"] = stages
+        state["active_batch_id"] = batch_id
+        atomic_json_write(state_path, state)
+
+    asset_targets = _unique(
+        [target_for_asset_scan(target), *assets["domains"], *assets["ips"]]
+    )
+    poc_targets = normalize_poc_urls(assets["urls"], assets["domains"], target)
+    fingerprint_targets = web_fingerprint_targets(
+        assets["urls"], assets["domains"], target
+    )
+    crack_targets = password_targets(assets["ips"])
+    nessus_targets = _unique([*assets["domains"], *assets["ips"]])
+    subdomain_targets = root_domains(assets["domains"])
+    run_stage(
+        "information_collection",
+        "正在配置 TscanPlus 信息收集",
+        lambda: configure_information_collection(page, target, start_scan),
+    )
+    run_stage(
+        "asset_discovery",
+        f"已导入 {len(asset_targets)} 个目标，正在启动资产探测",
+        lambda: configure_asset_discovery(page, asset_targets, start_scan),
+    )
+    run_stage(
+        "web_fingerprint",
+        f"已导入 {len(fingerprint_targets)} 个端点，正在启动 Web 指纹",
+        lambda: configure_textarea_scan(
+            page,
+            "AssetDetect",
+            "UrlScan",
+            "不加http前缀",
+            fingerprint_targets,
+            "Scan",
+            start_scan,
+            "GetUrlScanProgressSnapshot",
+        ),
+    )
+    run_stage(
+        "subdomain_enumeration",
+        f"已导入 {len(subdomain_targets)} 个根域名，正在启动域名枚举",
+        lambda: configure_textarea_scan(
+            page,
+            "AssetDetect",
+            "SubDomain",
+            "枚举较依赖网络",
+            subdomain_targets,
+            "Start",
+            start_scan,
+            "GetSubDomainProgressSnapshot",
+        ),
+    )
+    run_stage(
+        "directory_enumeration",
+        f"已导入 {len(poc_targets)} 个 URL，正在启动目录枚举",
+        lambda: configure_textarea_scan(
+            page,
+            "AssetDetect",
+            "DirEnum",
+            "Url地址每行一个,前缀为http/https:",
+            poc_targets,
+            "Check",
+            start_scan,
+            "GetDirScanProgressSnapshot",
+        ),
+    )
+    run_stage(
+        "jsfinder",
+        f"已导入 {len(poc_targets)} 个 URL，正在启动 JsFinder",
+        lambda: configure_textarea_scan(
+            page,
+            "AssetDetect",
+            "JsFinder",
+            "Url地址每行一个,前缀为http/https:",
+            poc_targets,
+            "Check",
+            start_scan,
+            "GetJsFinderProgressSnapshot",
+        ),
+    )
+    run_stage(
+        "swagger",
+        f"已导入 {len(poc_targets)} 个 URL，正在启动 Swagger 检测",
+        lambda: configure_textarea_scan(
+            page,
+            "AssetDetect",
+            "Swagger",
+            "输入Swagger文档地址",
+            poc_targets,
+            "Check",
+            start_scan,
+        ),
+    )
+    run_stage(
+        "waf_detection",
+        f"已导入 {len(poc_targets)} 个 URL，正在启动 WAF 识别",
+        lambda: configure_textarea_scan(
+            page,
+            "AssetDetect",
+            "WafDetect",
+            "输入目标 URL",
+            poc_targets,
+            "Check",
+            start_scan,
+        ),
+    )
+    run_stage(
+        "poc_check",
+        f"已导入 {len(poc_targets)} 个 URL，正在启动 POC 检测",
+        lambda: configure_poc_check(page, poc_targets, start_scan),
+    )
+    run_stage(
+        "unauthorized_check",
+        f"已导入 {len(nessus_targets)} 个域名/IP，正在启动未授权检测",
+        lambda: configure_textarea_scan(
+            page,
+            "VulCheck",
+            "UnAuth",
+            "支持 IP/域名/网段",
+            nessus_targets,
+            "开始",
+            start_scan,
+            "IsUnAuthRunning",
+        ),
+    )
+    run_stage(
+        "password_crack",
+        f"已导入 {len(crack_targets)} 个 IP，正在启动密码检测",
+        lambda: configure_password_crack(page, crack_targets, start_scan),
+    )
+    run_stage(
+        "dump_all",
+        f"已导入 {len(poc_targets)} 个 URL，正在启动 DumpAll 检测",
+        lambda: configure_textarea_scan(
+            page,
+            "VulCheck",
+            "DumpAll",
+            "请输入目标URL进行漏洞检测和dump",
+            poc_targets,
+            "开始检测",
+            start_scan,
+        ),
+    )
+    run_stage(
+        "awvs_scan",
+        f"已导入 {len(poc_targets)} 个 URL，正在测试连接并启动 AWVS",
+        lambda: configure_awvs_scan(page, poc_targets, start_scan),
+    )
+    run_stage(
+        "nessus_scan",
+        f"已导入 {len(nessus_targets)} 个域名/IP，正在测试连接并启动 Nessus",
+        lambda: configure_nessus_scan(page, nessus_targets, start_scan),
+    )
+    click_tab(page, "AssetDetect")
+    status_counts: dict[str, int] = {}
+    for value in stages.values():
+        status = str(value.get("status") or "unknown")
+        status_counts[status] = status_counts.get(status, 0) + 1
+    return {
+        "batch_id": batch_id,
+        "stages": stages,
+        "stage_status_counts": status_counts,
+        "asset_counts": {key: len(values) for key, values in assets.items()},
+    }
+
+
 def automate(
     port: int,
     target: str,
@@ -913,6 +1447,7 @@ def automate(
     start_scan: bool,
     state_path: Path,
     state: dict[str, object],
+    batch_id: str = "initial",
 ) -> dict[str, object]:
     os.environ["NO_PROXY"] = "127.0.0.1,localhost"
     endpoint = wait_for_cdp(port)
@@ -922,182 +1457,21 @@ def automate(
             raise RuntimeError("Tscan WebView2 page was not found")
         page = browser.contexts[0].pages[0]
         page.wait_for_load_state("domcontentloaded")
-        stages: dict[str, dict[str, object]] = {}
-
-        def run_stage(name: str, detail: str, callback) -> None:
-            previous_stages = state.get("stages", {})
-            if isinstance(previous_stages, dict):
-                previous = previous_stages.get(name, {})
-                if isinstance(previous, dict) and previous.get("status") in {
-                    "submitted",
-                    "prepared",
-                }:
-                    stages[name] = previous
-                    return
-            update_stage(state_path, state, name, detail)
-            try:
-                result = callback()
-            except Exception as exc:
-                stages[name] = {"status": "failed", "error": str(exc)}
-                append_activity(state_path, f"{detail}失败：{exc}")
-            else:
-                stage_status = stage_status_from_result(result, start_scan)
-                stages[name] = {"status": stage_status, "result": result}
-                reason = result.get("reason") if isinstance(result, dict) else ""
-                if reason:
-                    append_activity(state_path, f"{detail}：{reason}")
-                else:
-                    append_activity(state_path, f"{detail}：{stage_status}")
-            state["stages"] = stages
-            atomic_json_write(state_path, state)
-
-        asset_targets = _unique(
-            [target_for_asset_scan(target), *assets["domains"], *assets["ips"]]
+        result = dispatch_stages_on_page(
+            page,
+            target,
+            assets,
+            start_scan,
+            state_path,
+            state,
+            batch_id,
         )
-        poc_targets = normalize_poc_urls(assets["urls"], assets["domains"], target)
-        crack_targets = password_targets(assets["ips"])
-        nessus_targets = _unique([*assets["domains"], *assets["ips"]])
-        subdomain_targets = root_domains(assets["domains"])
-        run_stage(
-            "information_collection",
-            "正在配置 TscanPlus 信息收集",
-            lambda: configure_information_collection(page, target, start_scan),
+        result.update(
+            cdp_endpoint=endpoint,
+            page_url=page.url,
+            page_title=page.title(),
         )
-        run_stage(
-            "asset_discovery",
-            f"已导入 {len(asset_targets)} 个目标，正在启动资产探测",
-            lambda: configure_asset_discovery(page, asset_targets, start_scan),
-        )
-        run_stage(
-            "web_fingerprint",
-            f"已导入 {len(poc_targets)} 个 URL，正在启动 Web 指纹",
-            lambda: configure_textarea_scan(
-                page,
-                "AssetDetect",
-                "UrlScan",
-                "不加http前缀",
-                poc_targets,
-                "Scan",
-                start_scan,
-                "GetUrlScanProgressSnapshot",
-            ),
-        )
-        run_stage(
-            "subdomain_enumeration",
-            f"已导入 {len(subdomain_targets)} 个根域名，正在启动域名枚举",
-            lambda: configure_textarea_scan(
-                page,
-                "AssetDetect",
-                "SubDomain",
-                "枚举较依赖网络",
-                subdomain_targets,
-                "Start",
-                start_scan,
-                "GetSubDomainProgressSnapshot",
-            ),
-        )
-        run_stage(
-            "directory_enumeration",
-            f"已导入 {len(poc_targets)} 个 URL，正在启动目录枚举",
-            lambda: configure_textarea_scan(
-                page,
-                "AssetDetect",
-                "DirEnum",
-                "Url地址每行一个,前缀为http/https:",
-                poc_targets,
-                "Check",
-                start_scan,
-                "GetDirScanProgressSnapshot",
-            ),
-        )
-        run_stage(
-            "jsfinder",
-            f"已导入 {len(poc_targets)} 个 URL，正在启动 JsFinder",
-            lambda: configure_textarea_scan(
-                page,
-                "AssetDetect",
-                "JsFinder",
-                "Url地址每行一个,前缀为http/https:",
-                poc_targets,
-                "Check",
-                start_scan,
-                "GetJsFinderProgressSnapshot",
-            ),
-        )
-        run_stage(
-            "swagger",
-            f"已导入 {len(poc_targets)} 个 URL，正在启动 Swagger 检测",
-            lambda: configure_textarea_scan(
-                page,
-                "AssetDetect",
-                "Swagger",
-                "输入Swagger文档地址",
-                poc_targets,
-                "Check",
-                start_scan,
-            ),
-        )
-        run_stage(
-            "waf_detection",
-            f"已导入 {len(poc_targets)} 个 URL，正在启动 WAF 识别",
-            lambda: configure_textarea_scan(
-                page,
-                "AssetDetect",
-                "WafDetect",
-                "输入目标 URL",
-                poc_targets,
-                "Check",
-                start_scan,
-            ),
-        )
-        run_stage(
-            "poc_check",
-            f"已导入 {len(poc_targets)} 个 URL，正在启动 POC 检测",
-            lambda: configure_poc_check(page, poc_targets, start_scan),
-        )
-        run_stage(
-            "unauthorized_check",
-            f"已导入 {len(nessus_targets)} 个域名/IP，正在启动未授权检测",
-            lambda: configure_textarea_scan(
-                page,
-                "VulCheck",
-                "UnAuth",
-                "支持 IP/域名/网段",
-                nessus_targets,
-                "开始",
-                start_scan,
-                "IsUnAuthRunning",
-            ),
-        )
-        run_stage(
-            "password_crack",
-            f"已导入 {len(crack_targets)} 个 IP，正在启动密码检测",
-            lambda: configure_password_crack(page, crack_targets, start_scan),
-        )
-        run_stage(
-            "awvs_scan",
-            f"已导入 {len(poc_targets)} 个 URL，正在测试连接并启动 AWVS",
-            lambda: configure_awvs_scan(page, poc_targets, start_scan),
-        )
-        run_stage(
-            "nessus_scan",
-            f"已导入 {len(nessus_targets)} 个域名/IP，正在测试连接并启动 Nessus",
-            lambda: configure_nessus_scan(page, nessus_targets, start_scan),
-        )
-        click_tab(page, "AssetDetect")
-        status_counts: dict[str, int] = {}
-        for value in stages.values():
-            status = str(value.get("status") or "unknown")
-            status_counts[status] = status_counts.get(status, 0) + 1
-        return {
-            "cdp_endpoint": endpoint,
-            "page_url": page.url,
-            "page_title": page.title(),
-            "stages": stages,
-            "stage_status_counts": status_counts,
-            "asset_counts": {key: len(values) for key, values in assets.items()},
-        }
-
+        return result
 
 def asset_commander_selected(state_path: Path) -> bool:
     try:
@@ -1113,6 +1487,7 @@ def asset_commander_selected(state_path: Path) -> bool:
 def wait_for_asset_bundle(
     asset_state: Path,
     asset_export: Path,
+    asset_bus: Path,
     target: str,
     scope: str,
     child_pid: int,
@@ -1126,15 +1501,24 @@ def wait_for_asset_bundle(
             "asset_fallback",
             "本实例未选择 AssetCommander，TscanPlus 使用主目标继续",
         )
-        return filter_assets_by_scope(target_asset_bundle(target), scope)
+        _generation, bus_bundle = read_asset_bus_bundle(asset_bus, target)
+        return filter_assets_by_scope(
+            merge_asset_bundles(target_asset_bundle(target), bus_bundle),
+            scope,
+        )
 
     last_detail = ""
     while process_alive(child_pid):
         workflow = read_json(asset_state)
         workflow_status = str(workflow.get("status", "waiting")).lower()
         if workflow_assets_ready(asset_state) and asset_export.is_file():
+            _generation, bus_bundle = read_asset_bus_bundle(asset_bus, target)
             bundle = filter_assets_by_scope(
-                read_asset_bundle(asset_export, target), scope
+                merge_asset_bundles(
+                    read_asset_bundle(asset_export, target),
+                    bus_bundle,
+                ),
+                scope,
             )
             counts = {key: len(values) for key, values in bundle.items()}
             state["asset_counts"] = counts
@@ -1238,12 +1622,26 @@ def progress_summary(progress: dict[str, object]) -> str:
     return "，".join(active) or "未检测到活动中的 Tscan 内部任务"
 
 
+def progress_has_active_tasks(progress: dict[str, object]) -> bool:
+    for value in progress.values():
+        if isinstance(value, dict) and str(value.get("status") or "").lower() == "running":
+            return True
+    return any(
+        bool(progress.get(name))
+        for name in ("ipscanRunning", "unauthRunning")
+    )
+
+
 def monitor_tscan_process(
     child: subprocess.Popen[bytes] | None,
     pid: int,
     port: int,
     state_path: Path,
     state: dict[str, object],
+    target: str,
+    scope: str,
+    asset_bus: Path,
+    start_scan: bool,
 ) -> int:
     last_rendered = ""
     last_markers: dict[str, tuple[object, ...]] = {}
@@ -1282,9 +1680,59 @@ def monitor_tscan_process(
                     and str(ip_snapshot.get("status") or "") == "idle"
                 ):
                     health["ipscan"] = "running_flag_without_progress_snapshot"
+
+                consumed_generation = int(state.get("asset_bus_generation") or 0)
+                generation, delta = read_asset_bus_bundle(
+                    asset_bus,
+                    after_generation=consumed_generation,
+                )
+                delta = filter_assets_by_scope(delta, scope)
+                if (
+                    generation > consumed_generation
+                    and any(delta.values())
+                    and not progress_has_active_tasks(progress)
+                ):
+                    batch_id = f"asset-generation-{generation}"
+                    append_activity(
+                        state_path,
+                        "TscanPlus 检测到新增资产，准备执行增量批次："
+                        f"{len(delta['ips'])} IP / {len(delta['domains'])} 域名 / "
+                        f"{len(delta['urls'])} URL。",
+                    )
+                    batch_result = dispatch_stages_on_page(
+                        page,
+                        target,
+                        delta,
+                        start_scan,
+                        state_path,
+                        state,
+                        batch_id,
+                    )
+                    batches = state.get("stage_batches")
+                    if not isinstance(batches, list):
+                        batches = []
+                        state["stage_batches"] = batches
+                    batches.append(
+                        {
+                            "batch_id": batch_id,
+                            "generation_from": consumed_generation + 1,
+                            "generation_to": generation,
+                            "dispatched_at": now_text(),
+                            "result": batch_result,
+                        }
+                    )
+                    state["asset_bus_generation"] = generation
+                    state["automation"] = batch_result
+                    atomic_json_write(state_path, state)
+                    progress = collect_module_progress(page)
+
                 summary = progress_summary(progress)
                 rendered = json.dumps(
-                    {"progress": progress, "health": health},
+                    {
+                        "progress": progress,
+                        "health": health,
+                        "asset_bus_generation": state.get("asset_bus_generation", 0),
+                    },
                     ensure_ascii=False,
                     sort_keys=True,
                 )
@@ -1310,7 +1758,6 @@ def monitor_tscan_process(
         append_activity(state_path, f"进度监控降级为进程监控：{exc}")
     return monitor_process(child, pid)
 
-
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="Launch and orchestrate the authorized TscanPlus workflow"
@@ -1322,15 +1769,23 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--state", type=Path, default=Path("tscan_state.json"))
     parser.add_argument("--asset-state", type=Path, default=Path("asset_workflow_state.json"))
     parser.add_argument("--asset-export", type=Path, default=Path("asset_commander_assets.json"))
+    parser.add_argument("--asset-bus", type=Path, default=Path("asset_bus.json"))
     parser.add_argument("--prepare-only", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
-    exe = args.exe.resolve()
+    source_exe = args.exe.resolve()
     state_path = args.state.resolve()
     previous = read_json(state_path)
+    previous_exe = Path(str(previous.get("exe") or ""))
+    if process_alive(int(previous.get("pid") or 0)) and previous_exe.is_file():
+        exe = previous_exe.resolve()
+    elif source_exe.is_file():
+        exe = prepare_tscan_workspace(source_exe, state_path)
+    else:
+        exe = source_exe
     state: dict[str, object] = {
         "schema_version": 2,
         "status": "starting",
@@ -1348,6 +1803,8 @@ def main() -> int:
         "automation_dispatched": bool(previous.get("automation_dispatched", False)),
         "stages": previous.get("stages", {}),
         "asset_counts": previous.get("asset_counts", {}),
+        "asset_bus_generation": int(previous.get("asset_bus_generation") or 0),
+        "stage_batches": previous.get("stage_batches", []),
         "error": "",
     }
     atomic_json_write(state_path, state)
@@ -1383,7 +1840,7 @@ def main() -> int:
             port = free_local_port()
             state["cdp_port"] = port
             atomic_json_write(state_path, state)
-            with BrowserPolicy(port):
+            with BrowserPolicy(port, exe.name):
                 run_dir = state_path.parents[2]
                 state["cdp_launch"] = {
                     "method": "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
@@ -1409,6 +1866,7 @@ def main() -> int:
             assets = wait_for_asset_bundle(
                 args.asset_state.resolve(),
                 args.asset_export.resolve(),
+                args.asset_bus.resolve(),
                 args.target,
                 args.scope,
                 child_pid,
@@ -1432,10 +1890,27 @@ def main() -> int:
                 state_path,
                 state,
             )
+            bus_generation, _bus_bundle = read_asset_bus_bundle(
+                args.asset_bus.resolve(), args.target
+            )
+            stage_batches = state.get("stage_batches")
+            if not isinstance(stage_batches, list):
+                stage_batches = []
+            stage_batches.append(
+                {
+                    "batch_id": "initial",
+                    "generation_from": 1 if bus_generation else 0,
+                    "generation_to": bus_generation,
+                    "dispatched_at": now_text(),
+                    "result": automation,
+                }
+            )
             state.update(
                 automation=automation,
                 automation_dispatched=True,
                 stages=automation["stages"],
+                asset_bus_generation=bus_generation,
+                stage_batches=stage_batches,
             )
 
         stages = state.get("stages", {})
@@ -1466,7 +1941,15 @@ def main() -> int:
             detail = "TscanPlus 核心扫描阶段已完成界面准备，未点击扫描按钮"
         update_stage(state_path, state, "running", detail)
         exit_code = monitor_tscan_process(
-            child, child_pid, port, state_path, state
+            child,
+            child_pid,
+            port,
+            state_path,
+            state,
+            args.target,
+            args.scope,
+            args.asset_bus.resolve(),
+            not args.prepare_only,
         )
         state.update(status="completed", updated_at=now_text(), exit_code=exit_code)
         atomic_json_write(state_path, state)

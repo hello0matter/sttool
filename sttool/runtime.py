@@ -58,6 +58,14 @@ def atomic_json_write(path: Path, value: object) -> None:
             pass
 
 
+def read_json_file(path: Path) -> dict[str, object]:
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    return value if isinstance(value, dict) else {}
+
+
 def reconcile_component_state(
     run_dir: str | Path,
     component_id: str,
@@ -75,6 +83,7 @@ def reconcile_component_state(
         / "semantic"
         / "sttool_bridge_state.json",
         "tscan_plus": root / "tool_data" / "tscan" / "state.json",
+        "project_coordinator": root / "tool_data" / "coordinator" / "state.json",
     }
     path = state_paths.get(component_id)
     if path is None or not path.is_file():
@@ -775,6 +784,44 @@ class RuntimeManager:
             True,
         )
 
+    def _launch_coordinator(
+        self,
+        request: LaunchRequest,
+        run_dir: Path,
+    ) -> ProcessRecord:
+        python = Path(sys.executable).with_name("pythonw.exe")
+        if not python.is_file():
+            python = Path(sys.executable)
+        environment = {
+            "PYTHONPATH": str(self.app_dir),
+            "OPENAI_BASE_URL": request.api_base_url.strip().rstrip("/"),
+            "OPENAI_MODEL": request.model.strip(),
+        }
+        if request.api_key.strip():
+            environment["OPENAI_API_KEY"] = request.api_key.strip()
+        return self._spawn(
+            "project_coordinator",
+            "项目增量调度与 Agent",
+            str(python),
+            [
+                "-m",
+                "sttool.project_coordinator",
+                "--run-dir",
+                str(run_dir),
+                "--target",
+                request.target.strip(),
+                "--scope",
+                request.scope.strip(),
+                "--project",
+                request.project_name.strip(),
+                "--provider",
+                request.provider,
+            ],
+            str(self.app_dir),
+            False,
+            environment,
+        )
+
     @staticmethod
     def provider_display_name(provider: str) -> str:
         return {
@@ -883,9 +930,10 @@ class RuntimeManager:
             (run_dir / "scope.txt").write_text(request.scope.strip() + "\n", encoding="utf-8")
             prompt = self._build_prompt(request, run_dir, selected)
             (run_dir / "agent_prompt.txt").write_text(prompt, encoding="utf-8")
+            self._agent_script(request, run_dir)
             append_activity(
                 run_dir,
-                "项目配置已保存；准备启动所选工具和本地 Agent。",
+                "项目配置已保存；先启动资产与检测工具，Agent 将由增量调度器在资产稳定后启动。",
             )
 
             started: list[ProcessRecord] = []
@@ -898,13 +946,12 @@ class RuntimeManager:
                         run_dir, f"工具已启动：{tool.name}，PID {record.pid}。"
                     )
 
-                agent_name = self.provider_display_name(request.provider)
-                append_activity(run_dir, f"正在启动本地 Agent：{agent_name}。")
-                agent_record = self._launch_agent(request, run_dir)
-                started.append(agent_record)
+                append_activity(run_dir, "正在启动项目增量调度器。")
+                coordinator_record = self._launch_coordinator(request, run_dir)
+                started.append(coordinator_record)
                 append_activity(
                     run_dir,
-                    f"本地 Agent 已启动：{agent_name}，PID {agent_record.pid}。",
+                    f"项目增量调度器已启动，PID {coordinator_record.pid}；Agent 等待资产稳定。",
                 )
                 state.processes = started
                 atomic_json_write(state_path, state.to_dict())
@@ -1000,8 +1047,8 @@ class RuntimeManager:
                 for tool in selected
                 if tool.restart_on_recovery and tool.tool_id not in active_components
             ]
-            restart_agent = "ai_agent" not in active_components
-            if not recoverable and not restart_agent:
+            restart_coordinator = "project_coordinator" not in active_components
+            if not recoverable and not restart_coordinator:
                 append_activity(run_dir, "恢复取消：常驻工具和 Agent 仍在运行。")
                 raise LaunchError("没有需要恢复的组件；常驻工具和 Agent 仍在运行")
 
@@ -1016,16 +1063,13 @@ class RuntimeManager:
                     append_activity(
                         run_dir, f"工具已恢复：{tool.name}，PID {record.pid}。"
                     )
-                if restart_agent:
-                    agent_name = self.provider_display_name(request.provider)
-                    append_activity(
-                        run_dir, f"正在恢复本地 Agent 会话：{agent_name}。"
-                    )
-                    record = self._launch_agent(request, run_dir, resume=True)
+                if restart_coordinator:
+                    append_activity(run_dir, "正在恢复项目增量调度器。")
+                    record = self._launch_coordinator(request, run_dir)
                     started.append(record)
                     append_activity(
                         run_dir,
-                        f"本地 Agent 会话已恢复：{agent_name}，PID {record.pid}。",
+                        f"项目增量调度器已恢复，PID {record.pid}；将按断点继续资产与 Agent 批次。",
                     )
                 time.sleep(0.8)
                 dead = [item.name for item in started if not pid_alive(item.pid)]
@@ -1114,6 +1158,23 @@ class RuntimeManager:
 
     def stop(self, state: RunState) -> RunState:
         append_activity(state.run_dir, "收到停止实例请求。")
+        run_dir = Path(state.run_dir)
+        coordinator = read_json_file(
+            run_dir / "tool_data" / "coordinator" / "state.json"
+        )
+        managed_pids = [int(coordinator.get("active_agent_pid") or 0)]
+        for pid_path in [
+            run_dir / "agent_shell.pid",
+            *run_dir.glob("agent_batches/*/agent.pid"),
+        ]:
+            try:
+                managed_pids.append(int(pid_path.read_text(encoding="ascii").strip()))
+            except (OSError, UnicodeError, ValueError):
+                pass
+        for pid in dict.fromkeys(managed_pids):
+            if pid_alive(pid):
+                append_activity(state.run_dir, f"正在停止 Agent 批次进程，PID {pid}。")
+                terminate_process_tree(pid)
         for process in reversed(state.processes):
             if pid_alive(process.pid):
                 append_activity(

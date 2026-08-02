@@ -169,6 +169,65 @@ class RunLogDialogTests(unittest.TestCase):
                 "完成",
             )
 
+    def test_project_coordinator_exposes_incremental_state_and_batches(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = run_dir / "tool_data" / "coordinator" / "state.json"
+            asset_bus = run_dir / "tool_data" / "asset_bus" / "assets.json"
+            batch = run_dir / "agent_batches" / "0001" / "batch.json"
+            state_path.parent.mkdir(parents=True)
+            asset_bus.parent.mkdir(parents=True)
+            batch.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "stage": "agent_running",
+                        "detail": "资产代次 3；Agent 已消费到 2；当前 Agent PID 123",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            asset_bus.write_text(json.dumps({"generation": 3}), encoding="utf-8")
+            batch.write_text(json.dumps({"batch": 1}), encoding="utf-8")
+
+            sources = component_paths(
+                run_dir, "project_coordinator", "项目增量调度/Agent"
+            )
+
+            self.assertEqual(
+                component_runtime(run_dir, "project_coordinator"),
+                (
+                    "running",
+                    "agent_running",
+                    "资产代次 3；Agent 已消费到 2；当前 Agent PID 123",
+                ),
+            )
+            self.assertEqual(
+                sources["workdir"], run_dir / "tool_data" / "coordinator"
+            )
+            self.assertIn(asset_bus, sources["states"])
+            self.assertIn(batch, sources["logs"])
+            self.assertIn(run_dir / "risk_summary.md", sources["results"])
+            self.assertIn(run_dir / "agent_batches", sources["results"])
+
+    def test_project_coordinator_activity_filter_owns_asset_bus_events(self) -> None:
+        content = "\n".join(
+            (
+                "[1] 资产总线接收 fscan 新增资产 5 条，代次 2。",
+                "[2] fscan 基础探测已结束。",
+                "[3] Agent 批次 1 已启动。",
+            )
+        )
+
+        filtered = filter_component_activity(
+            content, "project_coordinator", "项目增量调度/Agent"
+        )
+
+        self.assertIn("资产总线", filtered)
+        self.assertIn("Agent 批次", filtered)
+        self.assertNotIn("fscan 基础探测已结束", filtered)
+
 
 if __name__ == "__main__":
     unittest.main()

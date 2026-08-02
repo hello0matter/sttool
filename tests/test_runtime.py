@@ -350,6 +350,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("--sttool-scope", tool.args)
         self.assertIn("--sttool-state", tool.args)
         self.assertIn("--sttool-export", tool.args)
+        self.assertIn("--sttool-asset-bus", tool.args)
+        self.assertIn("{run_dir}/tool_data/asset_bus/assets.json", tool.args)
         self.assertIn("{scope}", tool.args)
         self.assertTrue(any(path.endswith("asset_workflow.py") for path in tool.required_paths))
         self.assertIn(("OPENAI_BASE_URL", "{api_base_url}"), tool.environment)
@@ -766,7 +768,7 @@ class RuntimeTests(unittest.TestCase):
                 self.assertEqual(recovered.recovery_count, 1)
                 self.assertEqual(
                     {item.component_id for item in recovered.processes},
-                    {"persistent", "one-shot", "ai_agent"},
+                    {"persistent", "one-shot", "project_coordinator"},
                 )
                 statuses = {
                     item.component_id: item.status for item in recovered.processes
@@ -783,13 +785,12 @@ class RuntimeTests(unittest.TestCase):
                 )
                 self.assertEqual(
                     recovered.recovery_history[-1]["components"],
-                    ["persistent", "ai_agent"],
+                    ["persistent", "project_coordinator"],
                 )
-                recovery_script = (Path(state.run_dir) / "launch_agent.ps1").read_text(
-                    encoding="utf-8-sig"
+                coordinator_state = (
+                    Path(state.run_dir) / "tool_data" / "coordinator" / "state.json"
                 )
-                self.assertIn("& codexx --yolo resume --last", recovery_script)
-                self.assertNotIn("$prompt", recovery_script)
+                self.assertFalse(coordinator_state.exists())
             finally:
                 manager.cleanup()
 
@@ -866,7 +867,15 @@ class RuntimeTests(unittest.TestCase):
                         encoding="utf-8-sig"
                     ),
                 )
-                self.assertEqual(manager.spawn_environments["ai_agent"], {})
+                self.assertEqual(
+                    manager.spawn_environments["project_coordinator"],
+                    {
+                        "PYTHONPATH": str(root.resolve()),
+                        "OPENAI_BASE_URL": "https://gateway.example/v1",
+                        "OPENAI_MODEL": "gpt-5.5",
+                        "OPENAI_API_KEY": "sk-runtime-only",
+                    },
+                )
                 self.assertEqual(
                     manager.spawn_environments["dummy"],
                     {
@@ -879,7 +888,7 @@ class RuntimeTests(unittest.TestCase):
                     encoding="utf-8"
                 )
                 self.assertIn("工具已启动：Dummy", activity)
-                self.assertIn("本地 Agent 已启动：Codexx", activity)
+                self.assertIn("项目增量调度器已启动", activity)
                 self.assertIn("运行实例启动完成", activity)
                 self.assertNotIn("sk-runtime-only", activity)
             finally:

@@ -1,6 +1,6 @@
 # STTool 渗透项目总控台
 
-STTool 把现有渗透工具按“项目 / 运行实例”统一启动和监控。每次点击启动都会建立独立运行目录，并且必须同时启动一个本地 Codexx CLI 或 Codex CLI Agent。
+STTool 把现有渗透工具按“项目 / 运行实例”统一启动和监控。每次启动都建立独立运行目录；固定工具先收集资产，项目增量调度器在 AssetCommander 和 fscan 完成、资产稳定后再启动本地 Codexx/Codex Agent。
 
 ## 启动
 
@@ -30,8 +30,8 @@ python .\main.py --list-tools
 - AssetCommander：默认启动，工作目录隔离到本次运行目录；通过源码状态机自动执行常用资产流程，不依赖屏幕坐标点击。
 - semantic-recursive-dirscan：默认启动其工程 GUI，自动接收主目标、AssetCommander 域名/已确认 URL 和 fscan Web 服务，并使用自身工程状态继续未完成扫描。
 - fscan、nuclei：自动发包类工具，默认不勾选。
-- TscanPlus：可选 GUI，在 AssetCommander 碰撞前发布稳定资产后立即启动。任务队列依次配置并确认信息收集、端口扫描、Web 指纹、域名枚举、目录枚举、JsFinder、Swagger、WAF、POC、未授权检测、密码检测、AWVS 和 Nessus；每项等待 Tscan 后台或按钮状态确认后才提交下一项。后台进度每 2 秒写入独立日志，运行标志与进度快照不一致或 120 秒无变化时标记疑似挂起。AWVS/Nessus 凭据不会进入 STTool 状态或日志。
-- Codexx CLI / Codex CLI：二选一且必选；分别在本次运行目录执行 `codexx --yolo` 或 `codex --yolo` 并提交项目提示词，不覆盖 CLI 自身的模型、线路、Base URL、Key 或其他配置。
+- TscanPlus：每个运行实例使用独立 exe 名、WebView2 目录和私有 `config.db`，启动时清理历史项目目标、结果和 AWVS 报告。自动调度信息收集、资产探测、Web 指纹、域名/目录枚举、JsFinder、Swagger、WAF、POC、未授权、密码检测、DumpAll、AWVS 和 Nessus；AWVS/Nessus 只在连接测试明确成功后点击开始。
+- Codexx CLI / Codex CLI：二选一且必选；调度器在资产稳定后以 `codexx --yolo` 或 `codex --yolo` 启动首次全量批次，之后只对新代次资产启动增量批次，不覆盖 CLI 自身模型、线路或凭据。
 
 Agent 初始提示词采用证据驱动顺序：先读取项目状态，使用 Microsoft Playwright 查看界面、DOM、响应和网络请求，再按真实产品/版本证据检索厂商公告与 CVE；经源码审查的验证代码只能保存到本实例 `evidence/poc_review/<CVE>/`，执行时采用单目标、低并发、无持久化的最小影响验证，然后再联动固定扫描工具。手动执行 `codex --yolo` 时可复用 `docs/manual-codex-pentest-prompt.md`。
 
@@ -61,12 +61,15 @@ fscan、nuclei 等一次性工具在详情页提供 **单独执行**。输入目
 projects/<项目>/project.json
 projects/<项目>/runs/<时间戳-编号>/
   agent_prompt.txt
-  launch_agent.ps1
+  agent_batches/
+  risk_summary.md
   project.json
   run.json
   scope.txt
   results/
   tool_data/
+    asset_bus/assets.json
+    coordinator/state.json
 ```
 
 同一项目正在运行时可以再次点击“启动新实例”，新实例使用新的运行目录。启动过程有全局独占锁；工具和 Agent 全部通过预检后才会启动，任何组件启动失败都会结束本次已经拉起的进程并把运行标记为失败。
@@ -86,7 +89,7 @@ STTool 会向 AssetCommander 传入项目名、目标、授权范围和本次运
 
 - 授权范围默认是 `*`，含义仅为主目标及本项目已提供或已发现资产全部放行，不会生成 `0.0.0.0/0` 或扫描整个互联网。
 - `scope=*` 时 FScan 只从精确主目标开始；显式 IP/CIDR 范围仍按该范围执行。
-- C 段裂变只在授权范围明确包含 CIDR 时执行，不会根据一个域名或普通 IP 隐式扩大范围。
+- C 段裂变在显式 CIDR 授权下按该网段执行；`scope=*` 时只会根据项目内已提供/已发现 IPv4 派生对应 `/24`，不代表扫描任意互联网地址。
 - IP 反查得到的域名会过滤回当前项目域名范围。
 - 业务关键词可通过 OpenAI Responses 兼容接口生成；使用 `OPENAI_API_KEY`，并可通过 `OPENAI_BASE_URL`、`OPENAI_MODEL` 配置，未配置或请求失败时使用本地关键词。
 - 对撞默认保留原端口，并启用 80、443 和非标准端口；关闭绝对路径、WAF 绕过和强制 SNI，并发数为 150。
@@ -100,3 +103,12 @@ AssetCommander 每次保存工程时会原子更新本次运行目录下的 `res
 路径发现器的 `projects/<项目>/project.json` 和各目标 `runtime_state.json` 是扫描进度的权威记录。“恢复实例”复用这些文件，已完成目标不重复，失败目标不会被自动循环重试，新到达的待运行目标会在当前批次结束后进入下一批。恢复时会刷新内置适配器代码，但保留运行副本中的项目、字典、配置、结果和断点。
 
 STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对应 CLI 已有的模型、线路和安全凭据。工具协作 API Key 使用 Windows DPAPI 加密保存在本机；路径发现器的运行副本会清空 `config.json` 中的 `ai_api_key`，仅向明确启用工具协作 AI 的子进程注入 `OPENAI_API_KEY`。`Codexx: 已安装并登录` 或 `Codex: 已安装并登录` 代表对应 CLI 预检通过；运行实例中的 Agent 状态代表该次本地进程是否仍在线。
+
+
+## 增量资产总线与 Agent 批次
+
+- `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
+- AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。
+- 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
+- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID 和完成时间；项目日志可双击“项目增量调度/Agent”查看。
+- `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。

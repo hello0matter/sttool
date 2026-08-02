@@ -40,6 +40,7 @@ def filter_component_activity(
         "fscan": ("fscan",),
         "nuclei": ("nuclei",),
         "tscan_plus": ("TscanPlus",),
+        "project_coordinator": ("项目增量调度器", "资产总线", "Agent 批次"),
         "ai_agent": ("本地 Agent", "Codex Agent", "Codexx", "Codex"),
     }.get(component_id, ())
     candidates = [component_id, component_name, *aliases]
@@ -49,6 +50,10 @@ def filter_component_activity(
         ("asset_commander", ("assetcommander",)),
         ("semantic_dirscan", ("ai 路径发现", "semantic")),
         ("nuclei", ("nuclei",)),
+        (
+            "project_coordinator",
+            ("项目增量调度器", "资产总线", "agent 批次"),
+        ),
         ("fscan", ("fscan",)),
         ("ai_agent", ("本地 agent", "codex agent", "codexx", "codex")),
     )
@@ -137,6 +142,24 @@ def component_paths(
             "logs": [own_log if own_log.is_file() else component_activity],
             "results": [workdir / "state.json"],
         }
+    if component_id == "project_coordinator":
+        workdir = run_dir / "tool_data" / "coordinator"
+        return {
+            "workdir": workdir,
+            "states": [
+                workdir / "state.json",
+                run_dir / "tool_data" / "asset_bus" / "assets.json",
+            ],
+            "logs": [
+                component_activity,
+                *sorted(run_dir.glob("agent_batches/*/batch.json")),
+            ],
+            "results": [
+                run_dir / "risk_summary.md",
+                run_dir / "tool_data" / "asset_bus" / "assets.json",
+                run_dir / "agent_batches",
+            ],
+        }
     if component_id == "fscan":
         result = run_dir / "results" / "fscan.txt"
         return {
@@ -170,7 +193,14 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         stage = str(state.get("current_step") or "")
         detail = ""
         if status == "completed":
-            detail = "资产工作流已完成；AssetCommander 窗口仍保留，可继续手动操作"
+            if state.get("monitoring_asset_bus"):
+                generation = int(state.get("asset_bus_generation") or 0)
+                detail = (
+                    "资产工作流已完成；正在监听资产总线并执行增量对撞；"
+                    f"已消费代次 {generation}；窗口仍保留"
+                )
+            else:
+                detail = "资产工作流已完成；AssetCommander 窗口仍保留，可继续手动操作"
         steps = state.get("steps")
         if stage and isinstance(steps, dict):
             step = steps.get(stage)
@@ -183,6 +213,19 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             str(state.get("status") or ""),
             str(state.get("stage") or ""),
             str(state.get("detail") or state.get("error") or ""),
+        )
+    if component_id == "project_coordinator":
+        state = load_json(run_dir / "tool_data" / "coordinator" / "state.json")
+        detail = str(
+            state.get("detail")
+            or state.get("agent_launch_error")
+            or state.get("error")
+            or ""
+        )
+        return (
+            str(state.get("status") or ""),
+            str(state.get("stage") or ""),
+            detail,
         )
     if component_id == "semantic_dirscan":
         state = load_json(
@@ -512,6 +555,7 @@ class RunLogDialog(tk.Toplevel):
             ("asset_commander", "AssetCommander"),
             ("semantic_dirscan", "AI 路径发现"),
             ("tscan_plus", "TscanPlus"),
+            ("project_coordinator", "项目增量调度/Agent"),
         ):
             status, stage, detail = component_display_runtime(
                 self.run_dir, component_id
