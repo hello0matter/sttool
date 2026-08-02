@@ -8,6 +8,7 @@ from tempfile import TemporaryDirectory
 
 from sttool.tscan_automation import (
     classify_connection_feedback,
+    dismiss_blocking_modals,
     filter_assets_by_scope,
     normalize_poc_urls,
     password_targets,
@@ -23,7 +24,31 @@ from sttool.tscan_automation import (
 )
 
 
+class ModalPage:
+    def __init__(self, result: object):
+        self.result = result
+        self.script = ""
+
+    def evaluate(self, script: str) -> object:
+        self.script = script
+        return self.result
+
+
 class TscanAutomationTests(unittest.TestCase):
+
+    def test_support_modal_prefers_decline_and_never_opens_external_page(self) -> None:
+        page = ModalPage(["\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528"])
+
+        dismissed = dismiss_blocking_modals(page)
+
+        self.assertEqual(
+            dismissed,
+            ("\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528",),
+        )
+        self.assertIn("\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b", page.script)
+        self.assertIn("\u6682\u65f6\u4e0d\u7528", page.script)
+        self.assertIn(".n-base-close", page.script)
+        self.assertNotIn("\u597d\u7684\uff0c\u53bb\u770b\u770b", page.script)
 
     def test_asset_bus_and_web_fingerprint_targets_keep_fscan_ports(self) -> None:
         with TemporaryDirectory() as temporary:

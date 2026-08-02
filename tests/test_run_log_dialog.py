@@ -271,6 +271,12 @@ class RunLogDialogTests(unittest.TestCase):
                         "queued_asset_targets": ["https://api.example.test/"],
                         "asset_workflow_status": "completed",
                         "asset_handoff_ready": True,
+                        "candidate_count": 4,
+                        "asset_candidate_count": 4,
+                        "fscan_candidate_count": 0,
+                        "accepted_count": 4,
+                        "rejected": 0,
+                        "rejected_targets": [],
                         "source_markers": {
                             "fscan_result": {"size": 1837, "mtime_ns": 123}
                         },
@@ -286,7 +292,48 @@ class RunLogDialogTests(unittest.TestCase):
             self.assertIn("\u5df2\u7eb3\u5165\u626b\u63cf\u76ee\u6807\uff1a2 \u6761", rendered)
             self.assertIn("\u7b49\u5f85\u653e\u884c\u76ee\u6807\uff1a1 \u6761", rendered)
             self.assertIn("http://10.17.200.115:8081/", rendered)
+            self.assertIn("\u6700\u7ec8 Web \u626b\u63cf\u76ee\u6807\uff1a4 \u4e2a", rendered)
+            self.assertIn("AssetCommander \u5019\u9009\uff1a4 \u4e2a", rendered)
+            self.assertIn("Fscan \u5019\u9009\uff1a0 \u4e2a", rendered)
+            self.assertIn("\u8fc7\u6ee4\uff1a0 \u4e2a", rendered)
             self.assertNotIn('"schema_version"', rendered)
+
+    def test_semantic_component_runtime_reconciles_asset_counts(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = (
+                run_dir / "tool_data" / "semantic" / "sttool_bridge_state.json"
+            )
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "asset_workflow_status": "completed",
+                        "targets": [
+                            "http://10.17.200.115/",
+                            "http://10.17.200.115:8081/",
+                            "https://10.17.200.115:443/",
+                            "http://10.17.200.251/",
+                        ],
+                        "asset_candidate_count": 4,
+                        "fscan_candidate_count": 0,
+                        "accepted_count": 4,
+                        "rejected": 0,
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                component_runtime(run_dir, "semantic_dirscan"),
+                (
+                    "running",
+                    "directory_scan",
+                    "\u6700\u7ec8 Web \u626b\u63cf\u76ee\u6807 4 \u4e2a\uff1b"
+                    "AssetCommander \u5019\u9009 4 \u4e2a\uff1b"
+                    "Fscan \u5019\u9009 0 \u4e2a\uff1b\u8fc7\u6ee4 0 \u4e2a",
+                ),
+            )
 
     def test_semantic_runtime_state_has_readable_progress(self) -> None:
         with TemporaryDirectory() as temporary:

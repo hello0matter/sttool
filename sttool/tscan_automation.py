@@ -1241,11 +1241,59 @@ def dismiss_transient_messages(page: Page) -> int:
     )
 
 
+def dismiss_blocking_modals(page: Page) -> tuple[str, ...]:
+    dismissed = page.evaluate(
+        """() => {
+          const visible = (element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const normalizedText = (element) =>
+            (element?.innerText || element?.textContent || '').replace(/\s+/g, ' ').trim();
+          const dialogs = [...new Set(document.querySelectorAll(
+            '[role="dialog"], .n-dialog, .n-modal, .n-card.n-modal'
+          ))];
+          const dismissed = [];
+          for (const dialog of dialogs) {
+            if (!visible(dialog)) continue;
+            const text = normalizedText(dialog);
+            if (!text.includes('\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b')) continue;
+            const decline = [...dialog.querySelectorAll('button')].find(
+              (button) => visible(button) && normalizedText(button) === '\u6682\u65f6\u4e0d\u7528'
+            );
+            if (decline) {
+              decline.click();
+              dismissed.push('\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528');
+              continue;
+            }
+            const close = dialog.querySelector(
+              '.n-base-close, .n-dialog__close, .n-card-header__close, '
+              + 'button[aria-label="\u5173\u95ed"], [aria-label="\u5173\u95ed"]'
+            );
+            if (close && visible(close)) {
+              close.click();
+              dismissed.push('\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u5173\u95ed');
+            }
+          }
+          return dismissed;
+        }"""
+    )
+    if not isinstance(dismissed, list):
+        return ()
+    return tuple(str(item) for item in dismissed if str(item).strip())
+
+
 def safe_click(page: Page, locator: Locator) -> None:
     dismiss_transient_messages(page)
+    dismiss_blocking_modals(page)
     locator.scroll_into_view_if_needed()
     locator.click(force=True)
     page.wait_for_timeout(180)
+    if dismiss_blocking_modals(page):
+        page.wait_for_timeout(180)
+    dismiss_transient_messages(page)
 
 
 def dispatch_stages_on_page(

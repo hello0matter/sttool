@@ -302,7 +302,42 @@ def render_component_state(path: Path, component_id: str) -> str:
                 state.get("queued_asset_targets"),
             )
             rejected = int(state.get("rejected") or 0)
-            if rejected:
+            if any(
+                key in state
+                for key in (
+                    "candidate_count",
+                    "asset_candidate_count",
+                    "fscan_candidate_count",
+                    "accepted_count",
+                    "rejected_targets",
+                )
+            ):
+                targets = state.get("targets")
+                target_count = len(targets) if isinstance(targets, list) else 0
+                lines.append("\u76ee\u6807\u6570\u91cf\u5bf9\u8d26\uff1a")
+                lines.append(
+                    "  \u2022 \u6700\u7ec8 Web \u626b\u63cf\u76ee\u6807\uff1a"
+                    f"{int(state.get('accepted_count') or target_count)} \u4e2a"
+                )
+                lines.append(
+                    "  \u2022 AssetCommander \u5019\u9009\uff1a"
+                    f"{int(state.get('asset_candidate_count') or 0)} \u4e2a"
+                )
+                lines.append(
+                    "  \u2022 Fscan \u5019\u9009\uff1a"
+                    f"{int(state.get('fscan_candidate_count') or 0)} \u4e2a"
+                )
+                lines.append(
+                    "  \u2022 \u539f\u59cb\u5019\u9009\u603b\u6570\uff1a"
+                    f"{int(state.get('candidate_count') or 0)} \u4e2a"
+                )
+                lines.append(f"  \u2022 \u8fc7\u6ee4\uff1a{rejected} \u4e2a")
+                summarize_list(
+                    lines,
+                    "\u88ab\u8fc7\u6ee4\u76ee\u6807",
+                    state.get("rejected_targets"),
+                )
+            elif rejected:
                 lines.append(f"\u56e0\u6388\u6743\u8303\u56f4\u88ab\u8fc7\u6ee4\uff1a{rejected} \u6761")
             error = str(state.get("last_error") or "").strip()
             if error:
@@ -452,7 +487,28 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             )
         targets = state.get("targets")
         target_count = len(targets) if isinstance(targets, list) else 0
-        return "running", "directory_scan", f"已同步 {target_count} 个扫描目标"
+        if any(
+            key in state
+            for key in (
+                "asset_candidate_count",
+                "fscan_candidate_count",
+                "accepted_count",
+                "rejected",
+            )
+        ):
+            accepted_count = int(state.get("accepted_count") or target_count)
+            asset_count = int(state.get("asset_candidate_count") or 0)
+            fscan_count = int(state.get("fscan_candidate_count") or 0)
+            rejected_count = int(state.get("rejected") or 0)
+            return (
+                "running",
+                "directory_scan",
+                f"\u6700\u7ec8 Web \u626b\u63cf\u76ee\u6807 {accepted_count} \u4e2a\uff1b"
+                f"AssetCommander \u5019\u9009 {asset_count} \u4e2a\uff1b"
+                f"Fscan \u5019\u9009 {fscan_count} \u4e2a\uff1b"
+                f"\u8fc7\u6ee4 {rejected_count} \u4e2a",
+            )
+        return "running", "directory_scan", f"\u5df2\u540c\u6b65 {target_count} \u4e2a\u626b\u63cf\u76ee\u6807"
     if component_id in {"fscan", "nuclei"}:
         result = run_dir / "results" / f"{component_id}.txt"
         if result.is_file():
