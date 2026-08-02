@@ -17,6 +17,7 @@ from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
 
+import psutil
 from playwright.sync_api import Locator, Page, sync_playwright
 
 
@@ -34,6 +35,7 @@ PORT_SCAN = "\u7aef\u53e3\u626b\u63cf"
 FINGERPRINT_IDENTIFICATION = "\u6307\u7eb9\u8bc6\u522b"
 ONLY_ONE_ACCOUNT = "\u4ec5\u7834\u89e3\u4e00\u4e2a\u8d26\u6237"
 ASSET_WAIT_SECONDS = 1.0
+CDP_START_TIMEOUT_SECONDS = 90.0
 
 
 _TSCAN_RUNTIME_TABLES = {
@@ -437,14 +439,32 @@ def workflow_assets_ready(path: Path) -> bool:
 def process_alive(pid: int | None) -> bool:
     if not pid or pid <= 0:
         return False
-    result = subprocess.run(
-        ["tasklist", "/FI", f"PID eq {pid}", "/NH"],
-        capture_output=True,
-        text=True,
-        check=False,
-        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
-    )
-    return str(pid) in result.stdout
+    try:
+        process = psutil.Process(pid)
+        return process.is_running() and process.status() != psutil.STATUS_ZOMBIE
+    except (psutil.Error, OSError, ValueError):
+        return False
+
+
+def process_creation_token(pid: int | None) -> int:
+    if not pid or pid <= 0:
+        return 0
+    try:
+        return int(psutil.Process(pid).create_time() * 1_000_000)
+    except (psutil.Error, OSError, ValueError):
+        return 0
+
+
+def tscan_process_alive(pid: int | None, creation_token: int, executable: Path) -> bool:
+    if not process_alive(pid):
+        return False
+    if creation_token:
+        return process_creation_token(pid) == creation_token
+    try:
+        actual_executable = Path(psutil.Process(int(pid)).exe()).resolve()
+    except (psutil.Error, OSError, ValueError):
+        return False
+    return actual_executable == executable.resolve()
 
 
 def append_activity(state_path: Path, message: str) -> None:
@@ -1557,7 +1577,11 @@ def wait_for_asset_bundle(
         )
 
     last_detail = ""
-    while process_alive(child_pid):
+    while tscan_process_alive(
+        child_pid,
+        int(state.get("process_creation_token") or 0),
+        Path(str(state.get("exe") or "")),
+    ):
         workflow = read_json(asset_state)
         workflow_status = str(workflow.get("status", "waiting")).lower()
         if workflow_assets_ready(asset_state) and asset_export.is_file():
@@ -1605,10 +1629,18 @@ def wait_for_asset_bundle(
     return None
 
 
-def monitor_process(child: subprocess.Popen[bytes] | None, pid: int) -> int:
+def monitor_process(
+    child: subprocess.Popen[bytes] | None,
+    pid: int,
+    state: dict[str, object],
+) -> int:
     if child is not None:
         return int(child.wait())
-    while process_alive(pid):
+    while tscan_process_alive(
+        pid,
+        int(state.get("process_creation_token") or 0),
+        Path(str(state.get("exe") or "")),
+    ):
         time.sleep(1.0)
     return 0
 
@@ -1715,7 +1747,11 @@ def monitor_tscan_process(
                 f"http://127.0.0.1:{port}"
             )
             page = browser.contexts[0].pages[0]
-            while process_alive(pid):
+            while tscan_process_alive(
+                pid,
+                int(state.get("process_creation_token") or 0),
+                Path(str(state.get("exe") or "")),
+            ):
                 dismissed_modals = dismiss_blocking_modals(page)
                 if dismissed_modals:
                     append_activity(
@@ -1827,7 +1863,7 @@ def monitor_tscan_process(
                 time.sleep(2.0)
     except Exception as exc:
         append_activity(state_path, f"进度监控降级为进程监控：{exc}")
-    return monitor_process(child, pid)
+    return monitor_process(child, pid, state)
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -1851,7 +1887,12 @@ def main() -> int:
     state_path = args.state.resolve()
     previous = read_json(state_path)
     previous_exe = Path(str(previous.get("exe") or ""))
-    if process_alive(int(previous.get("pid") or 0)) and previous_exe.is_file():
+    child_pid = int(previous.get("pid") or 0)
+    child_creation_token = int(previous.get("process_creation_token") or 0)
+    if (
+        previous_exe.is_file()
+        and tscan_process_alive(child_pid, child_creation_token, previous_exe)
+    ):
         exe = previous_exe.resolve()
     elif source_exe.is_file():
         exe = prepare_tscan_workspace(source_exe, state_path)
@@ -1869,6 +1910,7 @@ def main() -> int:
         "project": args.project,
         "scope": args.scope,
         "pid": None,
+        "process_creation_token": child_creation_token,
         "cdp_port": None,
         "automation": previous.get("automation"),
         "automation_dispatched": bool(previous.get("automation_dispatched", False)),
@@ -1885,18 +1927,21 @@ def main() -> int:
         return 1
 
     child: subprocess.Popen[bytes] | None = None
-    child_pid = int(previous.get("pid") or 0)
     port = int(previous.get("cdp_port") or 0)
     reattached = False
     try:
-        if process_alive(child_pid) and port:
+        if tscan_process_alive(child_pid, child_creation_token, previous_exe) and port:
             try:
                 wait_for_cdp(port, timeout=2.0)
             except RuntimeError:
                 pass
             else:
                 reattached = True
-                state.update(pid=child_pid, cdp_port=port)
+                state.update(
+                    pid=child_pid,
+                    process_creation_token=child_creation_token,
+                    cdp_port=port,
+                )
                 update_stage(
                     state_path,
                     state,
@@ -1929,9 +1974,19 @@ def main() -> int:
                     env=webview_environment(port, run_dir),
                 )
                 child_pid = child.pid
-                state.update(pid=child_pid, updated_at=now_text())
-                atomic_json_write(state_path, state)
-                wait_for_cdp(port)
+                child_creation_token = process_creation_token(child_pid)
+                state.update(
+                    pid=child_pid,
+                    process_creation_token=child_creation_token,
+                    updated_at=now_text(),
+                )
+                update_stage(
+                    state_path,
+                    state,
+                    "waiting_webview2",
+                    f"TscanPlus 已启动，等待 WebView2/CDP 就绪，最长 {int(CDP_START_TIMEOUT_SECONDS)} 秒",
+                )
+                wait_for_cdp(port, timeout=CDP_START_TIMEOUT_SECONDS)
 
         if not state["automation_dispatched"]:
             assets = wait_for_asset_bundle(
@@ -2035,8 +2090,12 @@ def main() -> int:
         )
         atomic_json_write(state_path, state)
         append_activity(state_path, str(state["detail"]))
-        if process_alive(child_pid):
-            monitor_process(child, child_pid)
+        if tscan_process_alive(
+            child_pid,
+            int(state.get("process_creation_token") or 0),
+            Path(str(state.get("exe") or "")),
+        ):
+            monitor_process(child, child_pid, state)
         return 1
 
 

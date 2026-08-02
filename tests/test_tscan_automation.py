@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
+import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sttool.tscan_automation import (
+    CDP_START_TIMEOUT_SECONDS,
     classify_connection_feedback,
     dismiss_blocking_modals,
     filter_assets_by_scope,
@@ -14,11 +17,13 @@ from sttool.tscan_automation import (
     normalize_poc_urls,
     password_targets,
     prepare_tscan_workspace,
+    process_creation_token,
     read_asset_bundle,
     read_asset_bus_bundle,
     scope_allows_all,
     stage_status_from_result,
     target_asset_bundle,
+    tscan_process_alive,
     web_fingerprint_targets,
     workflow_assets_ready,
     workflow_completed,
@@ -36,6 +41,17 @@ class ModalPage:
 
 
 class TscanAutomationTests(unittest.TestCase):
+    def test_tscan_process_identity_rejects_reused_pid(self) -> None:
+        token = process_creation_token(os.getpid())
+        executable = Path(sys.executable)
+
+        self.assertGreaterEqual(CDP_START_TIMEOUT_SECONDS, 60)
+        self.assertTrue(tscan_process_alive(os.getpid(), token, executable))
+        self.assertFalse(tscan_process_alive(os.getpid(), token + 1, executable))
+        self.assertTrue(tscan_process_alive(os.getpid(), 0, executable))
+        self.assertFalse(
+            tscan_process_alive(os.getpid(), 0, executable.with_name("foreign.exe"))
+        )
 
     def test_monitoring_state_explains_idle_cpu_as_standby(self) -> None:
         self.assertEqual(
