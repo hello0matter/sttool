@@ -17,7 +17,7 @@ from .models import (
     normalize_provider,
 )
 from .registry import availability
-from .run_log_dialog import RunLogDialog
+from .run_log_dialog import RunLogDialog, component_summary_status
 from .runtime import LaunchError, RuntimeManager, safe_project_name
 from .secret_store import SecretStoreError, load_api_key, save_api_key
 from .tool_details import ToolDetailsDialog
@@ -566,7 +566,10 @@ class LauncherApp(tk.Tk):
         self.run_tree.delete(*self.run_tree.get_children())
         for state in sorted(self.run_states.values(), key=lambda item: item.created_at, reverse=True):
             state_key = self._state_key(state)
-            components = ", ".join(f"{item.name}:{'运行' if item.status == 'running' else '结束'}" for item in state.processes)
+            components = ", ".join(
+                f"{item.name}:{component_summary_status(Path(state.run_dir), item.component_id, item.status)}"
+                for item in state.processes
+            )
             self.run_tree.insert(
                 "",
                 "end",

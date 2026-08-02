@@ -232,6 +232,31 @@ def component_display_runtime(
     return tool_status, stage, detail
 
 
+def component_summary_status(
+    run_dir: Path, component_id: str, process_status: str
+) -> str:
+    status, _stage, _detail = component_display_runtime(run_dir, component_id)
+    labels = {
+        "completed": "完成",
+        "running": "运行",
+        "waiting_assets": "等待资产",
+        "failed": "失败",
+        "interrupted": "中断",
+        "stopped": "已停止",
+        "exited": "已退出",
+    }
+    label = labels.get(status)
+    if label is None:
+        label = "运行" if process_status == "running" else "结束"
+    if (
+        component_id == "asset_commander"
+        and status == "completed"
+        and process_status == "running"
+    ):
+        return "完成（窗口保留）"
+    return label
+
+
 class ComponentLogDialog(tk.Toplevel):
     def __init__(
         self,

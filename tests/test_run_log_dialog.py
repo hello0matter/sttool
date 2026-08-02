@@ -10,6 +10,7 @@ from sttool.run_log_dialog import (
     filter_component_activity,
     component_paths,
     component_runtime,
+    component_summary_status,
 )
 
 
@@ -145,6 +146,28 @@ class RunLogDialogTests(unittest.TestCase):
             self.assertEqual(status, "completed")
             self.assertEqual(stage, "")
             self.assertIn("窗口仍保留", detail)
+
+
+    def test_completed_asset_summary_distinguishes_retained_window(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = (
+                run_dir / "tool_data" / "asset_commander" / "workflow_state.json"
+            )
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps({"status": "completed", "current_step": "", "steps": {}}),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                component_summary_status(run_dir, "asset_commander", "running"),
+                "完成（窗口保留）",
+            )
+            self.assertEqual(
+                component_summary_status(run_dir, "asset_commander", "exited"),
+                "完成",
+            )
 
 
 if __name__ == "__main__":
