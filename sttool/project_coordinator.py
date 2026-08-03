@@ -365,6 +365,26 @@ def response_text(value: object) -> str:
     return ""
 
 
+AI_SUMMARY_INPUT_MAX_CHARS = 48_000
+AI_SUMMARY_TIMEOUT_SECONDS = 20
+
+
+def compact_ai_summary_input(
+    summary: str, max_chars: int = AI_SUMMARY_INPUT_MAX_CHARS
+) -> str:
+    if len(summary) <= max_chars:
+        return summary
+    separator = (
+        "\n\n[... full local summary retained; middle omitted from AI input ...]\n\n"
+    )
+    content_budget = max_chars - len(separator)
+    if content_budget <= 0:
+        return summary[:max_chars]
+    head_size = content_budget * 2 // 3
+    tail_size = content_budget - head_size
+    return summary[:head_size] + separator + summary[-tail_size:]
+
+
 def ai_enhance_summary(summary: str) -> tuple[str, str]:
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
     base_url = os.environ.get("OPENAI_BASE_URL", "").strip().rstrip("/")
@@ -382,7 +402,9 @@ def ai_enhance_summary(summary: str) -> tuple[str, str]:
         "只归纳已有证据，不夸大，不生成固定报告模板。"
     )
     user_prompt = (
-        "请优化下面的项目风险成果摘要，保留全部 Web 目标和证据状态：\n\n" + summary
+        "请基于下面的阶段性摘要生成简洁的风险分析补充。原始完整摘要会单独保留，"
+        "不要重复资产清单，不要把待验证线索写成已确认漏洞：\n\n"
+        + compact_ai_summary_input(summary)
     )
     attempts = (
         (
@@ -418,11 +440,17 @@ def ai_enhance_summary(summary: str) -> tuple[str, str]:
             method="POST",
         )
         try:
-            with urlopen(request, timeout=60) as response:
+            with urlopen(request, timeout=AI_SUMMARY_TIMEOUT_SECONDS) as response:
                 value = json.loads(response.read().decode("utf-8"))
             content = response_text(value)
             if content:
-                return content + "\n", "项目 AI 已优化风险摘要"
+                return (
+                    summary.rstrip()
+                    + "\n\n## 工具协作 AI 阶段分析\n\n"
+                    + content.strip()
+                    + "\n",
+                    "项目 AI 已追加阶段性风险分析",
+                )
             errors.append(f"{Path(endpoint).name}:empty")
         except (OSError, URLError, ValueError, KeyError, IndexError, TypeError) as exc:
             errors.append(f"{Path(endpoint).name}:{type(exc).__name__}")
@@ -490,6 +518,7 @@ def parse_args() -> argparse.Namespace:
         choices=("", "low", "medium", "high", "xhigh"),
         default="",
     )
+    parser.add_argument("--agent-base-url", default="")
     parser.add_argument("--settle-seconds", type=float, default=20)
     parser.add_argument("--max-agent-batches", type=int, default=8)
     parser.add_argument("--poll-seconds", type=float, default=2)
@@ -535,6 +564,7 @@ def main() -> int:
     state.setdefault("active_agent_creation_token", 0)
     state.setdefault("vuln_intel_generation", 0)
     state.setdefault("vuln_intel_status", "pending")
+    state.setdefault("find_gh_poc_status", "pending")
     state["agent_failure_count"] = 0
     state["agent_retry_not_before"] = 0
     state.update(
@@ -699,53 +729,77 @@ def main() -> int:
             )
             (run_dir / "risk_summary.md").write_text(summary, encoding="utf-8")
             if bus.generation > int(state.get("vuln_intel_generation") or 0):
-                state.update(
-                    stage="vulnerability_intelligence",
-                    detail="资产已稳定，正在关联产品版本、CVE、KEV、公开 PoC 与 Nuclei 模板。",
-                    vuln_intel_status="running",
-                    updated_at=now_text(),
-                )
-                atomic_json_write(state_path, state)
-                append_activity(
-                    run_dir,
-                    f"开始生成漏洞情报，处理资产代次 {bus.generation}；PoC 仅收集元数据，不自动执行。",
-                )
-                try:
-                    intel = generate_vulnerability_intel(
-                        run_dir,
-                        args.vulnx or Path("__missing_vulnx__"),
-                        args.find_gh_poc,
+                if "vulnx" not in tools:
+                    state["vuln_intel_status"] = "not_selected"
+                    state["find_gh_poc_status"] = (
+                        "blocked_without_vulnx"
+                        if "find_gh_poc" in tools
+                        else "not_selected"
                     )
-                except Exception as exc:
-                    state["vuln_intel_status"] = "failed"
-                    state["vuln_intel_error"] = f"{type(exc).__name__}: {exc}"
                     state["vuln_intel_candidates"] = 0
+                    state["vuln_intel_high_confidence"] = 0
+                    state["vuln_intel_generation"] = bus.generation
                     append_activity(
                         run_dir,
-                        f"漏洞情报生成失败：{type(exc).__name__}: {exc}；Agent 仍按已有证据继续。",
+                        "漏洞情报阶段未勾选 vulnx，本代资产跳过 CVE/PoC 联动。",
                     )
                 else:
-                    state["vuln_intel_status"] = str(
-                        intel.get("status") or "completed"
+                    state.update(
+                        stage="vulnerability_intelligence",
+                        detail="资产已稳定，正在关联产品版本、CVE、KEV、公开 PoC 与 Nuclei 模板。",
+                        vuln_intel_status="running",
+                        find_gh_poc_status=(
+                            "running" if "find_gh_poc" in tools else "not_selected"
+                        ),
+                        updated_at=now_text(),
                     )
-                    state["vuln_intel_candidates"] = int(
-                        intel.get("candidate_count") or 0
-                    )
-                    state["vuln_intel_high_confidence"] = int(
-                        intel.get("high_confidence_count") or 0
-                    )
-                    state["vuln_intel_updated_at"] = str(
-                        intel.get("generated_at") or now_text()
-                    )
-                    state.pop("vuln_intel_error", None)
+                    atomic_json_write(state_path, state)
                     append_activity(
                         run_dir,
-                        "漏洞情报已生成："
-                        f"候选 {state['vuln_intel_candidates']}，"
-                        f"带本地证据与模板线索 {state['vuln_intel_high_confidence']}；"
-                        "未知 PoC 保持禁用。",
+                        f"开始生成漏洞情报，处理资产代次 {bus.generation}；PoC 仅收集元数据，不自动执行。",
                     )
-                state["vuln_intel_generation"] = bus.generation
+                    try:
+                        intel = generate_vulnerability_intel(
+                            run_dir,
+                            args.vulnx or Path("__missing_vulnx__"),
+                            args.find_gh_poc if "find_gh_poc" in tools else None,
+                        )
+                    except Exception as exc:
+                        state["vuln_intel_status"] = "failed"
+                        state["find_gh_poc_status"] = "failed"
+                        state["vuln_intel_error"] = f"{type(exc).__name__}: {exc}"
+                        state["vuln_intel_candidates"] = 0
+                        append_activity(
+                            run_dir,
+                            f"漏洞情报生成失败：{type(exc).__name__}: {exc}；Agent 仍按已有证据继续。",
+                        )
+                    else:
+                        state["vuln_intel_status"] = str(
+                            intel.get("status") or "completed"
+                        )
+                        tool_status = intel.get("tool_status")
+                        if isinstance(tool_status, dict):
+                            state["find_gh_poc_status"] = str(
+                                tool_status.get("find_gh_poc") or "completed"
+                            )
+                        state["vuln_intel_candidates"] = int(
+                            intel.get("candidate_count") or 0
+                        )
+                        state["vuln_intel_high_confidence"] = int(
+                            intel.get("high_confidence_count") or 0
+                        )
+                        state["vuln_intel_updated_at"] = str(
+                            intel.get("generated_at") or now_text()
+                        )
+                        state.pop("vuln_intel_error", None)
+                        append_activity(
+                            run_dir,
+                            "漏洞情报已生成："
+                            f"候选 {state['vuln_intel_candidates']}，"
+                            f"带本地证据与模板线索 {state['vuln_intel_high_confidence']}；"
+                            "未知 PoC 保持禁用。",
+                        )
+                    state["vuln_intel_generation"] = bus.generation
             if args.ai_summary:
                 enhanced, ai_status = ai_enhance_summary(summary)
             else:
@@ -769,6 +823,7 @@ def main() -> int:
                     prompt,
                     args.agent_model,
                     args.reasoning_effort,
+                    args.agent_base_url,
                     args.terminal_window,
                 )
             except Exception as exc:

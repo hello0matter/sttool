@@ -30,6 +30,7 @@ class ToolDetailsDialog(tk.Toplevel):
         api_base_url: str = "",
         model: str = "",
         api_key: str = "",
+        github_token: str = "",
     ) -> None:
         super().__init__(parent)
         self.tool = tool
@@ -44,6 +45,7 @@ class ToolDetailsDialog(tk.Toplevel):
         self.api_base_url = api_base_url
         self.model = model
         self.api_key = api_key
+        self.github_token = github_token
 
         self.title(f"工具详情与结果 - {tool.name}")
         self.geometry("920x620")
@@ -239,6 +241,7 @@ class ToolDetailsDialog(tk.Toplevel):
             api_base_url=self.api_base_url,
             model=self.model,
             api_key=self.api_key,
+            github_token=self.github_token,
         )
 
     def _open_result(self) -> None:

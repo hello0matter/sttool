@@ -162,14 +162,50 @@ class RuntimeTests(unittest.TestCase):
                 processes=[record],
             )
             manager = RuntimeManager(run_dir, [], st_root=run_dir)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            launch_script = batch_dir / "launch.ps1"
+            launch_script.write_text("Write-Host 'legacy launch'\n", encoding="utf-8")
+            (batch_dir / "launch.token").write_text("token", encoding="ascii")
 
             with patch("sttool.runtime.terminate_process_tree") as terminate:
                 manager.stop(state)
 
             terminate.assert_not_called()
             self.assertEqual(state.processes[0].status, "stopped")
+            self.assertFalse((batch_dir / "launch.token").exists())
+            self.assertIn(
+                "project is stopped",
+                launch_script.read_text(encoding="utf-8-sig"),
+            )
+            self.assertEqual(len(list(batch_dir.glob("launch.stopped-*.ps1"))), 1)
             activity = (run_dir / "activity.log").read_text(encoding="utf-8")
             self.assertIn("PID 已被其他进程占用", activity)
+
+    def test_refresh_preserves_explicitly_stopped_run_state(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state = RunState(
+                run_id="run",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="stopped",
+                processes=[],
+            )
+            manager = RuntimeManager(run_dir, [], st_root=run_dir)
+
+            refreshed = manager.refresh(state)
+
+            self.assertEqual(refreshed.status, "stopped")
+            persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "stopped")
 
     def test_atomic_json_write_retries_transient_replace_permission_error(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -530,6 +566,9 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(tools["find_gh_poc"].allow_standalone)
         self.assertFalse(tools["find_gh_poc"].sends_requests)
         self.assertIn("--exe", tools["find_gh_poc"].args)
+        self.assertTrue(tools["vulnx"].coordinator_managed)
+        self.assertTrue(tools["find_gh_poc"].coordinator_managed)
+        self.assertTrue(all(tool.default_selected for tool in tools.values()))
         self.assertFalse(tools["asset_commander"].allow_standalone)
         self.assertFalse(tools["semantic_dirscan"].allow_standalone)
 
@@ -909,6 +948,23 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(first, (True, "已安装；登录检测超时，将在启动时验证"))
             self.assertEqual(cached, first)
 
+    def test_preflight_rejects_url_as_project_name(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = RuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="https://api.example.test/v1",
+                target="https://target.example.test",
+                scope="target.example.test",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=(),
+                user_prompt="",
+                authorization_confirmed=True,
+            )
+            with self.assertRaisesRegex(Exception, "\u7a33\u5b9a\u540d\u79f0"):
+                manager.preflight(request)
+
     def test_preflight_requires_authorization_before_provider_check(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1082,6 +1138,43 @@ class RuntimeTests(unittest.TestCase):
                 manager.recover(state, authorization_confirmed=False)
             self.assertIn("授权", str(raised.exception))
 
+    def test_coordinator_managed_tool_is_selected_but_not_spawned_as_process(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = ToolDefinition(
+                tool_id="intel",
+                name="Intel",
+                category="test",
+                description="coordinator stage",
+                executable=sys.executable,
+                coordinator_managed=True,
+            )
+            manager = OfflineRuntimeManager(root, [tool], st_root=root)
+            request = LaunchRequest(
+                project_name="managed",
+                target="https://example.com",
+                scope="*",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=("intel",),
+                user_prompt="test",
+                authorization_confirmed=True,
+            )
+
+            state = manager.start(request)
+            try:
+                self.assertEqual(
+                    [item.component_id for item in state.processes],
+                    ["project_coordinator"],
+                )
+                self.assertNotIn("intel", manager.spawn_commands)
+                activity = (Path(state.run_dir) / "activity.log").read_text(
+                    encoding="utf-8"
+                )
+                self.assertIn("Intel；等待资产稳定后按代次执行", activity)
+            finally:
+                manager.cleanup()
+
     def test_start_transaction(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1203,6 +1296,7 @@ class RuntimeTests(unittest.TestCase):
                 authorization_confirmed=True,
                 agent_model="gpt-5.6-sol",
                 reasoning_effort="high",
+                agent_base_url="https://codex.example/v1/",
             )
 
             script = manager._agent_script(request, run_dir).read_text(
@@ -1213,6 +1307,9 @@ class RuntimeTests(unittest.TestCase):
                 "& codexx --yolo -m 'gpt-5.6-sol' "
                 "-c 'model_reasoning_effort=\"high\"' $bootstrapPrompt",
                 script,
+            )
+            self.assertIn(
+                "$env:OPENAI_BASE_URL = 'https://codex.example/v1'", script
             )
 
     def test_claude_agent_script_applies_model_effort_and_resume(self) -> None:
@@ -1233,6 +1330,7 @@ class RuntimeTests(unittest.TestCase):
                 authorization_confirmed=True,
                 agent_model="claude-opus-4-1",
                 reasoning_effort="high",
+                agent_base_url="https://claude.example/",
             )
 
             script = manager._agent_script(request, run_dir).read_text(
@@ -1248,6 +1346,9 @@ class RuntimeTests(unittest.TestCase):
             )
             self.assertIn(f"& {options} $bootstrapPrompt", script)
             self.assertIn(f"& {options} --continue", resumed)
+            self.assertIn(
+                "$env:ANTHROPIC_BASE_URL = 'https://claude.example'", script
+            )
 
     def test_project_persists_agent_and_workflow_settings(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -1264,6 +1365,8 @@ class RuntimeTests(unittest.TestCase):
                 authorization_confirmed=True,
                 agent_model="gpt-5.6-sol",
                 reasoning_effort="xhigh",
+                agent_base_url="https://codex.example/v1/",
+                github_token="github-secret-token",
                 work_mode="fast",
                 auto_agent=True,
                 wait_for_asset_commander=False,
@@ -1278,9 +1381,13 @@ class RuntimeTests(unittest.TestCase):
                 project = json.loads(
                     (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(project["schema_version"], 3)
+                self.assertEqual(project["schema_version"], 4)
                 self.assertEqual(project["agent_model"], "gpt-5.6-sol")
                 self.assertEqual(project["reasoning_effort"], "xhigh")
+                self.assertEqual(
+                    project["agent_base_url"], "https://codex.example/v1"
+                )
+                self.assertNotIn("github-secret-token", json.dumps(project))
                 self.assertEqual(project["work_mode"], "fast")
                 self.assertFalse(project["wait_for_asset_commander"])
                 self.assertFalse(project["wait_for_fscan"])
@@ -1291,6 +1398,13 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("gpt-5.6-sol", coordinator)
                 self.assertIn("--reasoning-effort", coordinator)
                 self.assertIn("xhigh", coordinator)
+                self.assertIn("--agent-base-url", coordinator)
+                self.assertIn("https://codex.example/v1", coordinator)
+                self.assertEqual(
+                    manager.spawn_environments["project_coordinator"]["GITHUB_TOKEN"],
+                    "github-secret-token",
+                )
+                self.assertNotIn("github-secret-token", " ".join(coordinator))
                 self.assertIn("--wait-asset-commander", coordinator)
                 self.assertIn("false", coordinator)
                 self.assertIn("--vulnx", coordinator)

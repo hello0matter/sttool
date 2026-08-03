@@ -5,7 +5,12 @@ import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from sttool.secret_store import load_api_key, save_api_key
+from sttool.secret_store import (
+    load_api_key,
+    load_secret_values,
+    save_api_key,
+    save_secret_values,
+)
 
 
 @unittest.skipUnless(os.name == "nt", "Windows DPAPI only")
@@ -21,6 +26,35 @@ class SecretStoreTests(unittest.TestCase):
             self.assertEqual(load_api_key(path), secret)
             save_api_key(path, "")
             self.assertFalse(path.exists())
+
+    def test_multiple_secrets_are_encrypted_and_legacy_api_key_is_preserved(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "launcher_secrets.dat"
+            save_api_key(path, "legacy-shared-key")
+            self.assertEqual(
+                load_secret_values(path),
+                {"shared_ai_api_key": "legacy-shared-key"},
+            )
+
+            save_secret_values(
+                path,
+                {
+                    "shared_ai_api_key": "shared-key",
+                    "github_token": "github-token",
+                },
+            )
+
+            encrypted = path.read_bytes()
+            self.assertNotIn(b"shared-key", encrypted)
+            self.assertNotIn(b"github-token", encrypted)
+            self.assertEqual(
+                load_secret_values(path),
+                {
+                    "shared_ai_api_key": "shared-key",
+                    "github_token": "github-token",
+                },
+            )
+            self.assertEqual(load_api_key(path), "shared-key")
 
 
 if __name__ == "__main__":

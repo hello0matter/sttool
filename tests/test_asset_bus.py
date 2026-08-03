@@ -1,13 +1,16 @@
 ﻿from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from sttool.asset_bus import (
     AssetBus,
+    atomic_json_write,
     extract_tscan_assets,
     normalize_asset,
     parse_asset_export,
@@ -16,6 +19,35 @@ from sttool.asset_bus import (
 
 
 class AssetBusTests(unittest.TestCase):
+    def test_atomic_json_write_retries_transient_replace_lock(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            original_replace = os.replace
+            attempts = 0
+
+            def flaky_replace(source: str, destination: str | Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("temporarily locked")
+                original_replace(source, destination)
+
+            with (
+                patch("sttool.asset_bus.os.replace", side_effect=flaky_replace),
+                patch("sttool.asset_bus.time.sleep") as sleep,
+            ):
+                atomic_json_write(path, {"generation": 1})
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {"generation": 1},
+            )
+            self.assertEqual(attempts, 3)
+            self.assertEqual(
+                [call.args[0] for call in sleep.call_args_list],
+                [0.01, 0.03],
+            )
+
     def test_fscan_parser_keeps_all_web_urls_and_open_endpoints(self) -> None:
         content = """10.17.200.115:22
 http://10.17.200.115:81 [gateway] 200 nginx

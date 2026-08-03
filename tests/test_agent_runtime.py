@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import os
+import threading
+import time
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
-from sttool.agent_launcher import launch_agent_batch
+from sttool.agent_launcher import launch_agent_batch, write_agent_batch_script
 from sttool.agent_runtime import (
     agent_terminal_window_name,
     claim_coordinator_owner,
@@ -40,6 +42,64 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertIsNone(duplicate)
             release_coordinator_owner(owner_path, owner or {})
             self.assertFalse(owner_path.exists())
+
+    def test_batch_script_uses_a_one_shot_launch_token(self) -> None:
+        with TemporaryDirectory() as temporary:
+            batch_dir = Path(temporary) / "run" / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            (batch_dir / "prompt.txt").write_text("test", encoding="utf-8")
+
+            script_path, _pid_path = write_agent_batch_script(
+                batch_dir, "claude", "demo"
+            )
+
+            script = script_path.read_text(encoding="utf-8-sig")
+            token_path = batch_dir / "launch.token"
+            self.assertTrue(token_path.is_file())
+            self.assertIn("Move-Item -LiteralPath $launchTokenPath", script)
+            self.assertIn("stale or duplicate Agent launch", script)
+
+    def test_terminal_handoff_waits_for_inner_powershell_pid(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run"
+            run_dir.mkdir()
+
+            class Launcher:
+                @staticmethod
+                def poll():
+                    return 0
+
+            def fake_which(name: str) -> str:
+                if name == "wt.exe":
+                    return "wt.exe"
+                if name == "pwsh.exe":
+                    return "pwsh.exe"
+                return ""
+
+            def fake_popen(_command, **_kwargs):
+                pid_path = run_dir / "agent_batches" / "0001" / "agent.pid"
+
+                def publish_pid() -> None:
+                    time.sleep(0.05)
+                    pid_path.write_text(str(os.getpid()), encoding="ascii")
+
+                threading.Thread(target=publish_pid, daemon=True).start()
+                return Launcher()
+
+            with (
+                patch("sttool.agent_launcher.shutil.which", side_effect=fake_which),
+                patch("sttool.agent_launcher.subprocess.Popen", side_effect=fake_popen),
+            ):
+                pid, _batch_dir = launch_agent_batch(
+                    run_dir,
+                    "claude",
+                    "demo",
+                    1,
+                    "test prompt",
+                    terminal_window="STTool-Test-Agents",
+                )
+
+            self.assertEqual(pid, os.getpid())
 
     def test_incremental_batch_uses_shared_terminal_window(self) -> None:
         with TemporaryDirectory() as temporary:

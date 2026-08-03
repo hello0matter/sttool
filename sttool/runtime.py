@@ -23,6 +23,8 @@ from .activity import append_activity
 from .agent_runtime import (
     agent_shell_pids_for_run,
     agent_terminal_window_name,
+    invalidate_agent_launch_scripts,
+    prepare_one_shot_agent_launch,
     prompt_file_bootstrap,
 )
 from .models import (
@@ -66,6 +68,17 @@ def agent_cli_arguments(
             arguments.extend(("--effort", effort))
         return arguments
     return []
+
+
+def agent_base_url_environment(provider: str, base_url: str) -> dict[str, str]:
+    value = base_url.strip().rstrip("/")
+    if not value:
+        return {}
+    if provider == "claude":
+        return {"ANTHROPIC_BASE_URL": value}
+    if provider in {"codex", "codexx"}:
+        return {"OPENAI_BASE_URL": value}
+    return {}
 
 
 def now_text() -> str:
@@ -176,6 +189,11 @@ def reconcile_component_state(
         value["detail"] = detail
     value["updated_at"] = timestamp
     atomic_json_write(path, value)
+
+
+def project_name_is_url(value: str) -> bool:
+    parsed = urlsplit(value.strip())
+    return parsed.scheme.lower() in {"http", "https"} and bool(parsed.netloc)
 
 
 def safe_project_name(value: str) -> str:
@@ -381,9 +399,15 @@ class RuntimeManager:
         finally:
             health_lock.release()
 
-    def preflight(self, request: LaunchRequest) -> list[ToolDefinition]:
+    def preflight(
+        self, request: LaunchRequest, *, allow_legacy_url_project: bool = False
+    ) -> list[ToolDefinition]:
         if not request.project_name.strip():
             raise LaunchError("请填写项目名称")
+        if project_name_is_url(request.project_name) and not allow_legacy_url_project:
+            raise LaunchError(
+                "项目名称必须是稳定名称，不能填写目标 URL 或 AI Base URL"
+            )
         if not request.target.strip():
             raise LaunchError("请填写目标")
         if not request.scope.strip():
@@ -597,6 +621,7 @@ class RuntimeManager:
         script_path = run_dir / "launch_agent.ps1"
         pid_path = run_dir / "agent_shell.pid"
         exit_path = run_dir / "agent_exit.json"
+        launch_guard = prepare_one_shot_agent_launch(run_dir / "agent_launch.token")
         run_quote = self._ps_quote(str(run_dir))
         pid_quote = self._ps_quote(str(pid_path))
         exit_quote = self._ps_quote(str(exit_path))
@@ -633,8 +658,15 @@ class RuntimeManager:
                 else f"& {command_name} {options} $bootstrapPrompt"
             )
         prompt_setup = "" if resume else f"$bootstrapPrompt = {bootstrap}\n"
+        environment_setup = "".join(
+            f"$env:{name} = {self._ps_quote(value)}\n"
+            for name, value in agent_base_url_environment(
+                request.provider, request.agent_base_url
+            ).items()
+        )
         script = (
             "$ErrorActionPreference = 'Stop'\n"
+            f"{launch_guard}"
             f"$agentPidPath = {pid_quote}\n"
             f"$agentExitPath = {exit_quote}\n"
             "Set-Content -LiteralPath $agentPidPath -Value $PID -Encoding ascii\n"
@@ -647,6 +679,7 @@ class RuntimeManager:
             "$OutputEncoding = $utf8\n"
             f"$Host.UI.RawUI.WindowTitle = {title}\n"
             f"Set-Location -LiteralPath {run_quote}\n"
+            f"{environment_setup}"
             f"{prompt_setup}"
             f"{invocation}\n"
             "$agentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }\n"
@@ -814,6 +847,7 @@ class RuntimeManager:
         api_base_url: str,
         model: str,
         api_key: str = "",
+        github_token: str = "",
     ) -> StandaloneRunState:
         tool = self.tools.get(tool_id)
         if tool is None:
@@ -843,6 +877,7 @@ class RuntimeManager:
                 "api_base_url": api_base_url.strip().rstrip("/"),
                 "model": model.strip(),
                 "api_key": api_key.strip(),
+                "github_token": github_token.strip(),
             }
             executable = self._format(tool.executable, context)
             result_context = {
@@ -965,6 +1000,8 @@ class RuntimeManager:
         }
         if request.api_key.strip():
             environment["OPENAI_API_KEY"] = request.api_key.strip()
+        if request.github_token.strip():
+            environment["GITHUB_TOKEN"] = request.github_token.strip()
         vulnx_tool = self.tools.get("vulnx")
         vulnx_path = (
             Path(vulnx_tool.executable)
@@ -998,6 +1035,8 @@ class RuntimeManager:
                 request.agent_model.strip(),
                 "--reasoning-effort",
                 request.reasoning_effort,
+                "--agent-base-url",
+                request.agent_base_url.strip().rstrip("/"),
                 "--settle-seconds",
                 str(request.asset_settle_seconds),
                 "--max-agent-batches",
@@ -1037,6 +1076,7 @@ class RuntimeManager:
         state: RunState,
         authorization_confirmed: bool,
         api_key: str = "",
+        github_token: str = "",
     ) -> tuple[LaunchRequest, list[str]]:
         run_dir = Path(state.run_dir)
         value: dict[str, object] = {}
@@ -1077,6 +1117,10 @@ class RuntimeManager:
                 reasoning_effort=normalized_reasoning_effort(
                     value.get("reasoning_effort", state.reasoning_effort)
                 ),
+                agent_base_url=str(
+                    value.get("agent_base_url", state.agent_base_url)
+                ),
+                github_token=github_token,
                 work_mode=str(value.get("work_mode", state.work_mode)),
                 auto_agent=bool(value.get("auto_agent", state.auto_agent)),
                 wait_for_asset_commander=bool(
@@ -1140,6 +1184,7 @@ class RuntimeManager:
                 api_base_url=request.api_base_url.strip().rstrip("/"),
                 agent_model=request.agent_model.strip(),
                 reasoning_effort=request.reasoning_effort,
+                agent_base_url=request.agent_base_url.strip().rstrip("/"),
                 work_mode=request.work_mode,
                 auto_agent=request.auto_agent,
                 wait_for_asset_commander=request.wait_for_asset_commander,
@@ -1153,7 +1198,7 @@ class RuntimeManager:
             atomic_json_write(state_path, state.to_dict())
 
             project_value = {
-                "schema_version": 3,
+                "schema_version": 4,
                 "name": request.project_name.strip(),
                 "target": request.target.strip(),
                 "scope": request.scope.strip(),
@@ -1162,6 +1207,7 @@ class RuntimeManager:
                 "api_base_url": request.api_base_url.strip().rstrip("/"),
                 "agent_model": request.agent_model.strip(),
                 "reasoning_effort": request.reasoning_effort,
+                "agent_base_url": request.agent_base_url.strip().rstrip("/"),
                 "work_mode": request.work_mode,
                 "auto_agent": request.auto_agent,
                 "wait_for_asset_commander": request.wait_for_asset_commander,
@@ -1195,6 +1241,12 @@ class RuntimeManager:
             started: list[ProcessRecord] = []
             try:
                 for tool in selected:
+                    if tool.coordinator_managed:
+                        append_activity(
+                            run_dir,
+                            f"工具已加入协调器阶段：{tool.name}；等待资产稳定后按代次执行。",
+                        )
+                        continue
                     append_activity(run_dir, f"正在启动工具：{tool.name}。")
                     record = self._launch_tool(tool, context)
                     started.append(record)
@@ -1253,12 +1305,13 @@ class RuntimeManager:
         api_base_url: str | None = None,
         model: str | None = None,
         api_key: str = "",
+        github_token: str = "",
     ) -> RunState:
         with self._launch_lock():
             run_dir = Path(state.run_dir).resolve()
             append_activity(run_dir, "收到恢复实例请求，正在检查现有组件。")
             request, skipped_tools = self._request_for_state(
-                state, authorization_confirmed, api_key
+                state, authorization_confirmed, api_key, github_token
             )
             if api_base_url is not None or model is not None:
                 request = LaunchRequest(
@@ -1276,6 +1329,8 @@ class RuntimeManager:
                     api_key=api_key,
                     agent_model=request.agent_model,
                     reasoning_effort=request.reasoning_effort,
+                    agent_base_url=request.agent_base_url,
+                    github_token=github_token,
                     work_mode=request.work_mode,
                     auto_agent=request.auto_agent,
                     wait_for_asset_commander=request.wait_for_asset_commander,
@@ -1302,6 +1357,8 @@ class RuntimeManager:
                 api_key=api_key,
                 agent_model=request.agent_model,
                 reasoning_effort=request.reasoning_effort,
+                agent_base_url=request.agent_base_url,
+                github_token=github_token,
                 work_mode=request.work_mode,
                 auto_agent=request.auto_agent,
                 wait_for_asset_commander=request.wait_for_asset_commander,
@@ -1311,7 +1368,9 @@ class RuntimeManager:
                 coordinator_poll_seconds=request.coordinator_poll_seconds,
                 ai_summary_enabled=request.ai_summary_enabled,
             )
-            selected = self.preflight(recovery_request)
+            selected = self.preflight(
+                recovery_request, allow_legacy_url_project=True
+            )
             self.refresh(state)
             project_dir = run_dir.parent.parent
             context = self._run_context(request, project_dir, run_dir)
@@ -1435,7 +1494,7 @@ class RuntimeManager:
                         "interrupted",
                         f"组件进程 PID {process.pid} 已退出，保留断点供恢复",
                     )
-        if state.status != "failed":
+        if state.status not in {"failed", "stopped"}:
             state.status = "running" if running else "completed"
         if state.status != previous_state_status:
             append_activity(
@@ -1449,6 +1508,12 @@ class RuntimeManager:
     def stop(self, state: RunState) -> RunState:
         append_activity(state.run_dir, "收到停止实例请求。")
         run_dir = Path(state.run_dir)
+        invalidated_scripts = invalidate_agent_launch_scripts(run_dir)
+        if invalidated_scripts:
+            append_activity(
+                state.run_dir,
+                f"??? {invalidated_scripts} ? Agent ?????????????????????",
+            )
         coordinator = read_json_file(
             run_dir / "tool_data" / "coordinator" / "state.json"
         )

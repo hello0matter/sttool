@@ -29,15 +29,19 @@ python .\main.py --list-tools
 
 - AssetCommander：默认启动，工作目录隔离到本次运行目录；通过源码状态机自动执行常用资产流程，不依赖屏幕坐标点击。
 - semantic-recursive-dirscan：默认启动其工程 GUI，自动接收主目标、AssetCommander 域名/已确认 URL 和 fscan Web 服务，并使用自身工程状态继续未完成扫描。
-- fscan、nuclei：自动发包类工具，默认不勾选。
-- vulnx：主漏洞情报引擎，按 CVE、产品和版本聚合 CVSS、EPSS、KEV、PoC 链接和 Nuclei 模板元数据；不执行 PoC，可在工具设置中编辑可执行文件路径。
-- trickest/find-gh-poc：作为已有 CVE 的 GitHub 候选仓库补充；仅在进程环境提供 `GITHUB_TOKEN` 或 `GH_TOKEN` 时查询，Token 通过临时文件传递且不进入项目文件、日志或命令行。
+- fscan、nuclei：一次性外部扫描进程，项目创建时默认勾选；任务结束后由运行实例保留退出状态、日志和成果入口。
+- vulnx：主漏洞情报引擎，项目创建时默认勾选；它是协调器管理的短任务阶段，不伪装为常驻 GUI/PID。按 CVE、产品和版本聚合 CVSS、EPSS、KEV、PoC 链接和 Nuclei 模板元数据，不执行 PoC，可在工具设置中编辑可执行文件路径。
+- trickest/find-gh-poc：项目创建时默认勾选，是已有 CVE 的 GitHub 候选仓库补充，也是协调器管理的短任务阶段。它使用 GitHub GraphQL API，实际查询需要 GitHub Token；未配置时安全跳过，不会导致项目失败。Token 由当前 Windows 账户的 DPAPI 加密保存，只通过子进程环境传递，不进入项目文件、日志、命令行或启动脚本。结果仅作为不可信元数据写入 `results/find_gh_poc.json`，不会自动 clone 或执行。
 - TscanPlus：每个运行实例使用独立 exe 名、WebView2 目录和私有 `config.db`，启动时清理历史项目目标、结果和 AWVS 报告。自动调度信息收集、资产探测、Web 指纹、域名/目录枚举、JsFinder、Swagger、WAF、POC、未授权、密码检测、DumpAll、AWVS 和 Nessus；AWVS/Nessus 只在连接测试明确成功后点击开始。
-- Codexx CLI / Codex CLI：二选一且必选；调度器在资产稳定后以 `codexx --yolo` 或 `codex --yolo` 启动首次全量批次，之后只对新代次资产启动增量批次，不覆盖 CLI 自身模型、线路或凭据。
+- Codexx CLI / Codex CLI / Claude CLI：三选一且必选；调度器在资产稳定后使用所选本地 Agent 启动首次全量批次，之后只对新代次资产启动增量批次。Agent 在命名 Windows Terminal/PowerShell 标签页中运行，多个项目和多个批次可通过 Ctrl+Tab 切换。
+
+所有内置工具在新建项目时默认勾选。运行类型分为三类：AssetCommander、AI 路径发现、TscanPlus 和项目协调器属于常驻/监听组件；fscan、nuclei 属于一次性外部进程；vulnx、find-gh-poc 属于协调器阶段短任务。运行实例会同时显示真实进程和协调器虚拟状态，但不会给短任务伪造 PID。
 
 Agent 初始提示词采用证据驱动顺序：先读取项目状态，使用 Microsoft Playwright 查看界面、DOM、响应和网络请求，再按真实产品/版本证据检索厂商公告与 CVE；经源码审查的验证代码只能保存到本实例 `evidence/poc_review/<CVE>/`，执行时采用单目标、低并发、无持久化的最小影响验证，然后再联动固定扫描工具。手动执行 `codex --yolo` 时可复用 `docs/manual-codex-pentest-prompt.md`。
 
-右上角的 **工具协作 AI 设置** 用于工具间信息汇总、传递、去重和结果优化，可维护 OpenAI 兼容 Base URL、默认模型和 API Key。Base URL 默认是 `https://api.1314mc.net/v1`，普通设置保存在本机 `launcher_settings.json`；API Key 使用当前 Windows 账户的 DPAPI 加密后单独保存在 `launcher_secrets.dat`，不会写入项目配置、运行状态、启动脚本或日志。内置 AssetCommander 和 AI 路径发现默认使用这套配置；自定义工具只有显式勾选“使用工具协作 AI”才会收到配置。Codexx/Codex 始终使用各自本地配置。
+右上角的 **全局设置** 分成五块：**Codex / Codexx**、**Claude Agent**、**工具协作 AI**、**漏洞情报** 和 **调度方式**。Codex/Codexx 与 Claude 分别维护模型、推理强度和可选 Base URL，二者互不覆盖；Base URL 留空时继续使用对应 CLI 自身配置。项目脚本不会保存 Agent API Key，凭据仍由各 CLI 的登录或本机环境负责。仅在显式填写时，Codex/Codexx 使用 `OPENAI_BASE_URL`，Claude 使用 `ANTHROPIC_BASE_URL`。
+
+工具协作 AI 用于工具间信息汇总、传递、去重和结果优化，可维护 OpenAI 兼容 Base URL、默认模型和 API Key。Base URL 默认是 `https://api.1314mc.net/v1`，普通设置保存在本机 `launcher_settings.json`；工具协作 API Key 和 GitHub Token 使用当前 Windows 账户的 DPAPI 加密后统一保存在 `launcher_secrets.dat`，不会写入项目配置、运行状态、启动脚本或日志。内置 AssetCommander 和 AI 路径发现默认使用工具协作 AI；自定义工具只有显式勾选“使用工具协作 AI”才会收到配置。
 
 ## 工具位置与自定义工具
 
@@ -59,9 +63,11 @@ fscan、nuclei 等一次性工具在详情页提供 **单独执行**。输入目
 
 ## 项目与运行状态
 
+项目名称是不会随目标、AI 服务商或线路变化的稳定人类可读标识，例如 `xinotter-api-regression`，不能填写目标 URL 或 AI Base URL。目标地址、工具协作 AI Base URL、Codex/Codexx Base URL 和 Claude Base URL 都是独立配置字段；修改这些地址只影响新运行配置，不会改变项目目录。新建项目会拒绝 HTTP/HTTPS URL 名称；旧版 URL 命名项目仍可原目录恢复，但从旧实例“新实例重跑”时会清空 URL 名称并要求重新填写稳定名称。不要直接移动或重命名旧运行目录，因为部分第三方工具状态可能保存绝对路径。
+
 ```text
-projects/<项目>/project.json
-projects/<项目>/runs/<时间戳-编号>/
+projects/<稳定项目名>/project.json
+projects/<稳定项目名>/runs/<时间戳-编号>/
   agent_prompt.txt
   agent_batches/
   risk_summary.md
@@ -105,7 +111,7 @@ AssetCommander 每次保存工程时会原子更新本次运行目录下的 `res
 
 路径发现器的 `projects/<项目>/project.json` 和各目标 `runtime_state.json` 是扫描进度的权威记录。“恢复实例”复用这些文件，已完成目标不重复，失败目标不会被自动循环重试，新到达的待运行目标会在当前批次结束后进入下一批。恢复时会刷新内置适配器代码，但保留运行副本中的项目、字典、配置、结果和断点。
 
-STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对应 CLI 已有的模型、线路和安全凭据。工具协作 API Key 使用 Windows DPAPI 加密保存在本机；路径发现器的运行副本会清空 `config.json` 中的 `ai_api_key`，仅向明确启用工具协作 AI 的子进程注入 `OPENAI_API_KEY`。`Codexx: 已安装并登录` 或 `Codex: 已安装并登录` 代表对应 CLI 预检通过；运行实例中的 Agent 状态代表该次本地进程是否仍在线。
+STTool 不读取或覆盖 Codexx、Codex、Claude CLI 的登录凭据；仅在全局设置中明确填写时，为所选 Agent 附加独立的模型、推理强度和 Base URL。工具协作 API Key 与 GitHub Token 使用 Windows DPAPI 加密保存在本机；路径发现器的运行副本会清空 `config.json` 中的 `ai_api_key`，仅向明确启用工具协作 AI 的子进程注入 `OPENAI_API_KEY`。CLI 预检通过只代表命令可用；运行实例中的 Agent 状态才代表该项目批次的本地进程是否仍在线。
 
 
 ## 增量资产总线与 Agent 批次
@@ -113,9 +119,9 @@ STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对�
 - `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
 - AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。
 - 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
-- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID、真实退出状态和完成时间；启动脚本只向 CLI 传递读取 `prompt.txt` 的短引导，避免 Windows 命令行长度限制。失败批次按 60 秒、5 分钟、15 分钟退避重试；项目日志可双击“项目增量调度/Agent”查看。
-- `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。
-- `vulnerability_intel.md` 和 `results/vulnerability_intel.json` 在资产稳定、Agent 启动前生成，记录产品/版本证据、CVE、KEV、模板和 PoC 候选。它会按输入指纹和资产代次缓存，恢复工程时不重复联网查询。
+- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID、真实退出状态和完成时间；启动脚本只向 CLI 传递读取 `prompt.txt` 的短引导，避免 Windows 命令行长度限制。每个 Agent 启动脚本只能消费一次启动令牌；停止项目时会禁用已有启动脚本并保留备份，防止 Windows Terminal 在重启或恢复旧标签页后重新执行已停止批次。失败批次按 60 秒、5 分钟、15 分钟退避重试；项目日志可双击“项目增量调度/Agent”查看。
+- `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。超大资产摘要只向 AI 发送有界的头尾证据片段，完整本地摘要始终保留；单个协议尝试使用 20 秒超时，避免阻塞 Agent 启动数分钟。
+- `vulnerability_intel.md`、`results/vulnerability_intel.json` 和 `results/find_gh_poc.json` 在资产稳定、Agent 启动前按所选工具生成，记录产品/版本证据、CVE、KEV、模板和 GitHub PoC 候选。它们会按输入指纹和资产代次缓存，恢复工程时不重复联网查询；运行实例中可双击对应虚拟组件打开可读状态和结果文件。
 - PoC URL 始终按不可信元数据处理，不自动 clone 或执行。写文件、创建账号、反弹 Shell、抓凭据、持久化和横向移动不属于自动情报阶段，后续若实现 Post-Exploitation 必须独立默认关闭并要求人工审批。
 
 

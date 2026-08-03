@@ -19,8 +19,12 @@ from .models import (
 from .registry import availability
 from .project_results_dialog import ProjectResultsDialog
 from .run_log_dialog import RunLogDialog, component_summary_status
-from .runtime import LaunchError, RuntimeManager, safe_project_name
-from .secret_store import SecretStoreError, load_api_key, save_api_key
+from .runtime import LaunchError, RuntimeManager, project_name_is_url, safe_project_name
+from .secret_store import (
+    SecretStoreError,
+    load_secret_values,
+    save_secret_values,
+)
 from .tool_details import ToolDetailsDialog
 from .tool_editor import ToolEditorDialog
 from .tool_store import ToolStore
@@ -67,19 +71,39 @@ class LauncherApp(tk.Tk):
             )
         )
         self.default_model = str(launcher_settings.get("model") or "gpt-5.5")
-        self.agent_model = str(launcher_settings.get("agent_model") or "")
-        self.reasoning_effort = normalized_reasoning_effort(
+        legacy_agent_model = str(launcher_settings.get("agent_model") or "")
+        legacy_effort = normalized_reasoning_effort(
             launcher_settings.get("reasoning_effort")
+        )
+        self.codex_agent_model = str(
+            launcher_settings.get("codex_agent_model") or legacy_agent_model
+        )
+        self.codex_reasoning_effort = normalized_reasoning_effort(
+            launcher_settings.get("codex_reasoning_effort") or legacy_effort
+        )
+        self.codex_agent_base_url = str(
+            launcher_settings.get("codex_agent_base_url") or ""
+        )
+        self.claude_agent_model = str(
+            launcher_settings.get("claude_agent_model") or ""
+        )
+        self.claude_reasoning_effort = normalized_reasoning_effort(
+            launcher_settings.get("claude_reasoning_effort")
+        )
+        self.claude_agent_base_url = str(
+            launcher_settings.get("claude_agent_base_url") or ""
         )
         self.workflow_settings = normalize_workflow_settings(
             launcher_settings.get("workflow")
         )
         self.secret_load_error = ""
         try:
-            self.api_key = load_api_key(self.launcher_secrets_path)
+            secret_values = load_secret_values(self.launcher_secrets_path)
         except SecretStoreError as exc:
-            self.api_key = ""
+            secret_values = {}
             self.secret_load_error = str(exc)
+        self.api_key = secret_values.get("shared_ai_api_key", "")
+        self.github_token = secret_values.get("github_token", "")
 
         self.title("STTool 渗透项目总控台")
         width = min(1180, self.winfo_screenwidth() - 80)
@@ -91,7 +115,7 @@ class LauncherApp(tk.Tk):
         self.configure(bg=BG)
         self._configure_style()
         self._build_ui()
-        if initial_project:
+        if initial_project and not project_name_is_url(initial_project):
             self.project_var.set(initial_project)
             self._load_project()
         self._load_runs()
@@ -209,7 +233,7 @@ class LauncherApp(tk.Tk):
             style="Panel.TLabel",
             font=("Microsoft YaHei UI", 12, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 14))
-        ttk.Label(left, text="项目名称", style="Panel.TLabel").grid(
+        ttk.Label(left, text="项目名称（稳定名称，不要填写 URL）", style="Panel.TLabel").grid(
             row=1, column=0, sticky="w", pady=(0, 5)
         )
         project_box = ttk.Combobox(
@@ -507,20 +531,7 @@ class LauncherApp(tk.Tk):
             api_base_url=self.api_base_url_var.get().strip(),
             model=self.default_model,
             api_key=self.api_key,
-            agent_model=self.agent_model,
-            reasoning_effort=self.reasoning_effort,
-            work_mode=str(self.workflow_settings["work_mode"]),
-            auto_agent=bool(self.workflow_settings["auto_agent"]),
-            wait_for_asset_commander=bool(
-                self.workflow_settings["wait_for_asset_commander"]
-            ),
-            wait_for_fscan=bool(self.workflow_settings["wait_for_fscan"]),
-            asset_settle_seconds=int(self.workflow_settings["asset_settle_seconds"]),
-            max_agent_batches=int(self.workflow_settings["max_agent_batches"]),
-            coordinator_poll_seconds=int(
-                self.workflow_settings["coordinator_poll_seconds"]
-            ),
-            ai_summary_enabled=bool(self.workflow_settings["ai_summary_enabled"]),
+            github_token=self.github_token,
         )
 
     def _edit_tool(self) -> None:
@@ -648,23 +659,42 @@ class LauncherApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
+    def _agent_settings_for_provider(self, provider: str) -> tuple[str, str, str]:
+        if provider == "claude":
+            return (
+                self.claude_agent_model,
+                self.claude_reasoning_effort,
+                self.claude_agent_base_url,
+            )
+        return (
+            self.codex_agent_model,
+            self.codex_reasoning_effort,
+            self.codex_agent_base_url,
+        )
+
     def _request(self) -> LaunchRequest:
         selected = tuple(
             tool_id for tool_id, variable in self.tool_vars.items() if variable.get()
+        )
+        provider = self.provider_var.get()
+        agent_model, reasoning_effort, agent_base_url = (
+            self._agent_settings_for_provider(provider)
         )
         return LaunchRequest(
             project_name=self.project_var.get(),
             target=self.target_var.get(),
             scope=self.scope_var.get(),
-            provider=self.provider_var.get(),
+            provider=provider,
             model=self.default_model,
             selected_tools=selected,
             user_prompt=self.prompt_text.get("1.0", "end").strip(),
             authorization_confirmed=self.auth_var.get(),
             api_base_url=self.api_base_url_var.get(),
             api_key=self.api_key,
-            agent_model=self.agent_model,
-            reasoning_effort=self.reasoning_effort,
+            agent_model=agent_model,
+            reasoning_effort=reasoning_effort,
+            agent_base_url=agent_base_url,
+            github_token=self.github_token,
             work_mode=str(self.workflow_settings["work_mode"]),
             auto_agent=bool(self.workflow_settings["auto_agent"]),
             wait_for_asset_commander=bool(
@@ -737,10 +767,19 @@ class LauncherApp(tk.Tk):
             self.run_states.values(), key=lambda item: item.created_at, reverse=True
         ):
             state_key = self._state_key(state)
-            components = ", ".join(
+            component_values = [
                 f"{item.name}:{component_summary_status(Path(state.run_dir), item.component_id, item.status)}"
                 for item in state.processes
+            ]
+            process_ids = {item.component_id for item in state.processes}
+            component_values.extend(
+                f"{tool.name}:{component_summary_status(Path(state.run_dir), tool.tool_id, 'running')}"
+                for tool in self.tools
+                if tool.coordinator_managed
+                and tool.tool_id in state.selected_tools
+                and tool.tool_id not in process_ids
             )
+            components = ", ".join(component_values)
             self.run_tree.insert(
                 "",
                 "end",
@@ -811,6 +850,7 @@ class LauncherApp(tk.Tk):
                     state,
                     authorization_confirmed=True,
                     api_key=self.api_key,
+                    github_token=self.github_token,
                 )
             except LaunchError as exc:
                 error = str(exc)
@@ -858,11 +898,17 @@ class LauncherApp(tk.Tk):
             messagebox.showerror("新实例重跑", "历史项目配置格式无效")
             return
         self._apply_project_value(value)
+        legacy_url_name = project_name_is_url(self.project_var.get())
+        if legacy_url_name:
+            self.project_var.set("")
         self.notebook.select(self.launch_tab)
-        messagebox.showinfo(
-            "新实例重跑",
-            ("历史配置已载入。请重新确认授权复选框，再点击“启动完整项目”。"),
+        detail = (
+            "历史项目名称是 URL，已自动清空。请填写不会随目标或 AI 线路变化的稳定项目名称，"
+            "重新确认授权后再启动。"
+            if legacy_url_name
+            else "历史配置已载入。请重新确认授权复选框，再点击“启动完整项目”。"
         )
+        messagebox.showinfo("新实例重跑", detail)
 
     def _stop_selected_run(self) -> None:
         state = self._selected_state()
@@ -903,6 +949,12 @@ class LauncherApp(tk.Tk):
             messagebox.showinfo("打开目录", "请先填写或选择项目名称")
             return
         path = self.manager.projects_dir / safe_project_name(name)
+        if project_name_is_url(name) and not (path / "project.json").is_file():
+            messagebox.showwarning(
+                "打开目录",
+                "项目名称不能填写目标 URL 或 AI Base URL；请先改成稳定名称。",
+            )
+            return
         path.mkdir(parents=True, exist_ok=True)
         os.startfile(path)
 
@@ -922,12 +974,18 @@ class LauncherApp(tk.Tk):
             self.api_base_url_var.set(str(value["api_base_url"]))
         if value.get("model"):
             self.default_model = str(value["model"])
-        if "agent_model" in value:
-            self.agent_model = str(value.get("agent_model") or "")
-        if "reasoning_effort" in value:
-            self.reasoning_effort = normalized_reasoning_effort(
-                value.get("reasoning_effort")
-            )
+        if "agent_model" in value or "reasoning_effort" in value or "agent_base_url" in value:
+            model = str(value.get("agent_model") or "")
+            effort = normalized_reasoning_effort(value.get("reasoning_effort"))
+            base_url = str(value.get("agent_base_url") or "")
+            if provider == "claude":
+                self.claude_agent_model = model
+                self.claude_reasoning_effort = effort
+                self.claude_agent_base_url = base_url
+            else:
+                self.codex_agent_model = model
+                self.codex_reasoning_effort = effort
+                self.codex_agent_base_url = base_url
         if "work_mode" in value:
             self.workflow_settings = normalize_workflow_settings(value)
         selected = set(value.get("selected_tools", []))
@@ -956,35 +1014,57 @@ class LauncherApp(tk.Tk):
             api_base_url=self.api_base_url_var.get(),
             model=self.default_model,
             api_key=self.api_key,
-            agent_model=self.agent_model,
-            reasoning_effort=self.reasoning_effort,
+            codex_agent_model=self.codex_agent_model,
+            codex_reasoning_effort=self.codex_reasoning_effort,
+            codex_agent_base_url=self.codex_agent_base_url,
+            claude_agent_model=self.claude_agent_model,
+            claude_reasoning_effort=self.claude_reasoning_effort,
+            claude_agent_base_url=self.claude_agent_base_url,
+            github_token=self.github_token,
             workflow_settings=self.workflow_settings,
         )
         self.wait_window(dialog)
         if dialog.result is None:
             return
         try:
-            save_api_key(self.launcher_secrets_path, str(dialog.result["api_key"]))
+            save_secret_values(
+                self.launcher_secrets_path,
+                {
+                    "shared_ai_api_key": str(dialog.result["api_key"]),
+                    "github_token": str(dialog.result["github_token"]),
+                },
+            )
         except SecretStoreError as exc:
             messagebox.showerror("STTool 全局设置", str(exc), parent=self)
             return
         self.api_key = str(dialog.result["api_key"])
+        self.github_token = str(dialog.result["github_token"])
         self.api_base_url_var.set(str(dialog.result["api_base_url"]))
         self.default_model = str(dialog.result["model"])
-        self.agent_model = str(dialog.result["agent_model"])
-        self.reasoning_effort = normalized_reasoning_effort(
-            dialog.result["reasoning_effort"]
+        self.codex_agent_model = str(dialog.result["codex_agent_model"])
+        self.codex_reasoning_effort = normalized_reasoning_effort(
+            dialog.result["codex_reasoning_effort"]
         )
+        self.codex_agent_base_url = str(dialog.result["codex_agent_base_url"])
+        self.claude_agent_model = str(dialog.result["claude_agent_model"])
+        self.claude_reasoning_effort = normalized_reasoning_effort(
+            dialog.result["claude_reasoning_effort"]
+        )
+        self.claude_agent_base_url = str(dialog.result["claude_agent_base_url"])
         self.workflow_settings = normalize_workflow_settings(dialog.result["workflow"])
         self._save_launcher_settings()
 
     def _save_launcher_settings(self) -> None:
         value = {
-            "schema_version": 2,
+            "schema_version": 3,
             "api_base_url": self.api_base_url_var.get().strip().rstrip("/"),
             "model": self.default_model,
-            "agent_model": self.agent_model,
-            "reasoning_effort": self.reasoning_effort,
+            "codex_agent_model": self.codex_agent_model,
+            "codex_reasoning_effort": self.codex_reasoning_effort,
+            "codex_agent_base_url": self.codex_agent_base_url,
+            "claude_agent_model": self.claude_agent_model,
+            "claude_reasoning_effort": self.claude_reasoning_effort,
+            "claude_agent_base_url": self.claude_agent_base_url,
             "workflow": self.workflow_settings,
             "last_project": self.project_var.get().strip(),
         }

@@ -9,10 +9,12 @@ from pathlib import Path
 from .agent_runtime import (
     agent_terminal_window_name,
     powershell_quote,
+    prepare_one_shot_agent_launch,
     prompt_file_bootstrap,
 )
 from .asset_bus import atomic_json_write, now_text
 from .runtime import (
+    agent_base_url_environment,
     agent_cli_arguments,
     pid_alive,
     process_creation_token,
@@ -29,11 +31,13 @@ def write_agent_batch_script(
     project_name: str,
     agent_model: str = "",
     reasoning_effort: str = "",
+    agent_base_url: str = "",
 ) -> tuple[Path, Path]:
     prompt_path = batch_dir / "prompt.txt"
     script_path = batch_dir / "launch.ps1"
     pid_path = batch_dir / "agent.pid"
     exit_path = batch_dir / "agent_exit.json"
+    launch_guard = prepare_one_shot_agent_launch(batch_dir / "launch.token")
     bootstrap = powershell_quote(prompt_file_bootstrap(prompt_path))
     option_flags = {
         "--yolo",
@@ -48,12 +52,17 @@ def write_agent_batch_script(
         for item in agent_cli_arguments(provider, agent_model, reasoning_effort)
     )
     invocation = f"& {provider} {options} $bootstrapPrompt"
+    environment_setup = "".join(
+        f"$env:{name} = {powershell_quote(value)}\n"
+        for name, value in agent_base_url_environment(provider, agent_base_url).items()
+    )
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         "$utf8 = [System.Text.UTF8Encoding]::new($false)\n"
         "[Console]::InputEncoding = $utf8\n"
         "[Console]::OutputEncoding = $utf8\n"
         "$OutputEncoding = $utf8\n"
+        f"{launch_guard}"
         f"$Host.UI.RawUI.WindowTitle = {powershell_quote(f'STTool {project_name} - {provider} 增量批次')}\n"
         f"$agentPidPath = {powershell_quote(str(pid_path))}\n"
         f"$agentExitPath = {powershell_quote(str(exit_path))}\n"
@@ -62,6 +71,7 @@ def write_agent_batch_script(
         "$agentError = ''\n"
         "try {\n"
         f"Set-Location -LiteralPath {powershell_quote(str(batch_dir.parents[1]))}\n"
+        f"{environment_setup}"
         f"$bootstrapPrompt = {bootstrap}\n"
         f"{invocation}\n"
         "$agentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }\n"
@@ -87,6 +97,7 @@ def launch_agent_batch(
     prompt: str,
     agent_model: str = "",
     reasoning_effort: str = "",
+    agent_base_url: str = "",
     terminal_window: str = "",
 ) -> tuple[int, Path]:
     batch_dir = run_dir / "agent_batches" / f"{batch_number:04d}"
@@ -112,6 +123,7 @@ def launch_agent_batch(
                 prompt,
                 agent_model,
                 reasoning_effort,
+                agent_base_url,
                 terminal_window,
             )
         raise RuntimeError(f"Agent 批次 {batch_number} 正在由另一个协调器启动") from exc
@@ -119,7 +131,12 @@ def launch_agent_batch(
     try:
         (batch_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         script, pid_path = write_agent_batch_script(
-            batch_dir, provider, project_name, agent_model, reasoning_effort
+            batch_dir,
+            provider,
+            project_name,
+            agent_model,
+            reasoning_effort,
+            agent_base_url,
         )
         try:
             pid_path.unlink()
@@ -171,6 +188,7 @@ def launch_agent_batch(
                     "provider": provider,
                     "agent_model": agent_model.strip(),
                     "reasoning_effort": reasoning_effort,
+                    "agent_base_url": agent_base_url.strip().rstrip("/"),
                     "started_at": now_text(),
                     "prompt": str(batch_dir / "prompt.txt"),
                     "script": str(script),
@@ -179,7 +197,7 @@ def launch_agent_batch(
                 }
                 atomic_json_write(batch_dir / "batch.json", metadata)
                 return pid, batch_dir
-            if launcher.poll() is not None:
+            if not terminal and launcher.poll() is not None:
                 break
             time.sleep(0.1)
         raise RuntimeError("Agent 终端已启动，但未检测到批次 PowerShell 进程")

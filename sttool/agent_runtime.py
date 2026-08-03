@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import secrets
 import time
 from pathlib import Path
 from typing import Any
@@ -26,6 +27,70 @@ def prompt_file_bootstrap(prompt_path: str | Path) -> str:
         f"请先完整读取 UTF-8 文件 {path}，并严格遵循其中全部要求继续工作。"
         "不要跳过或概括该文件；所有结果继续写入文件中指定的项目运行目录。"
     )
+
+
+def prepare_one_shot_agent_launch(token_path: Path) -> str:
+    token_path.parent.mkdir(parents=True, exist_ok=True)
+    token = secrets.token_hex(24)
+    token_path.write_text(token, encoding="ascii")
+    token_quote = powershell_quote(str(token_path))
+    expected_quote = powershell_quote(token)
+    return (
+        f"$launchTokenPath = {token_quote}\n"
+        f"$expectedLaunchToken = {expected_quote}\n"
+        '$claimedLaunchTokenPath = "$launchTokenPath.$PID.claimed"\n'
+        "try {\n"
+        "Move-Item -LiteralPath $launchTokenPath -Destination $claimedLaunchTokenPath -ErrorAction Stop\n"
+        "$actualLaunchToken = [System.IO.File]::ReadAllText($claimedLaunchTokenPath).Trim()\n"
+        "if ($actualLaunchToken -ne $expectedLaunchToken) {\n"
+        "Remove-Item -LiteralPath $claimedLaunchTokenPath -Force -ErrorAction SilentlyContinue\n"
+        "Write-Host 'STTool ignored an invalid Agent launch token.'\n"
+        "exit 0\n"
+        "}\n"
+        "Remove-Item -LiteralPath $claimedLaunchTokenPath -Force -ErrorAction SilentlyContinue\n"
+        "} catch {\n"
+        "Remove-Item -LiteralPath $claimedLaunchTokenPath -Force -ErrorAction SilentlyContinue\n"
+        "Write-Host 'STTool ignored a stale or duplicate Agent launch.'\n"
+        "exit 0\n"
+        "}\n"
+    )
+
+
+def invalidate_agent_launch_scripts(run_dir: str | Path) -> int:
+    root = Path(run_dir)
+    for token_path in [
+        root / "agent_launch.token",
+        *root.glob("agent_batches/*/launch.token"),
+    ]:
+        token_path.unlink(missing_ok=True)
+        for claimed_path in token_path.parent.glob(f"{token_path.name}.*.claimed"):
+            claimed_path.unlink(missing_ok=True)
+
+    scripts = [root / "launch_agent.ps1", *root.glob("agent_batches/*/launch.ps1")]
+    invalidated = 0
+    marker = "# STTool disabled this launch script after the project was stopped."
+    stub = (
+        "\ufeff"
+        f"{marker}\n"
+        "Write-Host 'This STTool Agent launch was disabled because the project is stopped.'\n"
+        "exit 0\n"
+    )
+    for script_path in scripts:
+        if not script_path.is_file():
+            continue
+        try:
+            current = script_path.read_text(encoding="utf-8-sig")
+            if marker in current:
+                continue
+            backup_path = script_path.with_name(
+                f"{script_path.stem}.stopped-{time.time_ns()}{script_path.suffix}"
+            )
+            backup_path.write_bytes(script_path.read_bytes())
+            script_path.write_text(stub, encoding="utf-8")
+            invalidated += 1
+        except OSError:
+            continue
+    return invalidated
 
 
 def _normalized(value: object) -> str:

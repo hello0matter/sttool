@@ -14,6 +14,7 @@ from sttool.project_coordinator import (
     agent_launch_ready,
     asset_commander_ready,
     build_batch_prompt,
+    compact_ai_summary_input,
     component_process_alive,
     coordinator_wait_stage,
     mark_agent_batch_finished,
@@ -26,6 +27,15 @@ from sttool.project_coordinator import (
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_large_ai_summary_input_is_bounded_and_keeps_both_ends(self) -> None:
+        summary = "A" * 120 + "MIDDLE" + "Z" * 120
+        compact = compact_ai_summary_input(summary, max_chars=100)
+
+        self.assertLessEqual(len(compact), 100)
+        self.assertTrue(compact.startswith("A"))
+        self.assertTrue(compact.endswith("Z"))
+        self.assertNotIn("MIDDLE", compact)
+
     def test_agent_pid_token_rejects_pid_reused_by_another_process(self) -> None:
         token = process_creation_token(os.getpid())
         self.assertTrue(tracked_process_alive(os.getpid(), token, Path.cwd()))

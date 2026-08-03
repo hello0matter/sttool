@@ -21,15 +21,20 @@ class AISettingsDialog(tk.Toplevel):
         model: str,
         api_key: str,
         *,
-        agent_model: str = "",
-        reasoning_effort: str = "",
+        codex_agent_model: str = "",
+        codex_reasoning_effort: str = "",
+        codex_agent_base_url: str = "",
+        claude_agent_model: str = "",
+        claude_reasoning_effort: str = "",
+        claude_agent_base_url: str = "",
+        github_token: str = "",
         workflow_settings: dict[str, object] | None = None,
     ) -> None:
         super().__init__(parent)
         self.result: dict[str, object] | None = None
         self.title("STTool 全局设置")
-        self.geometry("720x660")
-        self.minsize(680, 620)
+        self.geometry("780x720")
+        self.minsize(720, 660)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -38,10 +43,18 @@ class AISettingsDialog(tk.Toplevel):
         self.model_var = tk.StringVar(value=model or "gpt-5.5")
         self.api_key_var = tk.StringVar(value=api_key)
         self.show_key_var = tk.BooleanVar(value=False)
-        self.agent_model_var = tk.StringVar(value=agent_model)
-        self.reasoning_effort_var = tk.StringVar(
-            value=normalized_reasoning_effort(reasoning_effort) or "CLI 默认"
+        self.codex_agent_model_var = tk.StringVar(value=codex_agent_model)
+        self.codex_reasoning_effort_var = tk.StringVar(
+            value=normalized_reasoning_effort(codex_reasoning_effort) or "CLI 默认"
         )
+        self.codex_agent_base_url_var = tk.StringVar(value=codex_agent_base_url)
+        self.claude_agent_model_var = tk.StringVar(value=claude_agent_model)
+        self.claude_reasoning_effort_var = tk.StringVar(
+            value=normalized_reasoning_effort(claude_reasoning_effort) or "CLI 默认"
+        )
+        self.claude_agent_base_url_var = tk.StringVar(value=claude_agent_base_url)
+        self.github_token_var = tk.StringVar(value=github_token)
+        self.show_github_token_var = tk.BooleanVar(value=False)
         self.work_mode_var = tk.StringVar(
             value=WORK_MODE_LABELS[str(workflow["work_mode"])]
         )
@@ -61,8 +74,10 @@ class AISettingsDialog(tk.Toplevel):
         content.pack(fill="both", expand=True)
         notebook = ttk.Notebook(content)
         notebook.pack(fill="both", expand=True)
-        self._build_agent_tab(notebook)
+        self._build_agent_tab(notebook, "codex")
+        self._build_agent_tab(notebook, "claude")
         self._build_shared_ai_tab(notebook)
+        self._build_vulnerability_intel_tab(notebook)
         self._build_workflow_tab(notebook)
 
         actions = ttk.Frame(content)
@@ -83,33 +98,52 @@ class AISettingsDialog(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
         self.grab_set()
 
-    def _build_agent_tab(self, notebook: ttk.Notebook) -> None:
+    def _build_agent_tab(self, notebook: ttk.Notebook, provider: str) -> None:
+        is_claude = provider == "claude"
         tab = ttk.Frame(notebook, padding=18)
         tab.columnconfigure(0, weight=1)
-        notebook.add(tab, text="本地 Agent")
-        ttk.Label(
-            tab,
-            text=(
-                "控制项目中启动的 Codex/Codexx/Claude CLI。留空或选择“CLI 默认”时，"
-                "不会追加模型、API URL、API Key 或推理强度参数，继续使用 CLI 自己的配置。"
-            ),
-            wraplength=620,
-        ).grid(row=0, column=0, sticky="w", pady=(0, 18))
+        notebook.add(tab, text="Claude Agent" if is_claude else "Codex / Codexx")
+        if is_claude:
+            description = (
+                "只控制项目中选择 Claude CLI 时的模型、推理强度与可选 Base URL。"
+                "凭据仍使用 Claude CLI 自己的登录或环境配置，不写入项目文件。"
+            )
+            model_var = self.claude_agent_model_var
+            effort_var = self.claude_reasoning_effort_var
+            base_url_var = self.claude_agent_base_url_var
+            models = ("", "sonnet", "opus", "haiku")
+            url_label = "Anthropic API Base URL（可选，留空使用 CLI 配置）"
+            efforts = ("CLI 默认", "low", "medium", "high")
+        else:
+            description = (
+                "只控制项目中选择 Codex 或 Codexx CLI 时的模型、推理强度与可选 Base URL。"
+                "凭据和模型线路仍可继续由 CLI 自身配置；留空不会覆盖。"
+            )
+            model_var = self.codex_agent_model_var
+            effort_var = self.codex_reasoning_effort_var
+            base_url_var = self.codex_agent_base_url_var
+            models = ("", "gpt-5.5", "gpt-5.6-sol")
+            url_label = "OpenAI 兼容 API Base URL（可选，留空使用 CLI 配置）"
+            efforts = ("CLI 默认", "low", "medium", "high", "xhigh")
+        ttk.Label(tab, text=description, wraplength=660).grid(
+            row=0, column=0, sticky="w", pady=(0, 18)
+        )
         ttk.Label(tab, text="Agent 模型（可编辑，留空使用 CLI 默认）").grid(
             row=1, column=0, sticky="w", pady=(0, 5)
         )
+        ttk.Combobox(tab, textvariable=model_var, values=models).grid(
+            row=2, column=0, sticky="ew", pady=(0, 16)
+        )
+        ttk.Label(tab, text="推理强度").grid(
+            row=3, column=0, sticky="w", pady=(0, 5)
+        )
         ttk.Combobox(
             tab,
-            textvariable=self.agent_model_var,
-            values=("", "gpt-5.5", "gpt-5.6-sol"),
-        ).grid(row=2, column=0, sticky="ew", pady=(0, 16))
-        ttk.Label(tab, text="推理强度").grid(row=3, column=0, sticky="w", pady=(0, 5))
-        ttk.Combobox(
-            tab,
-            textvariable=self.reasoning_effort_var,
-            values=("CLI 默认", "low", "medium", "high", "xhigh"),
+            textvariable=effort_var,
+            values=efforts,
             state="readonly",
-        ).grid(row=4, column=0, sticky="ew")
+        ).grid(row=4, column=0, sticky="ew", pady=(0, 16))
+        self._field(tab, 5, url_label, base_url_var)
 
     def _build_shared_ai_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=18)
@@ -118,14 +152,12 @@ class AISettingsDialog(tk.Toplevel):
         ttk.Label(
             tab,
             text=(
-                "用于工具间信息汇总、传递与风险摘要优化。该配置独立于本地 "
-                "Codex/Codexx/Claude；API Key 仍保存在系统加密密钥文件中。"
+                "用于工具间信息汇总、传递与风险摘要优化。该 OpenAI 兼容配置独立于本地 "
+                "Codex/Codexx/Claude；API Key 使用 Windows DPAPI 加密保存。"
             ),
-            wraplength=620,
+            wraplength=660,
         ).grid(row=0, column=0, sticky="w", pady=(0, 16))
-        self.api_base_url_entry = self._field(
-            tab, 1, "OpenAI 兼容 API Base URL", self.api_base_url_var
-        )
+        self._field(tab, 1, "OpenAI 兼容 API Base URL", self.api_base_url_var)
         self._field(tab, 3, "工具协作模型", self.model_var)
         ttk.Label(tab, text="API Key").grid(row=5, column=0, sticky="w", pady=(0, 5))
         key_row = ttk.Frame(tab)
@@ -139,8 +171,45 @@ class AISettingsDialog(tk.Toplevel):
             key_row,
             text="显示",
             variable=self.show_key_var,
-            command=self._toggle_key,
+            command=lambda: self.key_entry.configure(
+                show="" if self.show_key_var.get() else "*"
+            ),
         ).grid(row=0, column=1, padx=(8, 0))
+
+    def _build_vulnerability_intel_tab(self, notebook: ttk.Notebook) -> None:
+        tab = ttk.Frame(notebook, padding=18)
+        tab.columnconfigure(0, weight=1)
+        notebook.add(tab, text="漏洞情报")
+        ttk.Label(
+            tab,
+            text=(
+                "find-gh-poc 使用 GitHub GraphQL API，建议配置个人访问 Token。Token 仅通过"
+                "协调器进程环境和一次性临时文件传递，不进入项目、日志或命令行。"
+            ),
+            wraplength=660,
+        ).grid(row=0, column=0, sticky="w", pady=(0, 16))
+        ttk.Label(tab, text="GitHub Token（GITHUB_TOKEN）").grid(
+            row=1, column=0, sticky="w", pady=(0, 5)
+        )
+        token_row = ttk.Frame(tab)
+        token_row.grid(row=2, column=0, sticky="ew")
+        token_row.columnconfigure(0, weight=1)
+        self.github_token_entry = ttk.Entry(
+            token_row, textvariable=self.github_token_var, show="*", width=54
+        )
+        self.github_token_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(
+            token_row,
+            text="显示",
+            variable=self.show_github_token_var,
+            command=lambda: self.github_token_entry.configure(
+                show="" if self.show_github_token_var.get() else "*"
+            ),
+        ).grid(row=0, column=1, padx=(8, 0))
+        ttk.Label(
+            tab,
+            text="留空时该阶段会显示“等待配置”，不会把整个项目判定为失败。",
+        ).grid(row=3, column=0, sticky="w", pady=(12, 0))
 
     def _build_workflow_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=18)
@@ -152,7 +221,7 @@ class AISettingsDialog(tk.Toplevel):
                 "预设会调整 Agent 的启动时机和增量节奏；下列细项会真正传给项目协调器。"
                 "平衡模式默认等待 AssetCommander 与 fscan 完成后再启动 Agent。"
             ),
-            wraplength=620,
+            wraplength=660,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
         ttk.Label(tab, text="工作模式").grid(row=1, column=0, sticky="w", padx=(0, 12))
         mode_box = ttk.Combobox(
@@ -239,16 +308,35 @@ class AISettingsDialog(tk.Toplevel):
         self.max_batches_var.set(int(preset["max_agent_batches"]))
         self.poll_seconds_var.set(int(preset["coordinator_poll_seconds"]))
 
-    def _toggle_key(self) -> None:
-        self.key_entry.configure(show="" if self.show_key_var.get() else "*")
+    @staticmethod
+    def _valid_optional_url(value: str) -> bool:
+        if not value:
+            return True
+        parsed = urlsplit(value)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
 
     def _save(self) -> None:
         api_base_url = self.api_base_url_var.get().strip().rstrip("/")
-        parsed = urlsplit(api_base_url)
-        if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        if not self._valid_optional_url(api_base_url):
             messagebox.showerror(
                 "STTool 全局设置",
-                "API Base URL 必须是有效的 HTTP/HTTPS 地址",
+                "工具协作 API Base URL 必须是有效的 HTTP/HTTPS 地址",
+                parent=self,
+            )
+            return
+        codex_base_url = self.codex_agent_base_url_var.get().strip().rstrip("/")
+        claude_base_url = self.claude_agent_base_url_var.get().strip().rstrip("/")
+        if not self._valid_optional_url(codex_base_url):
+            messagebox.showerror(
+                "STTool 全局设置",
+                "Codex/Codexx Base URL 必须留空或填写有效的 HTTP/HTTPS 地址",
+                parent=self,
+            )
+            return
+        if not self._valid_optional_url(claude_base_url):
+            messagebox.showerror(
+                "STTool 全局设置",
+                "Claude Base URL 必须留空或填写有效的 HTTP/HTTPS 地址",
                 parent=self,
             )
             return
@@ -269,13 +357,19 @@ class AISettingsDialog(tk.Toplevel):
                 "coordinator_poll_seconds": self.poll_seconds_var.get(),
             }
         )
-        effort = self.reasoning_effort_var.get()
+        codex_effort = self.codex_reasoning_effort_var.get()
+        claude_effort = self.claude_reasoning_effort_var.get()
         self.result = {
             "api_base_url": api_base_url,
             "model": model,
             "api_key": self.api_key_var.get().strip(),
-            "agent_model": self.agent_model_var.get().strip(),
-            "reasoning_effort": "" if effort == "CLI 默认" else effort,
+            "codex_agent_model": self.codex_agent_model_var.get().strip(),
+            "codex_reasoning_effort": "" if codex_effort == "CLI 默认" else codex_effort,
+            "codex_agent_base_url": codex_base_url,
+            "claude_agent_model": self.claude_agent_model_var.get().strip(),
+            "claude_reasoning_effort": "" if claude_effort == "CLI 默认" else claude_effort,
+            "claude_agent_base_url": claude_base_url,
+            "github_token": self.github_token_var.get().strip(),
             "workflow": workflow,
         }
         self.destroy()

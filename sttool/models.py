@@ -41,6 +41,7 @@ class ToolDefinition:
     result_paths: tuple[str, ...] = ()
     uses_shared_ai: bool = False
     allow_standalone: bool = False
+    coordinator_managed: bool = False
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,8 @@ class LaunchRequest:
     api_key: str = field(default="", repr=False, compare=False)
     agent_model: str = ""
     reasoning_effort: str = ""
+    agent_base_url: str = ""
+    github_token: str = field(default="", repr=False, compare=False)
     work_mode: str = DEFAULT_WORK_MODE
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
@@ -125,6 +128,7 @@ class RunState:
     api_base_url: str = DEFAULT_API_BASE_URL
     agent_model: str = ""
     reasoning_effort: str = ""
+    agent_base_url: str = ""
     work_mode: str = DEFAULT_WORK_MODE
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
@@ -136,7 +140,7 @@ class RunState:
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        value["schema_version"] = 3
+        value["schema_version"] = 4
         return value
 
     @classmethod

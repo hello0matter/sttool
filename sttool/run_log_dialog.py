@@ -11,6 +11,12 @@ from .activity import activity_log_path
 from .models import RunState
 
 
+COORDINATOR_MANAGED_COMPONENTS = {
+    "vulnx": "vulnx 漏洞情报",
+    "find_gh_poc": "GitHub PoC 候选搜索",
+}
+
+
 def load_json(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -39,6 +45,8 @@ def filter_component_activity(
         "semantic_dirscan": ("AI 路径发现", "semantic"),
         "fscan": ("fscan",),
         "nuclei": ("nuclei",),
+        "vulnx": ("vulnx", "漏洞情报"),
+        "find_gh_poc": ("find-gh-poc", "GitHub PoC"),
         "tscan_plus": ("TscanPlus",),
         "project_coordinator": ("项目增量调度器", "资产总线", "Agent 批次"),
         "ai_agent": ("本地 Agent", "Codex Agent", "Codexx", "Codex", "Claude"),
@@ -50,6 +58,8 @@ def filter_component_activity(
         ("asset_commander", ("assetcommander",)),
         ("semantic_dirscan", ("ai 路径发现", "semantic")),
         ("nuclei", ("nuclei",)),
+        ("vulnx", ("vulnx", "漏洞情报")),
+        ("find_gh_poc", ("find-gh-poc", "github poc")),
         (
             "project_coordinator",
             ("项目增量调度器", "资产总线", "agent 批次"),
@@ -201,6 +211,27 @@ def component_paths(
                 run_dir / "agent_batches",
             ],
         }
+    if component_id == "vulnx":
+        return {
+            "workdir": run_dir,
+            "states": [run_dir / "results" / "vulnerability_intel.json"],
+            "logs": [component_activity],
+            "results": [
+                run_dir / "vulnerability_intel.md",
+                run_dir / "results" / "vulnerability_intel.json",
+                run_dir / "results" / "vulnx.json",
+            ],
+        }
+    if component_id == "find_gh_poc":
+        return {
+            "workdir": run_dir,
+            "states": [
+                run_dir / "results" / "find_gh_poc.json",
+                run_dir / "results" / "vulnerability_intel.json",
+            ],
+            "logs": [component_activity],
+            "results": [run_dir / "results" / "find_gh_poc.json"],
+        }
     if component_id == "fscan":
         result = run_dir / "results" / "fscan.txt"
         return {
@@ -239,6 +270,11 @@ def human_status(value: object) -> str:
         "stopped": "\u5df2\u505c\u6b62",
         "exited": "\u5df2\u9000\u51fa",
         "pending": "\u5f85\u8fd0\u884c",
+        "not_selected": "未选择",
+        "blocked_without_vulnx": "?? vulnx",
+        "skipped_no_token": "?? GitHub Token",
+        "unavailable": "不可用",
+        "completed_with_errors": "完成（有错误）",
     }.get(text, text or "\u672a\u77e5")
 
 
@@ -509,6 +545,31 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
                 f"\u8fc7\u6ee4 {rejected_count} \u4e2a",
             )
         return "running", "directory_scan", f"\u5df2\u540c\u6b65 {target_count} \u4e2a\u626b\u63cf\u76ee\u6807"
+    if component_id == "vulnx":
+        state = load_json(run_dir / "tool_data" / "coordinator" / "state.json")
+        status = str(state.get("vuln_intel_status") or "pending")
+        if status == "pending":
+            return "waiting_assets", "waiting_asset_stability", "等待资产稳定后关联 CVE、KEV 与模板"
+        detail = str(state.get("vuln_intel_error") or "")
+        if not detail:
+            detail = (
+                f"候选 {int(state.get('vuln_intel_candidates') or 0)}，"
+                f"高可信 {int(state.get('vuln_intel_high_confidence') or 0)}"
+            )
+        return status, "vulnerability_intelligence", detail
+    if component_id == "find_gh_poc":
+        state = load_json(run_dir / "tool_data" / "coordinator" / "state.json")
+        status = str(state.get("find_gh_poc_status") or "pending")
+        if status == "skipped_no_token":
+            return "manual_required", "waiting_github_token", "未配置 GitHub Token；已安全跳过，不影响其他阶段"
+        if status in {"pending", "not_requested"}:
+            return "waiting_assets", "waiting_cve_candidates", "?? vulnx ?? CVE ??"
+        if status == "blocked_without_vulnx":
+            return "waiting_assets", "waiting_vulnx", "已选择 find-gh-poc，但 vulnx 未选择"
+        result = load_json(run_dir / "results" / "find_gh_poc.json")
+        candidates = result.get("candidates")
+        count = len(candidates) if isinstance(candidates, list) else 0
+        return status, "github_poc_search", f"PoC 候选链接 {count} 条；只保存元数据，不执行"
     if component_id in {"fscan", "nuclei"}:
         result = run_dir / "results" / f"{component_id}.txt"
         if result.is_file():
@@ -861,7 +922,13 @@ class RunLogDialog(tk.Toplevel):
             if detail:
                 value += f"，{detail}"
             lines.append(value)
-        for name in ("fscan.txt", "nuclei.txt", "asset_commander_assets.json"):
+        for name in (
+            "fscan.txt",
+            "nuclei.txt",
+            "asset_commander_assets.json",
+            "vulnerability_intel.json",
+            "find_gh_poc.json",
+        ):
             path = self.run_dir / "results" / name
             try:
                 size = path.stat().st_size
@@ -897,6 +964,26 @@ class RunLogDialog(tk.Toplevel):
                         detail,
                         process.pid,
                         process.started_at.replace("T", " ")[:19],
+                    ),
+                )
+            process_ids = {process.component_id for process in state.processes}
+            for component_id, component_name in COORDINATOR_MANAGED_COMPONENTS.items():
+                if component_id not in state.selected_tools or component_id in process_ids:
+                    continue
+                status, stage, detail = component_display_runtime(
+                    self.run_dir, component_id
+                )
+                self.process_tree.insert(
+                    "",
+                    "end",
+                    iid=component_id,
+                    values=(
+                        component_name,
+                        self._status_text(status),
+                        stage,
+                        detail,
+                        "-",
+                        "由协调器按资产代次执行",
                     ),
                 )
             for iid in selected:

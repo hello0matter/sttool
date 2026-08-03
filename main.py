@@ -61,7 +61,7 @@ def main() -> int:
         for tool in tools:
             healthy, detail = availability(tool)
             print(f"[{'OK' if healthy else 'FAIL'}] {tool.name}: {detail}")
-        for provider in ("codexx", "codex"):
+        for provider in ("codexx", "codex", "claude"):
             healthy, detail = manager.provider_health(provider)
             display = manager.provider_display_name(provider)
             print(f"[{'OK' if healthy else 'FAIL'}] {display}: {detail}")

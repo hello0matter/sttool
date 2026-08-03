@@ -360,6 +360,44 @@ class RunLogDialogTests(unittest.TestCase):
             self.assertIn("\u5f85\u626b\u63cf\u961f\u5217\uff1a4", rendered)
             self.assertIn("https://example.test/admin/", rendered)
 
+    def test_coordinator_managed_vulnerability_tools_have_virtual_status(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            coordinator = run_dir / "tool_data" / "coordinator" / "state.json"
+            coordinator.parent.mkdir(parents=True)
+            coordinator.write_text(
+                json.dumps(
+                    {
+                        "vuln_intel_status": "completed",
+                        "vuln_intel_candidates": 3,
+                        "vuln_intel_high_confidence": 2,
+                        "find_gh_poc_status": "skipped_no_token",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                component_runtime(run_dir, "vulnx"),
+                (
+                    "completed",
+                    "vulnerability_intelligence",
+                    "候选 3，高可信 2",
+                ),
+            )
+            self.assertEqual(
+                component_runtime(run_dir, "find_gh_poc"),
+                (
+                    "manual_required",
+                    "waiting_github_token",
+                    "未配置 GitHub Token；已安全跳过，不影响其他阶段",
+                ),
+            )
+            sources = component_paths(run_dir, "find_gh_poc")
+            self.assertIn(
+                run_dir / "results" / "find_gh_poc.json", sources["results"]
+            )
+
 
 if __name__ == "__main__":
     unittest.main()

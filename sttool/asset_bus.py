@@ -6,6 +6,7 @@ import os
 import re
 import sqlite3
 import tempfile
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -34,7 +35,15 @@ def atomic_json_write(path: Path, value: object) -> None:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt, delay in enumerate((0.0, 0.01, 0.03, 0.1, 0.25)):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
     finally:
         try:
             os.unlink(temporary)

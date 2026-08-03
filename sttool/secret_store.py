@@ -1,14 +1,17 @@
 from __future__ import annotations
 
 import ctypes
+import json
 import os
 import tempfile
-from pathlib import Path
+import time
 from ctypes import wintypes
+from pathlib import Path
 
 
 CRYPTPROTECT_UI_FORBIDDEN = 0x1
 ENTROPY = b"STTool AI settings v1"
+SECRET_SCHEMA_VERSION = 2
 
 
 class SecretStoreError(RuntimeError):
@@ -37,7 +40,7 @@ def _protect(value: bytes) -> bytes:
     kernel32 = ctypes.windll.kernel32
     success = crypt32.CryptProtectData(
         ctypes.byref(source),
-        "STTool AI API Key",
+        "STTool encrypted settings",
         ctypes.byref(entropy),
         None,
         None,
@@ -79,35 +82,88 @@ def _unprotect(value: bytes) -> bytes:
         kernel32.LocalFree(output.data)
 
 
-def load_api_key(path: Path) -> str:
+def _read_plaintext(path: Path) -> str:
     try:
         encrypted = path.read_bytes()
     except FileNotFoundError:
         return ""
     except OSError as exc:
-        raise SecretStoreError(f"Unable to read encrypted API Key: {exc}") from exc
+        raise SecretStoreError(f"Unable to read encrypted settings: {exc}") from exc
     try:
         return _unprotect(encrypted).decode("utf-8")
     except (UnicodeDecodeError, OSError) as exc:
-        raise SecretStoreError(f"Unable to decrypt API Key: {exc}") from exc
+        raise SecretStoreError(f"Unable to decrypt settings: {exc}") from exc
 
 
-def save_api_key(path: Path, api_key: str) -> None:
-    value = api_key.strip()
-    if not value:
+def load_secret_values(path: Path) -> dict[str, str]:
+    plaintext = _read_plaintext(path)
+    if not plaintext:
+        return {}
+    try:
+        payload = json.loads(plaintext)
+    except json.JSONDecodeError:
+        return {"shared_ai_api_key": plaintext}
+    if not isinstance(payload, dict):
+        return {}
+    values = payload.get("values")
+    if not isinstance(values, dict):
+        return {}
+    return {
+        str(key): str(value)
+        for key, value in values.items()
+        if str(key).strip() and str(value).strip()
+    }
+
+
+def save_secret_values(path: Path, values: dict[str, str]) -> None:
+    cleaned = {
+        str(key): str(value).strip()
+        for key, value in values.items()
+        if str(key).strip() and str(value).strip()
+    }
+    if not cleaned:
         path.unlink(missing_ok=True)
         return
-    encrypted = _protect(value.encode("utf-8"))
+    plaintext = json.dumps(
+        {"schema_version": SECRET_SCHEMA_VERSION, "values": cleaned},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encrypted = _protect(plaintext)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fd, temporary = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
+    fd, temporary = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".tmp", dir=path.parent
+    )
     try:
         with os.fdopen(fd, "wb") as handle:
             handle.write(encrypted)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt, delay in enumerate((0.0, 0.01, 0.03, 0.1, 0.25)):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
     finally:
         try:
             os.unlink(temporary)
         except FileNotFoundError:
             pass
+
+
+def load_api_key(path: Path) -> str:
+    return load_secret_values(path).get("shared_ai_api_key", "")
+
+
+def save_api_key(path: Path, api_key: str) -> None:
+    values = load_secret_values(path)
+    key = api_key.strip()
+    if key:
+        values["shared_ai_api_key"] = key
+    else:
+        values.pop("shared_ai_api_key", None)
+    save_secret_values(path, values)
