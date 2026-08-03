@@ -24,6 +24,7 @@ from .secret_store import (
     SecretStoreError,
     load_secret_values,
     save_secret_values,
+    update_secret_value,
 )
 from .tool_details import ToolDetailsDialog
 from .tool_editor import ToolEditorDialog
@@ -532,7 +533,14 @@ class LauncherApp(tk.Tk):
             model=self.default_model,
             api_key=self.api_key,
             github_token=self.github_token,
+            github_token_saver=self._save_github_token_from_tool,
         )
+
+    def _save_github_token_from_tool(self, token: str) -> None:
+        values = update_secret_value(
+            self.launcher_secrets_path, "github_token", token
+        )
+        self.github_token = values.get("github_token", "")
 
     def _edit_tool(self) -> None:
         tool = self._selected_tool()

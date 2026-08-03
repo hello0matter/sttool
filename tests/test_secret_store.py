@@ -10,6 +10,7 @@ from sttool.secret_store import (
     load_secret_values,
     save_api_key,
     save_secret_values,
+    update_secret_value,
 )
 
 
@@ -55,6 +56,26 @@ class SecretStoreTests(unittest.TestCase):
                 },
             )
             self.assertEqual(load_api_key(path), "shared-key")
+
+    def test_updating_github_token_preserves_shared_ai_key(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "launcher_secrets.dat"
+            save_secret_values(path, {"shared_ai_api_key": "shared-key"})
+
+            values = update_secret_value(path, "github_token", "github-token")
+
+            self.assertEqual(
+                values,
+                {
+                    "shared_ai_api_key": "shared-key",
+                    "github_token": "github-token",
+                },
+            )
+            self.assertEqual(load_secret_values(path), values)
+
+            values = update_secret_value(path, "github_token", "")
+            self.assertEqual(values, {"shared_ai_api_key": "shared-key"})
+            self.assertEqual(load_secret_values(path), values)
 
 
 if __name__ == "__main__":

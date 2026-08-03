@@ -5,6 +5,7 @@ import os
 import tkinter as tk
 from pathlib import Path
 from tkinter import messagebox, ttk
+from typing import Callable
 
 from .models import RunState, ToolDefinition
 from .runtime import RuntimeManager, target_values
@@ -31,6 +32,7 @@ class ToolDetailsDialog(tk.Toplevel):
         model: str = "",
         api_key: str = "",
         github_token: str = "",
+        github_token_saver: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
         self.tool = tool
@@ -46,6 +48,16 @@ class ToolDetailsDialog(tk.Toplevel):
         self.model = model
         self.api_key = api_key
         self.github_token = github_token
+        self.github_token_saver = github_token_saver
+        self.github_token_var = tk.StringVar(value=github_token)
+        self.show_github_token_var = tk.BooleanVar(value=False)
+        self.github_token_status_var = tk.StringVar(
+            value=(
+                "已配置并使用 Windows DPAPI 加密保存"
+                if github_token
+                else "未配置"
+            )
+        )
 
         self.title(f"工具详情与结果 - {tool.name}")
         self.geometry("920x620")
@@ -55,7 +67,7 @@ class ToolDetailsDialog(tk.Toplevel):
         container = ttk.Frame(self, padding=18)
         container.pack(fill="both", expand=True)
         container.columnconfigure(0, weight=1)
-        container.rowconfigure(6, weight=1)
+        container.rowconfigure(7, weight=1)
 
         ttk.Label(
             container,
@@ -83,8 +95,47 @@ class ToolDetailsDialog(tk.Toplevel):
             justify="left",
         ).grid(row=3, column=0, sticky="ew", pady=(0, 12))
 
+        if tool.tool_id == "find_gh_poc":
+            token_frame = ttk.LabelFrame(
+                container, text="GitHub GraphQL Token", padding=10
+            )
+            token_frame.grid(row=4, column=0, sticky="ew", pady=(0, 12))
+            token_frame.columnconfigure(0, weight=1)
+            token_entry = ttk.Entry(
+                token_frame,
+                textvariable=self.github_token_var,
+                show="•",
+            )
+            token_entry.grid(row=0, column=0, sticky="ew", padx=(0, 8))
+            ttk.Checkbutton(
+                token_frame,
+                text="显示",
+                variable=self.show_github_token_var,
+                command=lambda: token_entry.configure(
+                    show="" if self.show_github_token_var.get() else "•"
+                ),
+            ).grid(row=0, column=1, padx=(0, 8))
+            save_button = ttk.Button(
+                token_frame, text="保存 Token", command=self._save_github_token
+            )
+            save_button.grid(row=0, column=2)
+            if self.github_token_saver is None:
+                save_button.state(["disabled"])
+            ttk.Label(
+                token_frame,
+                textvariable=self.github_token_status_var,
+            ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+            ttk.Label(
+                token_frame,
+                text=(
+                    "Token 与全局设置 → 漏洞情报共用；留空并保存会清除。"
+                    "不会写入 tools.json、项目文件、命令行或日志。"
+                ),
+                wraplength=800,
+            ).grid(row=2, column=0, columnspan=3, sticky="w", pady=(4, 0))
+
         run_row = ttk.Frame(container)
-        run_row.grid(row=4, column=0, sticky="ew", pady=(0, 10))
+        run_row.grid(row=5, column=0, sticky="ew", pady=(0, 10))
         ttk.Label(run_row, text="运行实例").pack(side="left", padx=(0, 8))
         self.run_var = tk.StringVar()
         self.run_box = ttk.Combobox(
@@ -98,7 +149,7 @@ class ToolDetailsDialog(tk.Toplevel):
         self.run_box.bind("<<ComboboxSelected>>", lambda _event: self._refresh_results())
 
         ttk.Label(container, text="结果位置（双击打开）").grid(
-            row=5, column=0, sticky="w", pady=(0, 5)
+            row=6, column=0, sticky="w", pady=(0, 5)
         )
         columns = ("status", "path")
         self.results_tree = ttk.Treeview(
@@ -111,18 +162,18 @@ class ToolDetailsDialog(tk.Toplevel):
         self.results_tree.heading("path", text="文件或目录")
         self.results_tree.column("status", width=100, minwidth=80)
         self.results_tree.column("path", width=720, minwidth=300)
-        self.results_tree.grid(row=6, column=0, sticky="nsew")
+        self.results_tree.grid(row=7, column=0, sticky="nsew")
         results_scrollbar = ttk.Scrollbar(
             container,
             orient="vertical",
             command=self.results_tree.yview,
         )
-        results_scrollbar.grid(row=6, column=1, sticky="ns")
+        results_scrollbar.grid(row=7, column=1, sticky="ns")
         self.results_tree.configure(yscrollcommand=results_scrollbar.set)
         self.results_tree.bind("<Double-1>", lambda _event: self._open_result())
 
         actions = ttk.Frame(container)
-        actions.grid(row=7, column=0, sticky="ew", pady=(12, 0))
+        actions.grid(row=8, column=0, sticky="ew", pady=(12, 0))
         ttk.Button(actions, text="打开工具位置", command=self._open_tool_location).pack(
             side="left"
         )
@@ -147,6 +198,31 @@ class ToolDetailsDialog(tk.Toplevel):
         if initial is not None:
             self.run_var.set(self._run_label(initial))
         self._refresh_results()
+
+    def _save_github_token(self) -> None:
+        if self.github_token_saver is None:
+            return
+        token = self.github_token_var.get().strip()
+        try:
+            self.github_token_saver(token)
+        except (OSError, RuntimeError, ValueError) as exc:
+            messagebox.showerror("GitHub Token", str(exc), parent=self)
+            return
+        self.github_token = token
+        self.github_token_status_var.set(
+            "已配置并使用 Windows DPAPI 加密保存"
+            if token
+            else "已清除"
+        )
+        messagebox.showinfo(
+            "GitHub Token",
+            (
+                "GitHub Token 已加密保存并立即同步到全局漏洞情报配置。"
+                if token
+                else "GitHub Token 已清除。"
+            ),
+            parent=self,
+        )
 
     @staticmethod
     def _run_label(state: RunState) -> str:

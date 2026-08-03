@@ -159,6 +159,20 @@ def load_api_key(path: Path) -> str:
     return load_secret_values(path).get("shared_ai_api_key", "")
 
 
+def update_secret_value(path: Path, key: str, value: str) -> dict[str, str]:
+    normalized_key = key.strip()
+    if not normalized_key:
+        raise ValueError("Secret key cannot be empty")
+    values = load_secret_values(path)
+    normalized_value = value.strip()
+    if normalized_value:
+        values[normalized_key] = normalized_value
+    else:
+        values.pop(normalized_key, None)
+    save_secret_values(path, values)
+    return values
+
+
 def save_api_key(path: Path, api_key: str) -> None:
     values = load_secret_values(path)
     key = api_key.strip()
