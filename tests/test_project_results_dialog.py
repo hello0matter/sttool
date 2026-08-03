@@ -45,6 +45,12 @@ class ProjectResultsDialogTests(unittest.TestCase):
             (run_dir / "results" / "fscan.txt").write_text(
                 "10.0.0.1:80 open", encoding="utf-8"
             )
+            (run_dir / "vulnerability_intel.md").write_text(
+                "# \u6f0f\u6d1e\u60c5\u62a5\u4e0e PoC \u5019\u9009\n", encoding="utf-8"
+            )
+            (run_dir / "results" / "vulnerability_intel.json").write_text(
+                '{"candidate_count": 1}', encoding="utf-8"
+            )
 
             content, sources = render_project_results(
                 self._state(run_dir, status="completed")
@@ -54,7 +60,12 @@ class ProjectResultsDialogTests(unittest.TestCase):
         self.assertIn("\u5f85\u9a8c\u8bc1\u95ee\u9898", content)
         self.assertEqual(
             {item.path.name for item in sources},
-            {"risk_summary.md", "fscan.txt"},
+            {
+                "risk_summary.md",
+                "vulnerability_intel.md",
+                "vulnerability_intel.json",
+                "fscan.txt",
+            },
         )
 
     def test_compact_markdown_folds_large_asset_sections(self) -> None:

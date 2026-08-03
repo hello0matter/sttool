@@ -24,6 +24,7 @@ from .asset_bus import (
     target_assets,
 )
 from .models import ProcessRecord
+from .vulnerability_intel import generate_vulnerability_intel
 from .runtime import (
     pid_alive,
     process_creation_token,
@@ -447,9 +448,14 @@ def build_batch_prompt(
         + f"## STTool Agent 批次 {batch_number}：{label}\n\n"
         + f"统一资产总线：{run_dir / 'tool_data' / 'asset_bus' / 'assets.json'}\n"
         + f"fscan 完整输出：{run_dir / 'results' / 'fscan.txt'}\n"
-        + f"项目风险摘要：{run_dir / 'risk_summary.md'}\n\n"
-        + "必须先完整读取 fscan 输出，逐个检查下列 Web URL，不能只检查项目主 URL。"
-        + "对每个 URL 分别记录页面取证、产品/版本、候选 CVE、验证状态和证据路径。\n\n"
+        + f"项目风险摘要：{run_dir / 'risk_summary.md'}\n"
+        + f"漏洞情报与 PoC 候选：{run_dir / 'vulnerability_intel.md'}\n"
+        + f"结构化漏洞情报：{run_dir / 'results' / 'vulnerability_intel.json'}\n\n"
+        + "必须先完整读取 fscan 输出和漏洞情报，逐个检查下列 Web URL，不能只检查项目主 URL。"
+        + "对每个 URL 分别记录页面取证、产品/版本、候选 CVE、验证状态和证据路径。"
+        + "PoC 链接只是不可信候选，不得直接下载执行；必须先核对厂商公告、受影响版本、前置条件和模板副作用，"
+        + "优先使用已审查的 verified Nuclei 模板或无害请求。"
+        + "禁止自动写文件、创建账号、反弹 Shell、抓取凭据、持久化和横向移动。\n\n"
         + "### 本批次 Web URL\n"
         + ("\n".join(f"- {value}" for value in urls) or "- 本批次没有新增 Web URL")
         + "\n\n### 本批次非 Web 端点\n"
@@ -491,6 +497,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--wait-asset-commander", type=parse_bool, default=True)
     parser.add_argument("--wait-fscan", type=parse_bool, default=True)
     parser.add_argument("--ai-summary", type=parse_bool, default=True)
+    parser.add_argument("--vulnx", type=Path, default=None)
+    parser.add_argument("--find-gh-poc", type=Path, default=None)
     parser.add_argument("--terminal-window", default="")
     return parser.parse_args()
 
@@ -525,6 +533,8 @@ def main() -> int:
     state.setdefault("agent_consumed_generation", 0)
     state.setdefault("active_agent_pid", 0)
     state.setdefault("active_agent_creation_token", 0)
+    state.setdefault("vuln_intel_generation", 0)
+    state.setdefault("vuln_intel_status", "pending")
     state["agent_failure_count"] = 0
     state["agent_retry_not_before"] = 0
     state.update(
@@ -540,6 +550,8 @@ def main() -> int:
             "ai_summary": args.ai_summary,
             "agent_model": args.agent_model,
             "reasoning_effort": args.reasoning_effort,
+            "vulnx": str(args.vulnx or ""),
+            "find_gh_poc": str(args.find_gh_poc or ""),
         },
         updated_at=now_text(),
     )
@@ -685,6 +697,55 @@ def main() -> int:
                 tscan_database,
                 "阶段性" if batches else "首次资产稳定",
             )
+            (run_dir / "risk_summary.md").write_text(summary, encoding="utf-8")
+            if bus.generation > int(state.get("vuln_intel_generation") or 0):
+                state.update(
+                    stage="vulnerability_intelligence",
+                    detail="资产已稳定，正在关联产品版本、CVE、KEV、公开 PoC 与 Nuclei 模板。",
+                    vuln_intel_status="running",
+                    updated_at=now_text(),
+                )
+                atomic_json_write(state_path, state)
+                append_activity(
+                    run_dir,
+                    f"开始生成漏洞情报，处理资产代次 {bus.generation}；PoC 仅收集元数据，不自动执行。",
+                )
+                try:
+                    intel = generate_vulnerability_intel(
+                        run_dir,
+                        args.vulnx or Path("__missing_vulnx__"),
+                        args.find_gh_poc,
+                    )
+                except Exception as exc:
+                    state["vuln_intel_status"] = "failed"
+                    state["vuln_intel_error"] = f"{type(exc).__name__}: {exc}"
+                    state["vuln_intel_candidates"] = 0
+                    append_activity(
+                        run_dir,
+                        f"漏洞情报生成失败：{type(exc).__name__}: {exc}；Agent 仍按已有证据继续。",
+                    )
+                else:
+                    state["vuln_intel_status"] = str(
+                        intel.get("status") or "completed"
+                    )
+                    state["vuln_intel_candidates"] = int(
+                        intel.get("candidate_count") or 0
+                    )
+                    state["vuln_intel_high_confidence"] = int(
+                        intel.get("high_confidence_count") or 0
+                    )
+                    state["vuln_intel_updated_at"] = str(
+                        intel.get("generated_at") or now_text()
+                    )
+                    state.pop("vuln_intel_error", None)
+                    append_activity(
+                        run_dir,
+                        "漏洞情报已生成："
+                        f"候选 {state['vuln_intel_candidates']}，"
+                        f"带本地证据与模板线索 {state['vuln_intel_high_confidence']}；"
+                        "未知 PoC 保持禁用。",
+                    )
+                state["vuln_intel_generation"] = bus.generation
             if args.ai_summary:
                 enhanced, ai_status = ai_enhance_summary(summary)
             else:

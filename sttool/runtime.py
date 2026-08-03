@@ -82,7 +82,15 @@ def atomic_json_write(path: Path, value: object) -> None:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt, delay in enumerate((0.0, 0.01, 0.03, 0.1, 0.25)):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 4:
+                    raise
     finally:
         try:
             os.unlink(temporary)
@@ -957,6 +965,18 @@ class RuntimeManager:
         }
         if request.api_key.strip():
             environment["OPENAI_API_KEY"] = request.api_key.strip()
+        vulnx_tool = self.tools.get("vulnx")
+        vulnx_path = (
+            Path(vulnx_tool.executable)
+            if vulnx_tool is not None
+            else self.st_root / "vulnx" / "vulnx.exe"
+        )
+        find_gh_poc_tool = self.tools.get("find_gh_poc")
+        find_gh_poc_path = self.st_root / "find-gh-poc" / "find-gh-poc.exe"
+        if find_gh_poc_tool is not None and "--exe" in find_gh_poc_tool.args:
+            executable_index = find_gh_poc_tool.args.index("--exe") + 1
+            if executable_index < len(find_gh_poc_tool.args):
+                find_gh_poc_path = Path(find_gh_poc_tool.args[executable_index])
         return self._spawn(
             "project_coordinator",
             "项目增量调度与 Agent",
@@ -992,6 +1012,10 @@ class RuntimeManager:
                 str(request.wait_for_fscan).lower(),
                 "--ai-summary",
                 str(request.ai_summary_enabled).lower(),
+                "--vulnx",
+                str(vulnx_path),
+                "--find-gh-poc",
+                str(find_gh_poc_path),
                 "--terminal-window",
                 agent_terminal_window_name(self.app_dir),
             ],

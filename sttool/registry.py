@@ -13,6 +13,8 @@ BUILTIN_TOOL_IDS = (
     "semantic_dirscan",
     "fscan",
     "nuclei",
+    "vulnx",
+    "find_gh_poc",
     "tscan_plus",
 )
 
@@ -23,6 +25,8 @@ def default_locations(st_root: Path = DEFAULT_ST_ROOT) -> dict[str, str]:
         "semantic_dirscan": str(st_root / "tmp" / "semantic-recursive-dirscan"),
         "fscan": str(st_root / "fscan" / "fscan.exe"),
         "nuclei": str(st_root / "nuclei" / "nuclei.exe"),
+        "vulnx": str(st_root / "vulnx" / "vulnx.exe"),
+        "find_gh_poc": str(st_root / "find-gh-poc" / "find-gh-poc.exe"),
         "tscan_plus": str(st_root / "TscanPlus_Win_Amd64" / "TscanPlus_Win_Amd64.exe"),
     }
 
@@ -52,8 +56,11 @@ def default_tools(
     semantic = Path(resolved_locations["semantic_dirscan"])
     fscan = Path(resolved_locations["fscan"])
     nuclei = Path(resolved_locations["nuclei"])
+    vulnx = Path(resolved_locations["vulnx"])
+    find_gh_poc = Path(resolved_locations["find_gh_poc"])
     tscan = Path(resolved_locations["tscan_plus"])
     tscan_automation = Path(__file__).with_name("tscan_automation.py")
+    github_poc_search = Path(__file__).with_name("github_poc_search.py")
     asset_main = asset / "main.py"
     asset_workflow = asset / "asset_workflow.py"
     asset_handoff = asset / "asset_handoff.py"
@@ -178,6 +185,47 @@ def default_tools(
             sends_requests=True,
             new_console=True,
             result_paths=("{run_dir}/results/nuclei.txt",),
+            allow_standalone=True,
+        ),
+        ToolDefinition(
+            tool_id="vulnx",
+            name="vulnx 漏洞情报",
+            category="漏洞情报",
+            description="按 CVE、产品或版本检索 CVSS、EPSS、KEV、公开 PoC 与 Nuclei 模板元数据；不执行 PoC",
+            executable=str(vulnx),
+            args=(
+                "--silent",
+                "--json",
+                "--disable-update-check",
+                "--output",
+                "{run_dir}/results/vulnx.json",
+                "search",
+                "--limit",
+                "20",
+                "{target}",
+            ),
+            cwd="{run_dir}",
+            result_paths=("{run_dir}/results/vulnx.json",),
+            allow_standalone=True,
+        ),
+        ToolDefinition(
+            tool_id="find_gh_poc",
+            name="GitHub PoC 候选搜索",
+            category="漏洞情报",
+            description="通过 trickest/find-gh-poc 搜索 GitHub 候选仓库；只保存链接，不克隆、不执行 PoC，需 GITHUB_TOKEN 或 GH_TOKEN",
+            executable=_pythonw(),
+            args=(
+                str(github_poc_search),
+                "--exe",
+                str(find_gh_poc),
+                "--query",
+                "{target}",
+                "--output",
+                "{run_dir}/results/find_gh_poc.json",
+            ),
+            cwd="{run_dir}",
+            required_paths=(str(github_poc_search), str(find_gh_poc)),
+            result_paths=("{run_dir}/results/find_gh_poc.json",),
             allow_standalone=True,
         ),
         ToolDefinition(

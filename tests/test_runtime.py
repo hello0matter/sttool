@@ -171,6 +171,32 @@ class RuntimeTests(unittest.TestCase):
             activity = (run_dir / "activity.log").read_text(encoding="utf-8")
             self.assertIn("PID 已被其他进程占用", activity)
 
+    def test_atomic_json_write_retries_transient_replace_permission_error(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "state.json"
+            original_replace = os.replace
+            attempts = 0
+
+            def flaky_replace(source: str, destination: str | Path) -> None:
+                nonlocal attempts
+                attempts += 1
+                if attempts < 3:
+                    raise PermissionError("temporarily locked")
+                original_replace(source, destination)
+
+            with (
+                patch("sttool.runtime.os.replace", side_effect=flaky_replace),
+                patch("sttool.runtime.time.sleep") as sleep,
+            ):
+                atomic_json_write(path, {"status": "completed"})
+
+            self.assertEqual(
+                json.loads(path.read_text(encoding="utf-8")),
+                {"status": "completed"},
+            )
+            self.assertEqual(attempts, 3)
+            self.assertEqual([call.args[0] for call in sleep.call_args_list], [0.01, 0.03])
+
     def test_reconcile_asset_commander_running_preserves_active_step(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -499,6 +525,11 @@ class RuntimeTests(unittest.TestCase):
 
         self.assertTrue(tools["fscan"].allow_standalone)
         self.assertTrue(tools["nuclei"].allow_standalone)
+        self.assertTrue(tools["vulnx"].allow_standalone)
+        self.assertFalse(tools["vulnx"].sends_requests)
+        self.assertTrue(tools["find_gh_poc"].allow_standalone)
+        self.assertFalse(tools["find_gh_poc"].sends_requests)
+        self.assertIn("--exe", tools["find_gh_poc"].args)
         self.assertFalse(tools["asset_commander"].allow_standalone)
         self.assertFalse(tools["semantic_dirscan"].allow_standalone)
 
@@ -510,6 +541,8 @@ class RuntimeTests(unittest.TestCase):
             store = ToolStore(config_path, st_root=root / "default-tools")
 
             store.set_location("asset_commander", str(asset_dir))
+            poc_executable = root / "portable" / "find-gh-poc.exe"
+            store.set_location("find_gh_poc", str(poc_executable))
             store.set_asset_collision_settings(
                 {
                     "preserve_original_port": False,
@@ -556,6 +589,11 @@ class RuntimeTests(unittest.TestCase):
                 str(asset_dir.resolve()),
             )
             self.assertEqual(Path(asset.args[0]), asset_dir.resolve() / "main.py")
+            github_poc = tools["find_gh_poc"]
+            github_executable_index = github_poc.args.index("--exe") + 1
+            self.assertEqual(
+                Path(github_poc.args[github_executable_index]), poc_executable.resolve()
+            )
             self.assertEqual(
                 tools[custom.tool_id],
                 custom,
@@ -1255,6 +1293,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("xhigh", coordinator)
                 self.assertIn("--wait-asset-commander", coordinator)
                 self.assertIn("false", coordinator)
+                self.assertIn("--vulnx", coordinator)
+                self.assertIn(str((root / "vulnx" / "vulnx.exe").resolve()), coordinator)
+                self.assertIn("--find-gh-poc", coordinator)
             finally:
                 manager.cleanup()
 

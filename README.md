@@ -1,6 +1,6 @@
 # STTool 渗透项目总控台
 
-STTool 把现有渗透工具按“项目 / 运行实例”统一启动和监控。每次启动都建立独立运行目录；固定工具先收集资产，项目增量调度器在 AssetCommander 和 fscan 完成、资产稳定后再启动本地 Codexx/Codex Agent。
+STTool 把现有渗透工具按“项目 / 运行实例”统一启动和监控。每次启动都建立独立运行目录；固定工具先收集资产，项目增量调度器在 AssetCommander 和 fscan 完成、资产稳定后先生成漏洞情报与安全验证候选，再启动本地 Codexx/Codex/Claude Agent。
 
 ## 启动
 
@@ -30,6 +30,8 @@ python .\main.py --list-tools
 - AssetCommander：默认启动，工作目录隔离到本次运行目录；通过源码状态机自动执行常用资产流程，不依赖屏幕坐标点击。
 - semantic-recursive-dirscan：默认启动其工程 GUI，自动接收主目标、AssetCommander 域名/已确认 URL 和 fscan Web 服务，并使用自身工程状态继续未完成扫描。
 - fscan、nuclei：自动发包类工具，默认不勾选。
+- vulnx：主漏洞情报引擎，按 CVE、产品和版本聚合 CVSS、EPSS、KEV、PoC 链接和 Nuclei 模板元数据；不执行 PoC，可在工具设置中编辑可执行文件路径。
+- trickest/find-gh-poc：作为已有 CVE 的 GitHub 候选仓库补充；仅在进程环境提供 `GITHUB_TOKEN` 或 `GH_TOKEN` 时查询，Token 通过临时文件传递且不进入项目文件、日志或命令行。
 - TscanPlus：每个运行实例使用独立 exe 名、WebView2 目录和私有 `config.db`，启动时清理历史项目目标、结果和 AWVS 报告。自动调度信息收集、资产探测、Web 指纹、域名/目录枚举、JsFinder、Swagger、WAF、POC、未授权、密码检测、DumpAll、AWVS 和 Nessus；AWVS/Nessus 只在连接测试明确成功后点击开始。
 - Codexx CLI / Codex CLI：二选一且必选；调度器在资产稳定后以 `codexx --yolo` 或 `codex --yolo` 启动首次全量批次，之后只对新代次资产启动增量批次，不覆盖 CLI 自身模型、线路或凭据。
 
@@ -113,11 +115,13 @@ STTool 不读取或覆盖 Codexx、Codex 的 AI 配置，它们直接使用对�
 - 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
 - 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID、真实退出状态和完成时间；启动脚本只向 CLI 传递读取 `prompt.txt` 的短引导，避免 Windows 命令行长度限制。失败批次按 60 秒、5 分钟、15 分钟退避重试；项目日志可双击“项目增量调度/Agent”查看。
 - `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。
+- `vulnerability_intel.md` 和 `results/vulnerability_intel.json` 在资产稳定、Agent 启动前生成，记录产品/版本证据、CVE、KEV、模板和 PoC 候选。它会按输入指纹和资产代次缓存，恢复工程时不重复联网查询。
+- PoC URL 始终按不可信元数据处理，不自动 clone 或执行。写文件、创建账号、反弹 Shell、抓凭据、持久化和横向移动不属于自动情报阶段，后续若实现 Post-Exploitation 必须独立默认关闭并要求人工审批。
 
 
 ## 项目成果入口
 
-“运行实例”页面提供独立的 **项目成果** 按钮，与“项目日志”分开。成果窗口会显示阶段/最终状态、项目摘要预览和所有可用成果文件，可双击打开 `risk_summary.md`、`findings.md`、`cve_triage.md`、fscan/nuclei 结果及 Tscan 状态。大型资产清单在预览中自动折叠，完整内容仍可一键打开。即使当前没有漏洞结果，也会显示可读的运行中/暂无线索说明，不再留空白页。
+“运行实例”页面提供独立的 **项目成果** 按钮，与“项目日志”分开。成果窗口会显示阶段/最终状态、项目摘要预览和所有可用成果文件，可双击打开 `risk_summary.md`、`vulnerability_intel.md/json`、`findings.md`、`cve_triage.md`、vulnx/find-gh-poc/fscan/nuclei 结果及 Tscan 状态。大型资产清单在预览中自动折叠，完整内容仍可一键打开。即使当前没有漏洞结果，也会显示可读的运行中/暂无线索说明，不再留空白页。
 
 
 ### Human-readable per-tool logs

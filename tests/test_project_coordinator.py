@@ -183,6 +183,10 @@ class ProjectCoordinatorTests(unittest.TestCase):
                 self.assertIn(url, summary)
                 self.assertIn(url, prompt)
             self.assertIn("10.17.200.115:22", prompt)
+            self.assertIn("vulnerability_intel.md", prompt)
+            self.assertIn("vulnerability_intel.json", prompt)
+            self.assertIn("PoC \u94fe\u63a5\u53ea\u662f\u4e0d\u53ef\u4fe1\u5019\u9009", prompt)
+            self.assertIn("\u7981\u6b62\u81ea\u52a8\u5199\u6587\u4ef6", prompt)
 
     def test_finished_batch_updates_state_and_batch_metadata(self) -> None:
         with TemporaryDirectory() as temporary:
