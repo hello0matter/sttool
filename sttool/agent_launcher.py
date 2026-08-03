@@ -35,14 +35,19 @@ def write_agent_batch_script(
     pid_path = batch_dir / "agent.pid"
     exit_path = batch_dir / "agent_exit.json"
     bootstrap = powershell_quote(prompt_file_bootstrap(prompt_path))
-    if provider in {"codex", "codexx"}:
-        options = " ".join(
-            item if item in {"--yolo", "-m", "-c"} else powershell_quote(item)
-            for item in agent_cli_arguments(provider, agent_model, reasoning_effort)
-        )
-        invocation = f"& {provider} {options} $bootstrapPrompt"
-    else:
-        invocation = "& claude $bootstrapPrompt"
+    option_flags = {
+        "--yolo",
+        "-m",
+        "-c",
+        "--dangerously-skip-permissions",
+        "--model",
+        "--effort",
+    }
+    options = " ".join(
+        item if item in option_flags else powershell_quote(item)
+        for item in agent_cli_arguments(provider, agent_model, reasoning_effort)
+    )
+    invocation = f"& {provider} {options} $bootstrapPrompt"
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         "$utf8 = [System.Text.UTF8Encoding]::new($false)\n"

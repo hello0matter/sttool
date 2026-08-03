@@ -41,7 +41,7 @@ def filter_component_activity(
         "nuclei": ("nuclei",),
         "tscan_plus": ("TscanPlus",),
         "project_coordinator": ("项目增量调度器", "资产总线", "Agent 批次"),
-        "ai_agent": ("本地 Agent", "Codex Agent", "Codexx", "Codex"),
+        "ai_agent": ("本地 Agent", "Codex Agent", "Codexx", "Codex", "Claude"),
     }.get(component_id, ())
     candidates = [component_id, component_name, *aliases]
     normalized = [candidate.casefold() for candidate in candidates if candidate.strip()]
@@ -55,7 +55,7 @@ def filter_component_activity(
             ("项目增量调度器", "资产总线", "agent 批次"),
         ),
         ("fscan", ("fscan",)),
-        ("ai_agent", ("本地 agent", "codex agent", "codexx", "codex")),
+        ("ai_agent", ("本地 agent", "codex agent", "codexx", "codex", "claude")),
     )
     selected: list[str] = []
     for line in content.splitlines():

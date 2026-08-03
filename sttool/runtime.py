@@ -49,16 +49,23 @@ class LaunchError(RuntimeError):
 def agent_cli_arguments(
     provider: str, agent_model: str = "", reasoning_effort: str = ""
 ) -> list[str]:
-    if provider not in {"codex", "codexx"}:
-        return []
-    arguments = ["--yolo"]
     model = agent_model.strip()
-    if model:
-        arguments.extend(("-m", model))
     effort = normalized_reasoning_effort(reasoning_effort)
-    if effort:
-        arguments.extend(("-c", f'model_reasoning_effort="{effort}"'))
-    return arguments
+    if provider in {"codex", "codexx"}:
+        arguments = ["--yolo"]
+        if model:
+            arguments.extend(("-m", model))
+        if effort:
+            arguments.extend(("-c", f'model_reasoning_effort="{effort}"'))
+        return arguments
+    if provider == "claude":
+        arguments = ["--dangerously-skip-permissions"]
+        if model:
+            arguments.extend(("--model", model))
+        if effort:
+            arguments.extend(("--effort", effort))
+        return arguments
+    return []
 
 
 def now_text() -> str:
@@ -590,14 +597,22 @@ class RuntimeManager:
             f"{self.provider_display_name(request.provider)}"
         )
         bootstrap = self._ps_quote(prompt_file_bootstrap(prompt_path))
-        if request.provider in {"codexx", "codex"}:
-            command_name = request.provider
-            options = " ".join(
-                item if item in {"--yolo", "-m", "-c"} else self._ps_quote(item)
-                for item in agent_cli_arguments(
-                    request.provider, request.agent_model, request.reasoning_effort
-                )
+        command_name = request.provider
+        option_flags = {
+            "--yolo",
+            "-m",
+            "-c",
+            "--dangerously-skip-permissions",
+            "--model",
+            "--effort",
+        }
+        options = " ".join(
+            item if item in option_flags else self._ps_quote(item)
+            for item in agent_cli_arguments(
+                request.provider, request.agent_model, request.reasoning_effort
             )
+        )
+        if request.provider in {"codexx", "codex"}:
             invocation = (
                 f"& {command_name} {options} resume --last"
                 if resume
@@ -605,7 +620,9 @@ class RuntimeManager:
             )
         else:
             invocation = (
-                "& claude --continue" if resume else "& claude $bootstrapPrompt"
+                f"& {command_name} {options} --continue"
+                if resume
+                else f"& {command_name} {options} $bootstrapPrompt"
             )
         prompt_setup = "" if resume else f"$bootstrapPrompt = {bootstrap}\n"
         script = (

@@ -90,7 +90,7 @@ class AISettingsDialog(tk.Toplevel):
         ttk.Label(
             tab,
             text=(
-                "控制项目中启动的 Codex/Codexx CLI。留空或选择“CLI 默认”时，"
+                "控制项目中启动的 Codex/Codexx/Claude CLI。留空或选择“CLI 默认”时，"
                 "不会追加模型、API URL、API Key 或推理强度参数，继续使用 CLI 自己的配置。"
             ),
             wraplength=620,
@@ -119,7 +119,7 @@ class AISettingsDialog(tk.Toplevel):
             tab,
             text=(
                 "用于工具间信息汇总、传递与风险摘要优化。该配置独立于本地 "
-                "Codex/Codexx；API Key 仍保存在系统加密密钥文件中。"
+                "Codex/Codexx/Claude；API Key 仍保存在系统加密密钥文件中。"
             ),
             wraplength=620,
         ).grid(row=0, column=0, sticky="w", pady=(0, 16))

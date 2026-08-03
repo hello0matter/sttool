@@ -598,12 +598,16 @@ def wait_for_cdp(port: int, timeout: float = 20.0) -> str:
     raise RuntimeError(f"Tscan WebView2 CDP did not start on port {port}: {last_error}")
 
 
-def visible(locator: Locator) -> Locator:
-    for index in range(locator.count()):
-        candidate = locator.nth(index)
-        if candidate.is_visible():
-            return candidate
-    raise RuntimeError("visible Tscan control not found")
+def visible(locator: Locator, timeout: float = 2.5) -> Locator:
+    deadline = time.monotonic() + timeout
+    while True:
+        for index in range(locator.count()):
+            candidate = locator.nth(index)
+            if candidate.is_visible():
+                return candidate
+        if time.monotonic() >= deadline:
+            raise RuntimeError("visible Tscan control not found")
+        time.sleep(0.05)
 
 
 def set_native_value(locator: Locator, value: str) -> None:
@@ -784,6 +788,10 @@ def wait_for_stage_ack(
     return False, snapshot
 
 
+def modal_requires_retry(dismissed: tuple[str, ...]) -> bool:
+    return any(item.startswith("文件大小限制提醒：") for item in dismissed)
+
+
 def configure_textarea_scan(
     page: Page,
     top_tab: str,
@@ -805,27 +813,41 @@ def configure_textarea_scan(
     scope = panel if panel.count() else page
     button = visible(scope.get_by_role("button", name=button_name, exact=True))
     clicked = False
+    retry_clicked = False
+    dismissed_modals: tuple[str, ...] = ()
     acknowledged = False
     snapshot: object = None
     reason = ""
     if not normalized:
         reason = "没有可导入的目标"
     elif start_scan:
-        safe_click(page, button)
+        dismissed_modals = safe_click(page, button)
         clicked = True
-        acknowledged, snapshot = wait_for_stage_ack(
-            page, button, progress_method=progress_method
-        )
+        if modal_requires_retry(dismissed_modals):
+            acknowledged, snapshot = wait_for_stage_ack(
+                page,
+                button,
+                progress_method=progress_method,
+                timeout=1.5,
+            )
+            if not acknowledged:
+                dismissed_modals += safe_click(page, button)
+                retry_clicked = True
+        if not acknowledged:
+            acknowledged, snapshot = wait_for_stage_ack(
+                page, button, progress_method=progress_method
+            )
         if not acknowledged:
             reason = "已点击启动，但 Tscan 未在 10 秒内确认任务进入运行状态"
     return {
         "target_count": len(normalized),
         "clicked": clicked,
+        "retry_clicked": retry_clicked,
+        "dismissed_modals": list(dismissed_modals),
         "acknowledged": acknowledged,
         "progress": snapshot,
         "reason": reason,
     }
-
 
 def configure_information_collection(
     page: Page, target: str, start_scan: bool
@@ -931,6 +953,140 @@ def select_available_pocs(page: Page) -> int:
         }).length"""
     )
     return int(selected or result.get("selected", 0))
+
+
+def select_unauthorized_services(page: Page) -> dict[str, object]:
+    result = page.evaluate(
+        """async () => {
+          const visible = (element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const normalizedText = (element) =>
+            (element?.innerText || element?.textContent || '').replace(/\s+/g, ' ').trim();
+          const delay = (milliseconds) => new Promise(
+            (resolve) => window.setTimeout(resolve, milliseconds)
+          );
+          const pane = [...document.querySelectorAll('.n-tab-pane')].find(
+            (element) => visible(element)
+              && element.querySelector('textarea[placeholder*="支持 IP/域名/网段"]')
+          ) || document;
+          const enabled = (element) => element
+            && visible(element)
+            && element.getAttribute('aria-disabled') !== 'true'
+            && !element.hasAttribute('disabled');
+          const serviceRows = () => [...pane.querySelectorAll('tbody tr')]
+            .filter(visible)
+            .map((row) => ({
+              row,
+              checkbox: [...row.querySelectorAll('[role="checkbox"]')].find(enabled),
+              service: normalizedText(row)
+            }))
+            .filter((entry) => entry.checkbox);
+          const header = [...pane.querySelectorAll('thead [role="checkbox"]')].find(enabled);
+          let headerClicked = false;
+          if (header && header.getAttribute('aria-checked') !== 'true') {
+            header.click();
+            headerClicked = true;
+            await delay(300);
+          }
+          let individualClicks = 0;
+          for (const entry of serviceRows()) {
+            if (entry.checkbox.getAttribute('aria-checked') !== 'true') {
+              entry.checkbox.click();
+              individualClicks += 1;
+            }
+          }
+          if (individualClicks) await delay(300);
+          const rows = serviceRows();
+          const selectedRows = rows.filter(
+            (entry) => entry.checkbox.getAttribute('aria-checked') === 'true'
+          );
+          const mqtt = rows.find((entry) => entry.service.toUpperCase().includes('MQTT'));
+          return {
+            available: rows.length,
+            selected: selectedRows.length,
+            header_clicked: headerClicked,
+            individual_clicks: individualClicks,
+            mqtt_found: Boolean(mqtt),
+            mqtt_selected: Boolean(
+              mqtt && mqtt.checkbox.getAttribute('aria-checked') === 'true'
+            ),
+            missing_services: rows
+              .filter((entry) => entry.checkbox.getAttribute('aria-checked') !== 'true')
+              .map((entry) => entry.service)
+          };
+        }"""
+    )
+    if not isinstance(result, dict):
+        return {
+            "available": 0,
+            "selected": 0,
+            "header_clicked": False,
+            "individual_clicks": 0,
+            "mqtt_found": False,
+            "mqtt_selected": False,
+            "missing_services": [],
+        }
+    return {
+        "available": int(result.get("available") or 0),
+        "selected": int(result.get("selected") or 0),
+        "header_clicked": bool(result.get("header_clicked")),
+        "individual_clicks": int(result.get("individual_clicks") or 0),
+        "mqtt_found": bool(result.get("mqtt_found")),
+        "mqtt_selected": bool(result.get("mqtt_selected")),
+        "missing_services": [
+            str(item)
+            for item in result.get("missing_services", [])
+            if str(item).strip()
+        ],
+    }
+
+
+def configure_unauthorized_check(
+    page: Page, targets: list[str], start_scan: bool
+) -> dict[str, object]:
+    click_tab(page, "VulCheck")
+    click_tab(page, "UnAuth")
+    normalized = _unique(targets)
+    target_box = visible(page.locator('textarea[placeholder*="支持 IP/域名/网段"]'))
+    set_native_value(target_box, "\n".join(normalized))
+    services = select_unauthorized_services(page)
+    panel = target_box.locator(
+        "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' n-tab-pane ')][1]"
+    )
+    scope = panel if panel.count() else page
+    button = visible(scope.get_by_role("button", name="开始", exact=True))
+    clicked = False
+    acknowledged = False
+    snapshot: object = None
+    reason = ""
+    if not normalized:
+        reason = "没有可导入的域名/IP"
+    elif not services["available"]:
+        reason = "未找到可选择的未授权检测服务"
+    elif start_scan:
+        safe_click(page, button)
+        clicked = True
+        acknowledged, snapshot = wait_for_stage_ack(
+            page, button, progress_method="IsUnAuthRunning"
+        )
+        if not acknowledged:
+            reason = "已点击启动，但 Tscan 未在 10 秒内确认未授权检测进入运行状态"
+    if services["missing_services"]:
+        missing = "、".join(services["missing_services"])
+        warning = f"仍有未选服务：{missing}"
+        reason = f"{reason}；{warning}" if reason else warning
+    return {
+        "target_count": len(normalized),
+        "services": services,
+        "clicked": clicked,
+        "acknowledged": acknowledged,
+        "progress": snapshot,
+        "reason": reason,
+    }
 
 
 def configure_poc_check(
@@ -1280,6 +1436,17 @@ def dismiss_blocking_modals(page: Page) -> tuple[str, ...]:
           for (const dialog of dialogs) {
             if (!visible(dialog)) continue;
             const text = normalizedText(dialog);
+            if (text.includes('\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192')) {
+              const acknowledge = [...dialog.querySelectorAll('button')].find(
+                (button) => visible(button)
+                  && normalizedText(button) === '\u6211\u77e5\u9053\u4e86'
+              );
+              if (acknowledge) {
+                acknowledge.click();
+                dismissed.push('\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192\uff1a\u6211\u77e5\u9053\u4e86');
+                continue;
+              }
+            }
             if (!text.includes('\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b')) continue;
             const decline = [...dialog.querySelectorAll('button')].find(
               (button) => visible(button) && normalizedText(button) === '\u6682\u65f6\u4e0d\u7528'
@@ -1305,17 +1472,17 @@ def dismiss_blocking_modals(page: Page) -> tuple[str, ...]:
         return ()
     return tuple(str(item) for item in dismissed if str(item).strip())
 
-
-def safe_click(page: Page, locator: Locator) -> None:
+def safe_click(page: Page, locator: Locator) -> tuple[str, ...]:
     dismiss_transient_messages(page)
     dismiss_blocking_modals(page)
     locator.scroll_into_view_if_needed()
     locator.click(force=True)
     page.wait_for_timeout(180)
-    if dismiss_blocking_modals(page):
+    dismissed = dismiss_blocking_modals(page)
+    if dismissed:
         page.wait_for_timeout(180)
     dismiss_transient_messages(page)
-
+    return dismissed
 
 def dispatch_stages_on_page(
     page: Page,
@@ -1457,16 +1624,7 @@ def dispatch_stages_on_page(
     run_stage(
         "unauthorized_check",
         f"已导入 {len(nessus_targets)} 个域名/IP，正在启动未授权检测",
-        lambda: configure_textarea_scan(
-            page,
-            "VulCheck",
-            "UnAuth",
-            "支持 IP/域名/网段",
-            nessus_targets,
-            "开始",
-            start_scan,
-            "IsUnAuthRunning",
-        ),
+        lambda: configure_unauthorized_check(page, nessus_targets, start_scan),
     )
     run_stage(
         "password_crack",

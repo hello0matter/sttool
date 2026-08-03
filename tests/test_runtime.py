@@ -1136,7 +1136,16 @@ class RuntimeTests(unittest.TestCase):
                 'model_reasoning_effort="high"',
             ],
         )
-        self.assertEqual(agent_cli_arguments("claude", "ignored", "high"), [])
+        self.assertEqual(
+            agent_cli_arguments("claude", "claude-opus-4-1", "high"),
+            [
+                "--dangerously-skip-permissions",
+                "--model",
+                "claude-opus-4-1",
+                "--effort",
+                "high",
+            ],
+        )
 
     def test_codex_agent_script_applies_explicit_model_and_reasoning(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -1167,6 +1176,40 @@ class RuntimeTests(unittest.TestCase):
                 "-c 'model_reasoning_effort=\"high\"' $bootstrapPrompt",
                 script,
             )
+
+    def test_claude_agent_script_applies_model_effort_and_resume(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            (run_dir / "agent_prompt.txt").write_text("test", encoding="utf-8")
+            manager = RuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="claude",
+                model="summary-model",
+                selected_tools=(),
+                user_prompt="test",
+                authorization_confirmed=True,
+                agent_model="claude-opus-4-1",
+                reasoning_effort="high",
+            )
+
+            script = manager._agent_script(request, run_dir).read_text(
+                encoding="utf-8-sig"
+            )
+            resumed = manager._agent_script(request, run_dir, resume=True).read_text(
+                encoding="utf-8-sig"
+            )
+
+            options = (
+                "claude --dangerously-skip-permissions "
+                "--model 'claude-opus-4-1' --effort 'high'"
+            )
+            self.assertIn(f"& {options} $bootstrapPrompt", script)
+            self.assertIn(f"& {options} --continue", resumed)
 
     def test_project_persists_agent_and_workflow_settings(self) -> None:
         with TemporaryDirectory() as temporary:

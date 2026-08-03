@@ -265,6 +265,25 @@ class ProjectCoordinatorTests(unittest.TestCase):
             )
 
 
+    def test_claude_batch_script_applies_autonomy_model_and_effort(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            script_path, _pid_path = write_agent_batch_script(
+                batch_dir,
+                "claude",
+                "demo",
+                "claude-opus-4-1",
+                "high",
+            )
+            script = script_path.read_text(encoding="utf-8-sig")
+            self.assertIn(
+                "& claude --dangerously-skip-permissions "
+                "--model 'claude-opus-4-1' --effort 'high' $bootstrapPrompt",
+                script,
+            )
+
     def test_failed_batch_uses_exit_state_and_is_retryable(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)

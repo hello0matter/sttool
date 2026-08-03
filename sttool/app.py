@@ -261,6 +261,13 @@ class LauncherApp(tk.Tk):
             value="codex",
             variable=self.provider_var,
             command=self._provider_changed,
+        ).pack(side="left", padx=(0, 18))
+        ttk.Radiobutton(
+            provider_row,
+            text="Claude CLI",
+            value="claude",
+            variable=self.provider_var,
+            command=self._provider_changed,
         ).pack(side="left")
 
         ttk.Separator(right).grid(row=2, column=0, sticky="ew", pady=(2, 16))
@@ -908,7 +915,7 @@ class LauncherApp(tk.Tk):
         except (TypeError, ValueError):
             schema_version = 1
         provider = normalize_provider(value.get("provider", "codexx"), schema_version)
-        if provider not in {"codexx", "codex"}:
+        if provider not in {"codexx", "codex", "claude"}:
             provider = "codexx"
         self.provider_var.set(provider)
         if value.get("api_base_url"):

@@ -13,6 +13,7 @@ from sttool.tscan_automation import (
     classify_connection_feedback,
     dismiss_blocking_modals,
     filter_assets_by_scope,
+    modal_requires_retry,
     monitoring_state,
     normalize_poc_urls,
     password_targets,
@@ -21,6 +22,7 @@ from sttool.tscan_automation import (
     read_asset_bundle,
     read_asset_bus_bundle,
     scope_allows_all,
+    select_unauthorized_services,
     stage_status_from_result,
     target_asset_bundle,
     tscan_process_alive,
@@ -90,6 +92,57 @@ class TscanAutomationTests(unittest.TestCase):
         self.assertIn("\u6682\u65f6\u4e0d\u7528", page.script)
         self.assertIn(".n-base-close", page.script)
         self.assertNotIn("\u597d\u7684\uff0c\u53bb\u770b\u770b", page.script)
+
+    def test_dump_size_modal_is_acknowledged_and_requires_one_retry(self) -> None:
+        page = ModalPage(["\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192\uff1a\u6211\u77e5\u9053\u4e86"])
+
+        dismissed = dismiss_blocking_modals(page)
+
+        self.assertEqual(
+            dismissed,
+            ("\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192\uff1a\u6211\u77e5\u9053\u4e86",),
+        )
+        self.assertTrue(modal_requires_retry(dismissed))
+        self.assertIn("\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192", page.script)
+        self.assertIn("\u6211\u77e5\u9053\u4e86", page.script)
+
+    def test_support_modal_does_not_retry_original_action(self) -> None:
+        self.assertFalse(
+            modal_requires_retry(
+                ("\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528",)
+            )
+        )
+
+    def test_unauthorized_service_selection_includes_mqtt(self) -> None:
+        page = ModalPage(
+            {
+                "available": 46,
+                "selected": 46,
+                "header_clicked": True,
+                "individual_clicks": 1,
+                "mqtt_found": True,
+                "mqtt_selected": True,
+                "missing_services": [],
+            }
+        )
+
+        result = select_unauthorized_services(page)
+
+        self.assertEqual(
+            result,
+            {
+                "available": 46,
+                "selected": 46,
+                "header_clicked": True,
+                "individual_clicks": 1,
+                "mqtt_found": True,
+                "mqtt_selected": True,
+                "missing_services": [],
+            },
+        )
+        self.assertIn("thead [role=\"checkbox\"]", page.script)
+        self.assertIn("tbody tr", page.script)
+        self.assertIn("MQTT", page.script)
 
     def test_asset_bus_and_web_fingerprint_targets_keep_fscan_ports(self) -> None:
         with TemporaryDirectory() as temporary:
