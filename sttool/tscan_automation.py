@@ -918,41 +918,122 @@ def configure_asset_discovery(
     }
 
 
-def select_available_pocs(page: Page) -> int:
+def select_available_pocs(page: Page) -> dict[str, object]:
     result = page.evaluate(
-        """() => {
+        """async () => {
           const visible = (element) => {
             const rect = element.getBoundingClientRect();
             const style = getComputedStyle(element);
             return rect.width > 0 && rect.height > 0
               && style.display !== 'none' && style.visibility !== 'hidden';
           };
-          const enabled = [...document.querySelectorAll('[role="checkbox"]')]
-            .filter((element) => visible(element)
-              && element.getAttribute('aria-disabled') !== 'true'
-              && !element.hasAttribute('disabled'));
-          if (!enabled.length) return { available: 0, selected: 0 };
-          const selectedBefore = enabled.filter(
-            (element) => element.getAttribute('aria-checked') === 'true'
-          ).length;
-          for (const element of enabled) {
-            if (element.getAttribute('aria-checked') !== 'true') element.click();
+          const text = (element) =>
+            (element?.innerText || element?.textContent || '').replace(/\s+/g, ' ').trim();
+          const delay = (milliseconds) => new Promise(
+            (resolve) => window.setTimeout(resolve, milliseconds)
+          );
+          const targetBox = [...document.querySelectorAll('textarea')].find(
+            (element) => visible(element)
+              && String(element.getAttribute('placeholder') || '').includes('Url')
+          );
+          const pane = targetBox?.closest('.n-tab-pane');
+          const empty = {
+            category_count: 0,
+            selected_categories: 0,
+            total_pocs: 0,
+            selected_pocs: 0,
+            all_selected: false,
+            header_clicked: false,
+            individual_clicks: 0,
+            missing_categories: []
+          };
+          if (!pane) return empty;
+          const tables = [...pane.querySelectorAll('.n-data-table')]
+            .filter(visible)
+            .map((table) => ({
+              table,
+              header: table.querySelector(
+                '.n-data-table-th--selection [role="checkbox"]'
+              ),
+              rect: table.getBoundingClientRect()
+            }))
+            .filter((entry) => entry.header && visible(entry.header))
+            .sort((left, right) => left.rect.left - right.rect.left);
+          const selectionTable = tables[0]?.table;
+          const header = tables[0]?.header;
+          if (!selectionTable || !header) return empty;
+          const categories = () => [...selectionTable.querySelectorAll('tbody tr')]
+            .map((row) => {
+              const checkbox = [...row.querySelectorAll('[role="checkbox"]')]
+                .find(visible);
+              const label = text(row);
+              const count = Number((label.match(/\((\d+)[^\d)]*\)/) || [])[1] || 0);
+              return { checkbox, label, count };
+            })
+            .filter((entry) => entry.checkbox && entry.count > 0);
+          let headerClicked = false;
+          if (header.getAttribute('aria-checked') !== 'true') {
+            header.click();
+            headerClicked = true;
+            await delay(300);
           }
-          return { available: enabled.length, selected: selectedBefore };
+          let individualClicks = 0;
+          for (const category of categories()) {
+            if (category.checkbox.getAttribute('aria-checked') !== 'true') {
+              category.checkbox.click();
+              individualClicks += 1;
+            }
+          }
+          for (let attempt = 0; attempt < 30; attempt += 1) {
+            const current = categories();
+            if (current.length && current.every(
+              (category) => category.checkbox.getAttribute('aria-checked') === 'true'
+            )) break;
+            await delay(100);
+          }
+          const current = categories();
+          const selected = current.filter(
+            (category) => category.checkbox.getAttribute('aria-checked') === 'true'
+          );
+          return {
+            category_count: current.length,
+            selected_categories: selected.length,
+            total_pocs: current.reduce((sum, category) => sum + category.count, 0),
+            selected_pocs: selected.reduce((sum, category) => sum + category.count, 0),
+            all_selected: current.length > 0 && selected.length === current.length,
+            header_clicked: headerClicked,
+            individual_clicks: individualClicks,
+            missing_categories: current
+              .filter((category) => category.checkbox.getAttribute('aria-checked') !== 'true')
+              .map((category) => category.label)
+          };
         }"""
     )
-    page.wait_for_timeout(250)
-    selected = page.evaluate(
-        """() => [...document.querySelectorAll('[role="checkbox"]')].filter((element) => {
-          const rect = element.getBoundingClientRect();
-          const style = getComputedStyle(element);
-          return rect.width > 0 && rect.height > 0
-            && style.display !== 'none' && style.visibility !== 'hidden'
-            && element.getAttribute('aria-disabled') !== 'true'
-            && element.getAttribute('aria-checked') === 'true';
-        }).length"""
-    )
-    return int(selected or result.get("selected", 0))
+    if not isinstance(result, dict):
+        return {
+            "category_count": 0,
+            "selected_categories": 0,
+            "total_pocs": 0,
+            "selected_pocs": 0,
+            "all_selected": False,
+            "header_clicked": False,
+            "individual_clicks": 0,
+            "missing_categories": [],
+        }
+    return {
+        "category_count": int(result.get("category_count") or 0),
+        "selected_categories": int(result.get("selected_categories") or 0),
+        "total_pocs": int(result.get("total_pocs") or 0),
+        "selected_pocs": int(result.get("selected_pocs") or 0),
+        "all_selected": bool(result.get("all_selected")),
+        "header_clicked": bool(result.get("header_clicked")),
+        "individual_clicks": int(result.get("individual_clicks") or 0),
+        "missing_categories": [
+            str(item)
+            for item in result.get("missing_categories", [])
+            if str(item).strip()
+        ],
+    }
 
 
 def select_unauthorized_services(page: Page) -> dict[str, object]:
@@ -1098,10 +1179,11 @@ def configure_poc_check(
     normalized = _unique(targets)
     set_native_value(target_box, "\n".join(normalized))
     fingerprint_match = try_set_switch(page, "Poc匹配指纹", True)
-    selected_pocs = select_available_pocs(page)
+    poc_selection = select_available_pocs(page)
+    selected_pocs = int(poc_selection["selected_pocs"])
     clicked = False
     reason = ""
-    if start_scan and normalized and selected_pocs:
+    if start_scan and normalized and poc_selection["all_selected"]:
         check_button = visible(page.get_by_role("button", name="Check", exact=True))
         safe_click(page, check_button)
         clicked = True
@@ -1114,9 +1196,14 @@ def configure_poc_check(
         reason = "没有可导入的 HTTP/HTTPS URL"
     elif not selected_pocs:
         reason = "没有可用的 POC 分类，可能受许可证限制"
+    elif not poc_selection["all_selected"]:
+        missing = "、".join(poc_selection["missing_categories"])
+        missing_label = missing or "未知分类"
+        reason = f"POC 分类未全量选中，未启动检测：{missing_label}"
     return {
         "targets": normalized,
         "selected_pocs": selected_pocs,
+        "poc_selection": poc_selection,
         "fingerprint_match": fingerprint_match,
         "check_clicked": clicked,
         "acknowledged": locals().get("acknowledged", False),

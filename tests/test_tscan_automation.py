@@ -22,6 +22,7 @@ from sttool.tscan_automation import (
     read_asset_bundle,
     read_asset_bus_bundle,
     scope_allows_all,
+    select_available_pocs,
     select_unauthorized_services,
     stage_status_from_result,
     target_asset_bundle,
@@ -112,6 +113,40 @@ class TscanAutomationTests(unittest.TestCase):
                 ("\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528",)
             )
         )
+
+    def test_poc_selection_uses_the_poc_category_header(self) -> None:
+        page = ModalPage(
+            {
+                "category_count": 9,
+                "selected_categories": 9,
+                "total_pocs": 8797,
+                "selected_pocs": 8797,
+                "all_selected": True,
+                "header_clicked": True,
+                "individual_clicks": 0,
+                "missing_categories": [],
+            }
+        )
+
+        result = select_available_pocs(page)
+
+        self.assertEqual(
+            result,
+            {
+                "category_count": 9,
+                "selected_categories": 9,
+                "total_pocs": 8797,
+                "selected_pocs": 8797,
+                "all_selected": True,
+                "header_clicked": True,
+                "individual_clicks": 0,
+                "missing_categories": [],
+            },
+        )
+        self.assertIn("textarea", page.script)
+        self.assertIn(".n-data-table-th--selection", page.script)
+        self.assertIn("category_count", page.script)
+        self.assertIn("all_selected", page.script)
 
     def test_unauthorized_service_selection_includes_mqtt(self) -> None:
         page = ModalPage(
