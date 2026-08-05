@@ -11,11 +11,30 @@ from sttool.run_log_dialog import (
     component_paths,
     component_runtime,
     component_summary_status,
+    log_refresh_scroll_policy,
     render_component_state,
 )
 
 
 class RunLogDialogTests(unittest.TestCase):
+    def test_log_refresh_follows_when_already_at_bottom(self) -> None:
+        self.assertEqual(
+            log_refresh_scroll_policy((0.8, 1.0), False),
+            (True, 0.8),
+        )
+
+    def test_log_refresh_preserves_manual_scroll_when_not_at_bottom(self) -> None:
+        self.assertEqual(
+            log_refresh_scroll_policy((0.42, 0.7), False),
+            (False, 0.42),
+        )
+
+    def test_log_refresh_explicit_auto_follow_wins(self) -> None:
+        self.assertEqual(
+            log_refresh_scroll_policy((0.1, 0.2), True),
+            (True, 0.1),
+        )
+
     def test_component_activity_filter_excludes_other_tools(self) -> None:
         content = "\n".join(
             (

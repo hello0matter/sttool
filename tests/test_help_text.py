@@ -20,6 +20,8 @@ class HelpTextTests(unittest.TestCase):
             "TscanPlus",
             "metadata_only",
             "等待资产回传",
+            "自动跟随最新日志",
+            "回到底部",
         ):
             self.assertIn(expected, text)
 

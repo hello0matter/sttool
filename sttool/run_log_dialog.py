@@ -17,6 +17,17 @@ COORDINATOR_MANAGED_COMPONENTS = {
 }
 
 
+LOG_BOTTOM_THRESHOLD = 0.98
+
+
+def log_refresh_scroll_policy(
+    view: tuple[float, float], auto_follow: bool
+) -> tuple[bool, float]:
+    first, last = view
+    follow = auto_follow or last >= LOG_BOTTOM_THRESHOLD
+    return follow, max(0.0, min(first, 1.0))
+
+
 def load_json(path: Path) -> dict[str, object]:
     try:
         value = json.loads(path.read_text(encoding="utf-8"))
@@ -645,6 +656,7 @@ class ComponentLogDialog(tk.Toplevel):
         self.sources = component_paths(run_dir, component_id, component_name)
         self._after_id: str | None = None
         self._last_content = ""
+        self.follow_var = tk.BooleanVar(value=True)
 
         self.title(f"组件日志 - {component_name}")
         self.geometry("1180x760")
@@ -674,6 +686,10 @@ class ComponentLogDialog(tk.Toplevel):
             state="disabled",
         )
         self.text.grid(row=2, column=0, sticky="nsew")
+        self.text.bind("<MouseWheel>", self._pause_follow, add="+")
+        self.text.bind("<Prior>", self._pause_follow, add="+")
+        self.text.bind("<Next>", self._pause_follow, add="+")
+        self.text.vbar.bind("<ButtonPress-1>", self._pause_follow, add="+")
 
         actions = ttk.Frame(container)
         actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -689,6 +705,14 @@ class ComponentLogDialog(tk.Toplevel):
             command=self._open_state,
         ).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="打开结果", command=self._open_result).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Checkbutton(
+            actions,
+            text="自动跟随最新日志",
+            variable=self.follow_var,
+        ).pack(side="left", padx=(16, 0))
+        ttk.Button(actions, text="回到底部", command=self._scroll_to_end).pack(
             side="left", padx=(8, 0)
         )
         ttk.Button(actions, text="关闭", command=self._close).pack(side="right")
@@ -746,15 +770,27 @@ class ComponentLogDialog(tk.Toplevel):
         self.summary_var.set(summary)
         content = self._content()
         if content != self._last_content:
-            follow = self.text.yview()[1] >= 0.98
+            follow, anchor = log_refresh_scroll_policy(
+                self.text.yview(), self.follow_var.get()
+            )
             self.text.configure(state="normal")
             self.text.delete("1.0", "end")
             self.text.insert("1.0", content)
             self.text.configure(state="disabled")
+            self.text.update_idletasks()
             if follow:
                 self.text.see("end")
+            else:
+                self.text.yview_moveto(anchor)
             self._last_content = content
         self._after_id = self.after(1000, self._refresh)
+
+    def _pause_follow(self, _event: tk.Event | None = None) -> None:
+        self.follow_var.set(False)
+
+    def _scroll_to_end(self) -> None:
+        self.follow_var.set(True)
+        self.text.see("end")
 
     def _open_workdir(self) -> None:
         workdir = self.sources.get("workdir", self.run_dir)
@@ -873,6 +909,10 @@ class RunLogDialog(tk.Toplevel):
             state="disabled",
         )
         self.log_text.grid(row=4, column=0, sticky="nsew")
+        self.log_text.bind("<MouseWheel>", self._pause_log_follow, add="+")
+        self.log_text.bind("<Prior>", self._pause_log_follow, add="+")
+        self.log_text.bind("<Next>", self._pause_log_follow, add="+")
+        self.log_text.vbar.bind("<ButtonPress-1>", self._pause_log_follow, add="+")
 
         actions = ttk.Frame(container)
         actions.grid(row=5, column=0, sticky="ew", pady=(12, 0))
@@ -880,6 +920,9 @@ class RunLogDialog(tk.Toplevel):
             side="left"
         )
         ttk.Button(actions, text="打开日志文件", command=self._open_log_file).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="回到底部", command=self._scroll_log_to_end).pack(
             side="left", padx=(8, 0)
         )
         ttk.Button(actions, text="关闭", command=self._close).pack(side="right")
@@ -1003,15 +1046,27 @@ class RunLogDialog(tk.Toplevel):
         except OSError as exc:
             log = f"读取活动日志失败：{exc}\n"
         if log != self._last_log:
-            follow = self.follow_var.get() or self.log_text.yview()[1] >= 0.98
+            follow, anchor = log_refresh_scroll_policy(
+                self.log_text.yview(), self.follow_var.get()
+            )
             self.log_text.configure(state="normal")
             self.log_text.delete("1.0", "end")
             self.log_text.insert("1.0", log)
             self.log_text.configure(state="disabled")
+            self.log_text.update_idletasks()
             if follow:
                 self.log_text.see("end")
+            else:
+                self.log_text.yview_moveto(anchor)
             self._last_log = log
         self._after_id = self.after(1000, self._refresh)
+
+    def _pause_log_follow(self, _event: tk.Event | None = None) -> None:
+        self.follow_var.set(False)
+
+    def _scroll_log_to_end(self) -> None:
+        self.follow_var.set(True)
+        self.log_text.see("end")
 
     def _open_component_log(self, _event: tk.Event | None = None) -> None:
         selected = self.process_tree.selection()
