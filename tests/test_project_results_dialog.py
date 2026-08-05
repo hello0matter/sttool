@@ -5,7 +5,11 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sttool.models import RunState
-from sttool.project_results_dialog import compact_markdown, render_project_results
+from sttool.project_results_dialog import (
+    compact_markdown,
+    regenerate_pentest_report,
+    render_project_results,
+)
 
 
 class ProjectResultsDialogTests(unittest.TestCase):
@@ -40,6 +44,12 @@ class ProjectResultsDialogTests(unittest.TestCase):
                 "# 渗透测试报告：demo\n\n## 1. 执行摘要\n\n- 待验证问题\n",
                 encoding="utf-8",
             )
+            (run_dir / "findings.json").write_text(
+                '{"schema_version":1,"findings":[]}', encoding="utf-8"
+            )
+            (run_dir / "findings.md").write_text(
+                "# 项目问题库\n", encoding="utf-8"
+            )
             (run_dir / "risk_summary.md").write_text(
                 "# \u9879\u76ee\u98ce\u9669\u6210\u679c\u6458\u8981\n\n"
                 "## \u5de5\u5177\u98ce\u9669\u7ebf\u7d22\n\n"
@@ -67,12 +77,31 @@ class ProjectResultsDialogTests(unittest.TestCase):
             {item.path.name for item in sources},
             {
                 "pentest_report.md",
+                "findings.json",
+                "findings.md",
                 "risk_summary.md",
                 "vulnerability_intel.md",
                 "vulnerability_intel.json",
                 "fscan.txt",
             },
         )
+
+    def test_regenerate_report_after_manual_findings_update(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            (run_dir / "project.json").write_text(
+                '{"name":"demo","target":"https://example.test/","scope":"*"}',
+                encoding="utf-8",
+            )
+            (run_dir / "findings.json").write_text(
+                '{"schema_version":1,"findings":[]}', encoding="utf-8"
+            )
+
+            markdown_path, text_path = regenerate_pentest_report(self._state(run_dir))
+
+            self.assertTrue(markdown_path.is_file())
+            self.assertTrue(text_path.is_file())
+            self.assertIn("人工问题库更新", markdown_path.read_text(encoding="utf-8"))
 
     def test_compact_markdown_folds_large_asset_sections(self) -> None:
         text = (

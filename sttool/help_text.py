@@ -87,8 +87,10 @@ projects\\项目名\\runs\\运行实例ID\\
 8. pentest_report.txt
    - pentest_report.md 的同内容 TXT 版本。
 
-9. findings.md
-   - 人工或 Agent 后续沉淀“已确认/待验证”问题时可用的整理文件。
+9. findings.json / findings.md
+   - findings.json 是“问题管理”窗口保存的结构化问题源文件。
+   - findings.md 是自动生成的人类可读版本。
+   - 已确认问题必须同时有复现过程和证据；自动化线索应先保持为待验证。
 
 10. cve_triage.md
     - CVE 快速排查结果。
@@ -268,9 +270,19 @@ projects\\项目名\\runs\\运行实例ID\\
 十三、项目成果窗口怎么看
 1. 优先看 pentest_report.md
    - 这是给人看的。
-2. 再看 findings.md / cve_triage.md / vulnerability_intel.md
+   - 报告内包含修复与复核优先级表：P0 最优先，P1 次之，P2/P3 为近期整改或持续观察。
+2. 点击“问题管理”
+   - 打开结构化问题库。
+   - findings.json 是机器可读源文件，findings.md 是人类可读版本。
+   - 状态可选“已确认、待验证、已排除”。
+   - “已确认”必须填写复现过程和证据，避免把工具误报直接写成漏洞。
+3. 点击“导出报告”
+   - 把当前 pentest_report.md 或 TXT 报告复制到你选择的位置。
+4. 点击“打开证据目录”
+   - 直接打开当前实例的 evidence 目录，方便补充截图、请求响应和人工取证文件。
+5. 再看 cve_triage.md / vulnerability_intel.md
    - 这是辅助判断。
-3. 最后再看 risk_summary.md
+6. 最后再看 risk_summary.md
    - 这是全量底稿，不适合直接对外。
 
 十四、恢复逻辑

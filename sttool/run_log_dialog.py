@@ -208,6 +208,8 @@ def component_paths(
             "results": [
                 run_dir / "pentest_report.md",
                 run_dir / "pentest_report.txt",
+                run_dir / "findings.json",
+                run_dir / "findings.md",
                 run_dir / "risk_summary.md",
                 run_dir / "tool_data" / "asset_bus" / "assets.json",
                 run_dir / "agent_batches",

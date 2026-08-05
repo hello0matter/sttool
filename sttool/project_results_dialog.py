@@ -1,12 +1,17 @@
 from __future__ import annotations
 
+import json
 import os
+import shutil
 import tkinter as tk
 from dataclasses import dataclass
 from pathlib import Path
-from tkinter import messagebox, scrolledtext, ttk
+from tkinter import filedialog, messagebox, scrolledtext, ttk
 
+from .asset_bus import AssetBus
+from .findings_dialog import FindingsDialog
 from .models import RunState
+from .pentest_report import write_pentest_report
 
 
 FINAL_RUN_STATUSES = {"completed", "failed", "stopped", "exited"}
@@ -36,7 +41,8 @@ def _result_label(run_dir: Path, path: Path) -> str:
         "pentest_report.md": "渗透测试报告（Markdown）",
         "pentest_report.txt": "渗透测试报告（TXT）",
         "risk_summary.md": "\u9879\u76ee\u98ce\u9669\u6210\u679c\u6458\u8981",
-        "findings.md": "Agent \u5df2\u786e\u8ba4/\u5f85\u9a8c\u8bc1\u98ce\u9669",
+        "findings.json": "结构化问题库（JSON）",
+        "findings.md": "结构化问题库（Markdown）",
         "cve_triage.md": "CVE \u5feb\u901f\u6392\u67e5",
         "vulnerability_intel.md": "\u6f0f\u6d1e\u60c5\u62a5\u4e0e PoC \u5019\u9009",
         "vulnerability_intel.json": "\u7ed3\u6784\u5316\u6f0f\u6d1e\u60c5\u62a5",
@@ -54,6 +60,7 @@ def project_result_sources(run_dir: Path) -> list[ProjectResultSource]:
         ("report", run_dir / "pentest_report.md"),
         ("report", run_dir / "pentest_report.txt"),
         ("summary", run_dir / "risk_summary.md"),
+        ("finding", run_dir / "findings.json"),
         ("finding", run_dir / "findings.md"),
         ("triage", run_dir / "cve_triage.md"),
         ("intel", run_dir / "vulnerability_intel.md"),
@@ -132,6 +139,32 @@ def compact_markdown(text: str, *, max_lines: int = 260) -> str:
             "\u70b9\u51fb\u201c\u6253\u5f00\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a\u201d\u6216\u76f4\u63a5\u6253\u5f00\u9009\u4e2d\u6587\u4ef6\u67e5\u770b\u3002"
         )
     return "\n".join(output).strip()
+
+
+def regenerate_pentest_report(state: RunState) -> tuple[Path, Path]:
+    run_dir = Path(state.run_dir)
+    try:
+        project = json.loads((run_dir / "project.json").read_text(encoding="utf-8"))
+    except (OSError, TypeError, ValueError, json.JSONDecodeError):
+        project = {}
+    if not isinstance(project, dict):
+        project = {}
+    bus = AssetBus(
+        run_dir / "tool_data" / "asset_bus" / "assets.json",
+        str(project.get("scope") or state.scope or "*"),
+    )
+    from .project_coordinator import tscan_findings
+
+    database = run_dir / "tool_data" / "tscan" / "app" / "config" / "config.db"
+    return write_pentest_report(
+        run_dir=run_dir,
+        bus=bus,
+        stage=f"人工问题库更新 / {state.status}",
+        project_name=str(project.get("name") or state.project_name),
+        target=str(project.get("target") or state.target),
+        scope=str(project.get("scope") or state.scope or "*"),
+        tscan_findings=tscan_findings(database),
+    )
 
 
 def render_project_results(state: RunState) -> tuple[str, list[ProjectResultSource]]:
@@ -264,6 +297,11 @@ class ProjectResultsDialog(tk.Toplevel):
         ).pack(side="left")
         ttk.Button(
             actions,
+            text="问题管理",
+            command=self._manage_findings,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions,
             text="\u6253\u5f00\u9009\u4e2d\u6210\u679c",
             command=self._open_selected_source,
         ).pack(side="left", padx=(8, 0))
@@ -271,6 +309,16 @@ class ProjectResultsDialog(tk.Toplevel):
             actions,
             text="\u6253\u5f00\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a",
             command=self._open_primary,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="导出报告",
+            command=self._export_report,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="打开证据目录",
+            command=self._open_evidence_dir,
         ).pack(side="left", padx=(8, 0))
         ttk.Button(
             actions,
@@ -310,6 +358,51 @@ class ProjectResultsDialog(tk.Toplevel):
         self.text.insert("1.0", content)
         self.text.configure(state="disabled")
 
+    def _manage_findings(self) -> None:
+        dialog = FindingsDialog(self, self.run_dir)
+        self.wait_window(dialog)
+        if not dialog.result_saved:
+            return
+        try:
+            regenerate_pentest_report(self.state)
+        except OSError as exc:
+            messagebox.showerror("结构化问题库", f"问题库已保存，但刷新报告失败：{exc}", parent=self)
+        self._refresh()
+
+    def _primary_source(self) -> ProjectResultSource | None:
+        for name in ("pentest_report.md", "pentest_report.txt", "risk_summary.md"):
+            source = next((item for item in self.sources if item.path.name == name), None)
+            if source is not None:
+                return source
+        return None
+
+    def _export_report(self) -> None:
+        source = self._primary_source()
+        if source is None:
+            messagebox.showinfo("项目成果", "当前还没有可导出的报告。", parent=self)
+            return
+        suffix = source.path.suffix or ".md"
+        destination = filedialog.asksaveasfilename(
+            parent=self,
+            title="导出渗透测试报告",
+            defaultextension=suffix,
+            initialfile=f"{self.state.project_name}_{self.state.run_id}_渗透测试报告{suffix}",
+            filetypes=(("Markdown", "*.md"), ("文本文件", "*.txt"), ("所有文件", "*.*")),
+        )
+        if not destination:
+            return
+        try:
+            shutil.copy2(source.path, destination)
+        except OSError as exc:
+            messagebox.showerror("导出报告", f"导出失败：{exc}", parent=self)
+            return
+        messagebox.showinfo("导出报告", f"报告已导出到：\n{destination}", parent=self)
+
+    def _open_evidence_dir(self) -> None:
+        path = self.run_dir / "evidence"
+        path.mkdir(parents=True, exist_ok=True)
+        os.startfile(path)
+
     def _selected_source(self) -> ProjectResultSource | None:
         selection = self.source_tree.selection()
         if not selection:
@@ -331,20 +424,7 @@ class ProjectResultsDialog(tk.Toplevel):
         os.startfile(source.path)
 
     def _open_primary(self) -> None:
-        primary = next(
-            (item for item in self.sources if item.path.name == "pentest_report.md"),
-            None,
-        )
-        if primary is None:
-            primary = next(
-                (item for item in self.sources if item.path.name == "pentest_report.txt"),
-                None,
-            )
-        if primary is None:
-            primary = next(
-                (item for item in self.sources if item.path.name == "risk_summary.md"),
-                None,
-            )
+        primary = self._primary_source()
         if primary is None:
             messagebox.showinfo(
                 "\u9879\u76ee\u6210\u679c",
