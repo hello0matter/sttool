@@ -9,6 +9,7 @@ from tkinter import filedialog, messagebox, ttk
 
 from .ai_settings import AISettingsDialog
 from .asset_settings import AssetCommanderSettingsDialog
+from .help_text import ensure_help_document
 from .models import (
     DEFAULT_API_BASE_URL,
     LaunchRequest,
@@ -183,11 +184,18 @@ class LauncherApp(tk.Tk):
             header_settings, text="CLI 检测中", foreground=MUTED
         )
         self.health_label.pack(anchor="e")
+        header_actions = ttk.Frame(header_settings)
+        header_actions.pack(anchor="e", pady=(6, 0))
         ttk.Button(
-            header_settings,
+            header_actions,
+            text="？ 使用说明",
+            command=self._open_help,
+        ).pack(side="left")
+        ttk.Button(
+            header_actions,
             text="全局设置",
             command=self._open_ai_settings,
-        ).pack(anchor="e", pady=(6, 0))
+        ).pack(side="left", padx=(8, 0))
 
         self.notebook = ttk.Notebook(self)
         self.notebook.pack(fill="both", expand=True, padx=24, pady=(0, 20))
@@ -1061,6 +1069,10 @@ class LauncherApp(tk.Tk):
         self.claude_agent_base_url = str(dialog.result["claude_agent_base_url"])
         self.workflow_settings = normalize_workflow_settings(dialog.result["workflow"])
         self._save_launcher_settings()
+
+    def _open_help(self) -> None:
+        path = ensure_help_document(self.manager.app_dir)
+        os.startfile(path)
 
     def _save_launcher_settings(self) -> None:
         value = {

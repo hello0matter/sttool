@@ -24,6 +24,7 @@ from .asset_bus import (
     target_assets,
 )
 from .models import ProcessRecord
+from .pentest_report import write_pentest_report
 from .vulnerability_intel import generate_vulnerability_intel
 from .runtime import (
     pid_alive,
@@ -329,6 +330,30 @@ def render_risk_summary(
         ]
     )
     return "\n".join(lines)
+
+
+def write_project_reports(
+    *,
+    run_dir: Path,
+    bus: AssetBus,
+    database: Path,
+    stage: str,
+    project_name: str,
+    target: str,
+    scope: str,
+) -> str:
+    summary = render_risk_summary(run_dir, bus, database, stage)
+    (run_dir / "risk_summary.md").write_text(summary, encoding="utf-8")
+    write_pentest_report(
+        run_dir=run_dir,
+        bus=bus,
+        stage=stage,
+        project_name=project_name,
+        target=target,
+        scope=scope,
+        tscan_findings=tscan_findings(database),
+    )
+    return summary
 
 
 def response_text(value: object) -> str:
@@ -654,10 +679,15 @@ def main() -> int:
         if changed:
             state["asset_generation"] = bus.generation
             state["last_new_asset_at"] = now_text()
-            local_summary = render_risk_summary(
-                run_dir, bus, tscan_database, "资产增量收集中"
+            write_project_reports(
+                run_dir=run_dir,
+                bus=bus,
+                database=tscan_database,
+                stage="资产增量收集中",
+                project_name=args.project,
+                target=args.target,
+                scope=args.scope,
             )
-            (run_dir / "risk_summary.md").write_text(local_summary, encoding="utf-8")
             state["summary_status"] = "已刷新本地阶段性风险摘要"
 
         active_pid = int(state.get("active_agent_pid") or 0)
@@ -721,13 +751,15 @@ def main() -> int:
             retry_ready=retry_ready,
         )
         if should_launch:
-            summary = render_risk_summary(
-                run_dir,
-                bus,
-                tscan_database,
-                "阶段性" if batches else "首次资产稳定",
+            summary = write_project_reports(
+                run_dir=run_dir,
+                bus=bus,
+                database=tscan_database,
+                stage="阶段性" if batches else "首次资产稳定",
+                project_name=args.project,
+                target=args.target,
+                scope=args.scope,
             )
-            (run_dir / "risk_summary.md").write_text(summary, encoding="utf-8")
             if bus.generation > int(state.get("vuln_intel_generation") or 0):
                 if "vulnx" not in tools:
                     state["vuln_intel_status"] = "not_selected"
@@ -806,6 +838,15 @@ def main() -> int:
                 enhanced = summary
                 ai_status = "全局设置已关闭工具协作 AI 摘要优化"
             (run_dir / "risk_summary.md").write_text(enhanced, encoding="utf-8")
+            write_pentest_report(
+                run_dir=run_dir,
+                bus=bus,
+                stage="阶段性" if batches else "首次资产稳定",
+                project_name=args.project,
+                target=args.target,
+                scope=args.scope,
+                tscan_findings=tscan_findings(tscan_database),
+            )
             state["summary_status"] = ai_status
             base_prompt = (run_dir / "agent_prompt.txt").read_text(
                 encoding="utf-8", errors="replace"

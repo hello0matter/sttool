@@ -33,6 +33,8 @@ def _result_label(run_dir: Path, path: Path) -> str:
     except ValueError:
         relative = path
     labels = {
+        "pentest_report.md": "渗透测试报告（Markdown）",
+        "pentest_report.txt": "渗透测试报告（TXT）",
         "risk_summary.md": "\u9879\u76ee\u98ce\u9669\u6210\u679c\u6458\u8981",
         "findings.md": "Agent \u5df2\u786e\u8ba4/\u5f85\u9a8c\u8bc1\u98ce\u9669",
         "cve_triage.md": "CVE \u5feb\u901f\u6392\u67e5",
@@ -49,6 +51,8 @@ def _result_label(run_dir: Path, path: Path) -> str:
 
 def project_result_sources(run_dir: Path) -> list[ProjectResultSource]:
     candidates: list[tuple[str, Path]] = [
+        ("report", run_dir / "pentest_report.md"),
+        ("report", run_dir / "pentest_report.txt"),
         ("summary", run_dir / "risk_summary.md"),
         ("finding", run_dir / "findings.md"),
         ("triage", run_dir / "cve_triage.md"),
@@ -100,7 +104,7 @@ def compact_markdown(text: str, *, max_lines: int = 260) -> str:
             if omitted:
                 output.append(
                     f"- \u2026\u2026\u672c\u8282\u53e6\u6709 {omitted} \u884c\uff0c"
-                    "\u70b9\u51fb\u201c\u6253\u5f00\u5b8c\u6574\u6c47\u603b\u201d\u67e5\u770b\u3002"
+                    "\u70b9\u51fb\u201c\u6253\u5f00\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a\u201d\u6216\u76f4\u63a5\u6253\u5f00\u9009\u4e2d\u6587\u4ef6\u67e5\u770b\u3002"
                 )
                 omitted = 0
             section_lines = 0
@@ -125,7 +129,7 @@ def compact_markdown(text: str, *, max_lines: int = 260) -> str:
     if omitted:
         output.append(
             f"- \u2026\u2026\u5176\u4f59 {omitted} \u884c\u5df2\u6298\u53e0\uff0c"
-            "\u70b9\u51fb\u201c\u6253\u5f00\u5b8c\u6574\u6c47\u603b\u201d\u67e5\u770b\u3002"
+            "\u70b9\u51fb\u201c\u6253\u5f00\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a\u201d\u6216\u76f4\u63a5\u6253\u5f00\u9009\u4e2d\u6587\u4ef6\u67e5\u770b\u3002"
         )
     return "\n".join(output).strip()
 
@@ -172,8 +176,14 @@ def render_project_results(state: RunState) -> tuple[str, list[ProjectResultSour
         lines.append(f"- {source.label} {size_text}")
 
     primary = next(
-        (item for item in sources if item.path.name == "risk_summary.md"), None
+        (item for item in sources if item.path.name == "pentest_report.md"), None
     )
+    if primary is None:
+        primary = next(
+            (item for item in sources if item.path.name == "pentest_report.txt"), None
+        )
+    if primary is None:
+        primary = next((item for item in sources if item.path.name == "risk_summary.md"), None)
     if primary is None:
         primary = next((item for item in sources if item.size > 0), sources[0])
     lines.extend(
@@ -259,7 +269,7 @@ class ProjectResultsDialog(tk.Toplevel):
         ).pack(side="left", padx=(8, 0))
         ttk.Button(
             actions,
-            text="\u6253\u5f00\u5b8c\u6574\u6c47\u603b",
+            text="\u6253\u5f00\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a",
             command=self._open_primary,
         ).pack(side="left", padx=(8, 0))
         ttk.Button(
@@ -322,13 +332,23 @@ class ProjectResultsDialog(tk.Toplevel):
 
     def _open_primary(self) -> None:
         primary = next(
-            (item for item in self.sources if item.path.name == "risk_summary.md"),
+            (item for item in self.sources if item.path.name == "pentest_report.md"),
             None,
         )
         if primary is None:
+            primary = next(
+                (item for item in self.sources if item.path.name == "pentest_report.txt"),
+                None,
+            )
+        if primary is None:
+            primary = next(
+                (item for item in self.sources if item.path.name == "risk_summary.md"),
+                None,
+            )
+        if primary is None:
             messagebox.showinfo(
                 "\u9879\u76ee\u6210\u679c",
-                "\u9879\u76ee\u5b8c\u6574\u6c47\u603b\u5c1a\u672a\u751f\u6210\u3002",
+                "\u9879\u76ee\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a\u5c1a\u672a\u751f\u6210\u3002",
                 parent=self,
             )
             return

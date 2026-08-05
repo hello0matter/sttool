@@ -36,6 +36,10 @@ class ProjectResultsDialogTests(unittest.TestCase):
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
             (run_dir / "results").mkdir()
+            (run_dir / "pentest_report.md").write_text(
+                "# 渗透测试报告：demo\n\n## 1. 执行摘要\n\n- 待验证问题\n",
+                encoding="utf-8",
+            )
             (run_dir / "risk_summary.md").write_text(
                 "# \u9879\u76ee\u98ce\u9669\u6210\u679c\u6458\u8981\n\n"
                 "## \u5de5\u5177\u98ce\u9669\u7ebf\u7d22\n\n"
@@ -58,9 +62,11 @@ class ProjectResultsDialogTests(unittest.TestCase):
 
         self.assertIn("\u6700\u7ec8\u6210\u679c", content)
         self.assertIn("\u5f85\u9a8c\u8bc1\u95ee\u9898", content)
+        self.assertIn("pentest_report.md", content)
         self.assertEqual(
             {item.path.name for item in sources},
             {
+                "pentest_report.md",
                 "risk_summary.md",
                 "vulnerability_intel.md",
                 "vulnerability_intel.json",

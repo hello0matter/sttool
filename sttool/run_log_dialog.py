@@ -206,6 +206,8 @@ def component_paths(
                 *sorted(run_dir.glob("agent_batches/*/batch.json")),
             ],
             "results": [
+                run_dir / "pentest_report.md",
+                run_dir / "pentest_report.txt",
                 run_dir / "risk_summary.md",
                 run_dir / "tool_data" / "asset_bus" / "assets.json",
                 run_dir / "agent_batches",
