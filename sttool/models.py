@@ -67,6 +67,7 @@ class LaunchRequest:
     asset_settle_seconds: int = 20
     max_agent_batches: int = 8
     coordinator_poll_seconds: int = 2
+    agent_stall_warn_minutes: int = 15
     ai_summary_enabled: bool = True
     fscan_skip_poc: bool = True
     fscan_skip_brute: bool = True
@@ -143,6 +144,7 @@ class RunState:
     asset_settle_seconds: int = 20
     max_agent_batches: int = 8
     coordinator_poll_seconds: int = 2
+    agent_stall_warn_minutes: int = 15
     ai_summary_enabled: bool = True
     fscan_skip_poc: bool = True
     fscan_skip_brute: bool = True

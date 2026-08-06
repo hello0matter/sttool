@@ -434,6 +434,8 @@ class RuntimeManager:
             raise LaunchError("Agent 批次数必须在 1-100 之间")
         if not 1 <= request.coordinator_poll_seconds <= 60:
             raise LaunchError("协调器刷新间隔必须在 1-60 秒之间")
+        if not 0 <= request.agent_stall_warn_minutes <= 1440:
+            raise LaunchError("Agent 停滞告警必须在 0-1440 分钟之间，0 表示关闭")
 
         selected: list[ToolDefinition] = []
         for tool_id in request.selected_tools:
@@ -1071,6 +1073,8 @@ class RuntimeManager:
                 str(request.max_agent_batches),
                 "--poll-seconds",
                 str(request.coordinator_poll_seconds),
+                "--agent-stall-warn-minutes",
+                str(request.agent_stall_warn_minutes),
                 "--auto-agent",
                 str(request.auto_agent).lower(),
                 "--wait-asset-commander",
@@ -1168,6 +1172,11 @@ class RuntimeManager:
                         "coordinator_poll_seconds", state.coordinator_poll_seconds
                     )
                 ),
+                agent_stall_warn_minutes=int(
+                    value.get(
+                        "agent_stall_warn_minutes", state.agent_stall_warn_minutes
+                    )
+                ),
                 ai_summary_enabled=bool(
                     value.get("ai_summary_enabled", state.ai_summary_enabled)
                 ),
@@ -1230,6 +1239,7 @@ class RuntimeManager:
                 asset_settle_seconds=request.asset_settle_seconds,
                 max_agent_batches=request.max_agent_batches,
                 coordinator_poll_seconds=request.coordinator_poll_seconds,
+                agent_stall_warn_minutes=request.agent_stall_warn_minutes,
                 ai_summary_enabled=request.ai_summary_enabled,
                 fscan_skip_poc=request.fscan_skip_poc,
                 fscan_skip_brute=request.fscan_skip_brute,
@@ -1260,6 +1270,7 @@ class RuntimeManager:
                 "asset_settle_seconds": request.asset_settle_seconds,
                 "max_agent_batches": request.max_agent_batches,
                 "coordinator_poll_seconds": request.coordinator_poll_seconds,
+                "agent_stall_warn_minutes": request.agent_stall_warn_minutes,
                 "ai_summary_enabled": request.ai_summary_enabled,
                 "fscan_skip_poc": request.fscan_skip_poc,
                 "fscan_skip_brute": request.fscan_skip_brute,
@@ -1390,6 +1401,7 @@ class RuntimeManager:
                     asset_settle_seconds=request.asset_settle_seconds,
                     max_agent_batches=request.max_agent_batches,
                     coordinator_poll_seconds=request.coordinator_poll_seconds,
+                    agent_stall_warn_minutes=request.agent_stall_warn_minutes,
                     ai_summary_enabled=request.ai_summary_enabled,
                     fscan_skip_poc=request.fscan_skip_poc,
                     fscan_skip_brute=request.fscan_skip_brute,
@@ -1425,6 +1437,7 @@ class RuntimeManager:
                 asset_settle_seconds=request.asset_settle_seconds,
                 max_agent_batches=request.max_agent_batches,
                 coordinator_poll_seconds=request.coordinator_poll_seconds,
+                agent_stall_warn_minutes=request.agent_stall_warn_minutes,
                 ai_summary_enabled=request.ai_summary_enabled,
                 fscan_skip_poc=request.fscan_skip_poc,
                 fscan_skip_brute=request.fscan_skip_brute,
@@ -1515,6 +1528,7 @@ class RuntimeManager:
             state.asset_settle_seconds = request.asset_settle_seconds
             state.max_agent_batches = request.max_agent_batches
             state.coordinator_poll_seconds = request.coordinator_poll_seconds
+            state.agent_stall_warn_minutes = request.agent_stall_warn_minutes
             state.ai_summary_enabled = request.ai_summary_enabled
             state.fscan_skip_poc = request.fscan_skip_poc
             state.fscan_skip_brute = request.fscan_skip_brute

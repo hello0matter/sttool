@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,6 +13,7 @@ from sttool.models import ProcessRecord
 from sttool.runtime import now_text, process_creation_token
 from sttool.project_coordinator import (
     agent_launch_ready,
+    agent_batch_health,
     asset_commander_ready,
     build_batch_prompt,
     compact_ai_summary_input,
@@ -27,6 +29,19 @@ from sttool.project_coordinator import (
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_agent_batch_health_reports_stall_without_killing_process(self) -> None:
+        with TemporaryDirectory() as temporary:
+            batch_dir = Path(temporary)
+            marker = batch_dir / "batch.json"
+            marker.write_text("{}", encoding="utf-8")
+            status, elapsed, activity = agent_batch_health(
+                batch_dir, warn_minutes=5, now=marker.stat().st_mtime + 6 * 60
+            )
+
+            self.assertEqual(status, "suspected_stalled")
+            self.assertEqual(activity, datetime.fromtimestamp(marker.stat().st_mtime).astimezone().isoformat(timespec="seconds"))
+            self.assertGreaterEqual(elapsed or 0, 6)
+
     def test_large_ai_summary_input_is_bounded_and_keeps_both_ends(self) -> None:
         summary = "A" * 120 + "MIDDLE" + "Z" * 120
         compact = compact_ai_summary_input(summary, max_chars=100)

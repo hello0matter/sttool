@@ -69,6 +69,9 @@ class AISettingsDialog(tk.Toplevel):
         self.poll_seconds_var = tk.IntVar(
             value=int(workflow["coordinator_poll_seconds"])
         )
+        self.agent_stall_warn_minutes_var = tk.IntVar(
+            value=int(workflow["agent_stall_warn_minutes"])
+        )
         self.fscan_skip_poc_var = tk.BooleanVar(value=bool(workflow["fscan_skip_poc"]))
         self.fscan_skip_brute_var = tk.BooleanVar(value=bool(workflow["fscan_skip_brute"]))
         self.fscan_port_threads_var = tk.IntVar(value=int(workflow["fscan_port_threads"]))
@@ -273,6 +276,19 @@ class AISettingsDialog(tk.Toplevel):
         self._spin_field(
             tuning, 2, "协调器刷新间隔（秒）", self.poll_seconds_var, 1, 60
         )
+        self._spin_field(
+            tuning,
+            3,
+            "Agent 停滞告警（分钟，0=关闭）",
+            self.agent_stall_warn_minutes_var,
+            0,
+            1440,
+        )
+        ttk.Label(
+            tuning,
+            text="仅记录疑似等待模型/CLI 的状态，不会自动结束或重启 Agent。",
+            wraplength=680,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         scan = ttk.LabelFrame(tab, text="??????????????????", padding=12)
         scan.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -326,6 +342,9 @@ class AISettingsDialog(tk.Toplevel):
         self.settle_seconds_var.set(int(preset["asset_settle_seconds"]))
         self.max_batches_var.set(int(preset["max_agent_batches"]))
         self.poll_seconds_var.set(int(preset["coordinator_poll_seconds"]))
+        self.agent_stall_warn_minutes_var.set(
+            int(preset["agent_stall_warn_minutes"])
+        )
         self.fscan_skip_poc_var.set(bool(preset["fscan_skip_poc"]))
         self.fscan_skip_brute_var.set(bool(preset["fscan_skip_brute"]))
         self.fscan_port_threads_var.set(int(preset["fscan_port_threads"]))
@@ -381,6 +400,7 @@ class AISettingsDialog(tk.Toplevel):
                 "asset_settle_seconds": self.settle_seconds_var.get(),
                 "max_agent_batches": self.max_batches_var.get(),
                 "coordinator_poll_seconds": self.poll_seconds_var.get(),
+                "agent_stall_warn_minutes": self.agent_stall_warn_minutes_var.get(),
                 "fscan_skip_poc": self.fscan_skip_poc_var.get(),
                 "fscan_skip_brute": self.fscan_skip_brute_var.get(),
                 "fscan_port_threads": self.fscan_port_threads_var.get(),

@@ -23,6 +23,7 @@ class WorkflowSettingsTests(unittest.TestCase):
         self.assertEqual(settings["semantic_threads"], 40)
         self.assertEqual(settings["semantic_max_depth"], 2)
         self.assertTrue(settings["semantic_run_dirsearch"])
+        self.assertEqual(settings["agent_stall_warn_minutes"], 15)
 
     def test_fast_preset_allows_early_incremental_agent(self) -> None:
         settings = work_mode_defaults("fast")
@@ -39,12 +40,14 @@ class WorkflowSettingsTests(unittest.TestCase):
                 "asset_settle_seconds": 9999,
                 "max_agent_batches": 0,
                 "coordinator_poll_seconds": 0,
+                "agent_stall_warn_minutes": 9999,
             }
         )
         self.assertEqual(settings["work_mode"], "custom")
         self.assertEqual(settings["asset_settle_seconds"], 600)
         self.assertEqual(settings["max_agent_batches"], 1)
         self.assertEqual(settings["coordinator_poll_seconds"], 1)
+        self.assertEqual(settings["agent_stall_warn_minutes"], 1440)
 
     def test_scan_controls_are_clamped_and_customized(self) -> None:
         settings = normalize_workflow_settings(

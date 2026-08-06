@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import time
+from datetime import datetime
 from pathlib import Path
 from urllib.error import URLError
 from urllib.request import Request, urlopen
@@ -142,6 +143,31 @@ def mark_agent_batch_finished(
             atomic_json_write(metadata_path, metadata)
         return item
     return None
+
+
+def agent_batch_last_activity(batch_dir: Path) -> float | None:
+    """Return the newest batch-file timestamp used for stall observation."""
+    try:
+        timestamps = [item.stat().st_mtime for item in batch_dir.iterdir() if item.is_file()]
+    except OSError:
+        return None
+    return max(timestamps, default=None)
+
+
+def agent_batch_health(
+    batch_dir: Path, warn_minutes: int, now: float | None = None
+) -> tuple[str, float | None, str]:
+    if warn_minutes <= 0:
+        return "disabled", None, ""
+    last_activity = agent_batch_last_activity(batch_dir)
+    if last_activity is None:
+        return "unknown", None, ""
+    elapsed_minutes = max((now or time.time()) - last_activity, 0) / 60
+    status = "suspected_stalled" if elapsed_minutes >= warn_minutes else "active"
+    activity_text = datetime.fromtimestamp(last_activity).astimezone().isoformat(
+        timespec="seconds"
+    )
+    return status, elapsed_minutes, activity_text
 
 
 def schedule_agent_retry(state: dict[str, object], reason: str) -> int:
@@ -547,6 +573,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--settle-seconds", type=float, default=20)
     parser.add_argument("--max-agent-batches", type=int, default=8)
     parser.add_argument("--poll-seconds", type=float, default=2)
+    parser.add_argument("--agent-stall-warn-minutes", type=int, default=15)
     parser.add_argument("--auto-agent", type=parse_bool, default=True)
     parser.add_argument("--wait-asset-commander", type=parse_bool, default=True)
     parser.add_argument("--wait-fscan", type=parse_bool, default=True)
@@ -587,6 +614,7 @@ def main() -> int:
     state.setdefault("agent_consumed_generation", 0)
     state.setdefault("active_agent_pid", 0)
     state.setdefault("active_agent_creation_token", 0)
+    state.setdefault("agent_stall_status", "disabled")
     state.setdefault("vuln_intel_generation", 0)
     state.setdefault("vuln_intel_status", "pending")
     state.setdefault("find_gh_poc_status", "pending")
@@ -602,6 +630,7 @@ def main() -> int:
             "settle_seconds": args.settle_seconds,
             "max_agent_batches": args.max_agent_batches,
             "poll_seconds": args.poll_seconds,
+            "agent_stall_warn_minutes": args.agent_stall_warn_minutes,
             "ai_summary": args.ai_summary,
             "agent_model": args.agent_model,
             "reasoning_effort": args.reasoning_effort,
@@ -721,6 +750,47 @@ def main() -> int:
                     run_dir,
                     f"Agent 批次 PID {finished_pid} 已结束并记录完成，等待新资产。",
                 )
+
+        active_pid = int(state.get("active_agent_pid") or 0)
+        if active_pid:
+            active_batch = next(
+                (
+                    item
+                    for item in reversed(batches)
+                    if isinstance(item, dict)
+                    and int(item.get("pid") or 0) == active_pid
+                ),
+                None,
+            )
+            batch_dir = Path(str(active_batch.get("run_dir") or "")) if active_batch else Path()
+            stall_status, elapsed_minutes, activity_text = agent_batch_health(
+                batch_dir, max(int(args.agent_stall_warn_minutes), 0)
+            )
+            state["agent_stall_status"] = stall_status
+            if activity_text:
+                state["agent_last_activity_at"] = activity_text
+            if stall_status == "suspected_stalled":
+                previous_warning = str(state.get("agent_stall_warning_at") or "")
+                warning_due = not previous_warning
+                if previous_warning:
+                    try:
+                        warning_due = time.time() - datetime.fromisoformat(
+                            previous_warning
+                        ).timestamp() >= 300
+                    except ValueError:
+                        warning_due = True
+                if warning_due:
+                    state["agent_stall_warning_at"] = now_text()
+                    append_activity(
+                        run_dir,
+                        f"Agent 批次 {active_pid} 疑似停滞：批次文件已有 "
+                        f"{elapsed_minutes:.1f} 分钟未更新；保留进程不自动结束，"
+                        "请检查模型/CLI 网络与 Agent 窗口。",
+                    )
+        else:
+            state["agent_stall_status"] = "disabled"
+            state.pop("agent_last_activity_at", None)
+            state.pop("agent_stall_warning_at", None)
 
         tools = selected_tools(run_dir)
         asset_ready = (
@@ -928,7 +998,8 @@ def main() -> int:
             detail=(
                 f"{stage_detail}；资产代次 {bus.generation}；"
                 f"Agent 已消费到 {state.get('agent_consumed_generation', 0)}；"
-                f"当前 Agent PID {state.get('active_agent_pid', 0) or '无'}"
+                f"当前 Agent PID {state.get('active_agent_pid', 0) or '无'}；"
+                f"Agent 健康状态 {state.get('agent_stall_status', 'disabled')}"
             ),
             updated_at=now_text(),
         )
