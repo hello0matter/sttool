@@ -801,6 +801,17 @@ class RuntimeManager:
             "api_base_url": request.api_base_url.strip().rstrip("/"),
             "model": request.model.strip(),
             "api_key": request.api_key.strip(),
+            "fscan_port_threads": str(request.fscan_port_threads),
+            "fscan_skip_poc_flag": "-nopoc" if request.fscan_skip_poc else "",
+            "fscan_skip_brute_flag": "-nobr" if request.fscan_skip_brute else "",
+            "semantic_threads": str(request.semantic_threads),
+            "semantic_max_depth": str(request.semantic_max_depth),
+            "semantic_max_rate": str(request.semantic_max_rate),
+            "semantic_dirsearch_flag": (
+                "--run-dirsearch"
+                if request.semantic_run_dirsearch
+                else "--no-dirsearch"
+            ),
         }
 
     def _launch_tool(
@@ -833,7 +844,11 @@ class RuntimeManager:
             tool.tool_id,
             tool.name,
             executable,
-            [self._format(item, tool_context) for item in tool.args],
+            [
+                item
+                for item in (self._format(arg, tool_context) for arg in tool.args)
+                if item
+            ],
             self._format(tool.cwd, tool_context),
             tool.new_console,
             environment,
@@ -1143,6 +1158,27 @@ class RuntimeManager:
                 ai_summary_enabled=bool(
                     value.get("ai_summary_enabled", state.ai_summary_enabled)
                 ),
+                fscan_skip_poc=bool(
+                    value.get("fscan_skip_poc", state.fscan_skip_poc)
+                ),
+                fscan_skip_brute=bool(
+                    value.get("fscan_skip_brute", state.fscan_skip_brute)
+                ),
+                fscan_port_threads=int(
+                    value.get("fscan_port_threads", state.fscan_port_threads)
+                ),
+                semantic_threads=int(
+                    value.get("semantic_threads", state.semantic_threads)
+                ),
+                semantic_max_depth=int(
+                    value.get("semantic_max_depth", state.semantic_max_depth)
+                ),
+                semantic_run_dirsearch=bool(
+                    value.get("semantic_run_dirsearch", state.semantic_run_dirsearch)
+                ),
+                semantic_max_rate=int(
+                    value.get("semantic_max_rate", state.semantic_max_rate)
+                ),
             ),
             skipped_tools,
         )
@@ -1156,18 +1192,7 @@ class RuntimeManager:
                 run_dir,
                 f"创建运行实例 {run_id}，目标 {request.target.strip()}。",
             )
-            context = {
-                **target_values(request.target),
-                "run_dir": str(run_dir),
-                "project_dir": str(project_dir),
-                "source_dir": str(self.app_dir),
-                "st_root": str(self.st_root),
-                "project_name": request.project_name.strip(),
-                "scope": request.scope.strip(),
-                "api_base_url": request.api_base_url.strip().rstrip("/"),
-                "model": request.model.strip(),
-                "api_key": request.api_key.strip(),
-            }
+            context = self._run_context(request, project_dir, run_dir)
             created_at = now_text()
             state = RunState(
                 run_id=run_id,
@@ -1193,12 +1218,19 @@ class RuntimeManager:
                 max_agent_batches=request.max_agent_batches,
                 coordinator_poll_seconds=request.coordinator_poll_seconds,
                 ai_summary_enabled=request.ai_summary_enabled,
+                fscan_skip_poc=request.fscan_skip_poc,
+                fscan_skip_brute=request.fscan_skip_brute,
+                fscan_port_threads=request.fscan_port_threads,
+                semantic_threads=request.semantic_threads,
+                semantic_max_depth=request.semantic_max_depth,
+                semantic_run_dirsearch=request.semantic_run_dirsearch,
+                semantic_max_rate=request.semantic_max_rate,
             )
             state_path = run_dir / "run.json"
             atomic_json_write(state_path, state.to_dict())
 
             project_value = {
-                "schema_version": 4,
+                "schema_version": 5,
                 "name": request.project_name.strip(),
                 "target": request.target.strip(),
                 "scope": request.scope.strip(),
@@ -1216,6 +1248,13 @@ class RuntimeManager:
                 "max_agent_batches": request.max_agent_batches,
                 "coordinator_poll_seconds": request.coordinator_poll_seconds,
                 "ai_summary_enabled": request.ai_summary_enabled,
+                "fscan_skip_poc": request.fscan_skip_poc,
+                "fscan_skip_brute": request.fscan_skip_brute,
+                "fscan_port_threads": request.fscan_port_threads,
+                "semantic_threads": request.semantic_threads,
+                "semantic_max_depth": request.semantic_max_depth,
+                "semantic_run_dirsearch": request.semantic_run_dirsearch,
+                "semantic_max_rate": request.semantic_max_rate,
                 "selected_tools": list(request.selected_tools),
                 "user_prompt": request.user_prompt,
                 "last_run_id": run_id,
@@ -1339,6 +1378,13 @@ class RuntimeManager:
                     max_agent_batches=request.max_agent_batches,
                     coordinator_poll_seconds=request.coordinator_poll_seconds,
                     ai_summary_enabled=request.ai_summary_enabled,
+                    fscan_skip_poc=request.fscan_skip_poc,
+                    fscan_skip_brute=request.fscan_skip_brute,
+                    fscan_port_threads=request.fscan_port_threads,
+                    semantic_threads=request.semantic_threads,
+                    semantic_max_depth=request.semantic_max_depth,
+                    semantic_run_dirsearch=request.semantic_run_dirsearch,
+                    semantic_max_rate=request.semantic_max_rate,
                 )
             recovery_request = LaunchRequest(
                 project_name=request.project_name,
@@ -1367,6 +1413,13 @@ class RuntimeManager:
                 max_agent_batches=request.max_agent_batches,
                 coordinator_poll_seconds=request.coordinator_poll_seconds,
                 ai_summary_enabled=request.ai_summary_enabled,
+                fscan_skip_poc=request.fscan_skip_poc,
+                fscan_skip_brute=request.fscan_skip_brute,
+                fscan_port_threads=request.fscan_port_threads,
+                semantic_threads=request.semantic_threads,
+                semantic_max_depth=request.semantic_max_depth,
+                semantic_run_dirsearch=request.semantic_run_dirsearch,
+                semantic_max_rate=request.semantic_max_rate,
             )
             selected = self.preflight(
                 recovery_request, allow_legacy_url_project=True
@@ -1450,6 +1503,13 @@ class RuntimeManager:
             state.max_agent_batches = request.max_agent_batches
             state.coordinator_poll_seconds = request.coordinator_poll_seconds
             state.ai_summary_enabled = request.ai_summary_enabled
+            state.fscan_skip_poc = request.fscan_skip_poc
+            state.fscan_skip_brute = request.fscan_skip_brute
+            state.fscan_port_threads = request.fscan_port_threads
+            state.semantic_threads = request.semantic_threads
+            state.semantic_max_depth = request.semantic_max_depth
+            state.semantic_run_dirsearch = request.semantic_run_dirsearch
+            state.semantic_max_rate = request.semantic_max_rate
             state.selected_tools = list(request.selected_tools)
             state.recovery_count += 1
             state.recovery_history.append(

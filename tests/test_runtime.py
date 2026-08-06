@@ -1375,13 +1375,25 @@ class RuntimeTests(unittest.TestCase):
                 max_agent_batches=12,
                 coordinator_poll_seconds=1,
                 ai_summary_enabled=False,
+                fscan_skip_poc=True,
+                fscan_skip_brute=True,
+                fscan_port_threads=321,
+                semantic_threads=17,
+                semantic_max_depth=4,
+                semantic_run_dirsearch=False,
+                semantic_max_rate=25,
             )
             state = manager.start(request)
             try:
                 project = json.loads(
                     (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(project["schema_version"], 4)
+                self.assertEqual(project["schema_version"], 5)
+                self.assertEqual(project["fscan_port_threads"], 321)
+                self.assertEqual(project["semantic_threads"], 17)
+                self.assertEqual(project["semantic_max_depth"], 4)
+                self.assertFalse(project["semantic_run_dirsearch"])
+                self.assertEqual(project["semantic_max_rate"], 25)
                 self.assertEqual(project["agent_model"], "gpt-5.6-sol")
                 self.assertEqual(project["reasoning_effort"], "xhigh")
                 self.assertEqual(
@@ -1410,6 +1422,78 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("--vulnx", coordinator)
                 self.assertIn(str((root / "vulnx" / "vulnx.exe").resolve()), coordinator)
                 self.assertIn("--find-gh-poc", coordinator)
+            finally:
+                manager.cleanup()
+
+    def test_scan_settings_expand_into_fscan_and_semantic_commands(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = OfflineRuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="scan-settings",
+                target="10.0.0.1",
+                scope="*",
+                provider="codexx",
+                model="summary-model",
+                selected_tools=("fscan", "semantic_dirscan"),
+                user_prompt="test",
+                authorization_confirmed=True,
+                fscan_skip_poc=True,
+                fscan_skip_brute=True,
+                fscan_port_threads=321,
+                semantic_threads=17,
+                semantic_max_depth=4,
+                semantic_run_dirsearch=False,
+                semantic_max_rate=25,
+            )
+            fscan_tool = ToolDefinition(
+                tool_id="fscan",
+                name="fscan",
+                category="scan",
+                description="",
+                executable="fscan.exe",
+                args=(
+                    "-h", "{target_host}", "-t", "{fscan_port_threads}",
+                    "{fscan_skip_poc_flag}", "{fscan_skip_brute_flag}",
+                    "-o", "{run_dir}/results/fscan.txt",
+                ),
+                cwd="{run_dir}",
+            )
+            semantic_tool = ToolDefinition(
+                tool_id="semantic_dirscan",
+                name="semantic",
+                category="scan",
+                description="",
+                executable="python.exe",
+                args=(
+                    "--threads", "{semantic_threads}",
+                    "--max-depth", "{semantic_max_depth}",
+                    "--max-rate", "{semantic_max_rate}",
+                    "{semantic_dirsearch_flag}",
+                ),
+                cwd="{run_dir}",
+            )
+            run_dir = root / "run"
+            (run_dir / "results").mkdir(parents=True)
+            context = manager._run_context(request, root, run_dir)
+            manager._launch_tool(fscan_tool, context)
+            manager._launch_tool(semantic_tool, context)
+            try:
+                fscan = manager.spawn_commands["fscan"]
+                semantic = manager.spawn_commands["semantic_dirscan"]
+                self.assertIn("-t", fscan)
+                self.assertIn("321", fscan)
+                self.assertIn("-nopoc", fscan)
+                self.assertIn("-nobr", fscan)
+                self.assertIn("--threads", semantic)
+                self.assertIn("17", semantic)
+                self.assertIn("--max-depth", semantic)
+                self.assertIn("4", semantic)
+                self.assertIn("--max-rate", semantic)
+                self.assertIn("25", semantic)
+                self.assertIn("--no-dirsearch", semantic)
+                self.assertNotIn("", fscan)
+                self.assertNotIn("", semantic)
             finally:
                 manager.cleanup()
 

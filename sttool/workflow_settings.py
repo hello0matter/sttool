@@ -24,6 +24,13 @@ WORK_MODE_PRESETS: Final = {
         "max_agent_batches": 8,
         "coordinator_poll_seconds": 2,
         "ai_summary_enabled": True,
+        "fscan_skip_poc": True,
+        "fscan_skip_brute": True,
+        "fscan_port_threads": 600,
+        "semantic_threads": 40,
+        "semantic_max_depth": 2,
+        "semantic_run_dirsearch": True,
+        "semantic_max_rate": 0,
     },
     "fast": {
         "auto_agent": True,
@@ -33,6 +40,13 @@ WORK_MODE_PRESETS: Final = {
         "max_agent_batches": 8,
         "coordinator_poll_seconds": 1,
         "ai_summary_enabled": True,
+        "fscan_skip_poc": True,
+        "fscan_skip_brute": True,
+        "fscan_port_threads": 600,
+        "semantic_threads": 30,
+        "semantic_max_depth": 1,
+        "semantic_run_dirsearch": False,
+        "semantic_max_rate": 0,
     },
     "deep": {
         "auto_agent": True,
@@ -42,6 +56,13 @@ WORK_MODE_PRESETS: Final = {
         "max_agent_batches": 16,
         "coordinator_poll_seconds": 2,
         "ai_summary_enabled": True,
+        "fscan_skip_poc": False,
+        "fscan_skip_brute": False,
+        "fscan_port_threads": 600,
+        "semantic_threads": 60,
+        "semantic_max_depth": 3,
+        "semantic_run_dirsearch": True,
+        "semantic_max_rate": 0,
     },
     "cautious": {
         "auto_agent": True,
@@ -51,6 +72,13 @@ WORK_MODE_PRESETS: Final = {
         "max_agent_batches": 4,
         "coordinator_poll_seconds": 5,
         "ai_summary_enabled": True,
+        "fscan_skip_poc": True,
+        "fscan_skip_brute": True,
+        "fscan_port_threads": 300,
+        "semantic_threads": 20,
+        "semantic_max_depth": 1,
+        "semantic_run_dirsearch": False,
+        "semantic_max_rate": 50,
     },
     "manual": {
         "auto_agent": False,
@@ -60,6 +88,13 @@ WORK_MODE_PRESETS: Final = {
         "max_agent_batches": 8,
         "coordinator_poll_seconds": 3,
         "ai_summary_enabled": False,
+        "fscan_skip_poc": True,
+        "fscan_skip_brute": True,
+        "fscan_port_threads": 300,
+        "semantic_threads": 20,
+        "semantic_max_depth": 1,
+        "semantic_run_dirsearch": False,
+        "semantic_max_rate": 50,
     },
 }
 
@@ -89,11 +124,18 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
         "wait_for_asset_commander",
         "wait_for_fscan",
         "ai_summary_enabled",
+        "fscan_skip_poc",
+        "fscan_skip_brute",
+        "semantic_run_dirsearch",
     )
     int_ranges = {
         "asset_settle_seconds": (1, 600),
         "max_agent_batches": (1, 100),
         "coordinator_poll_seconds": (1, 60),
+        "fscan_port_threads": (1, 2000),
+        "semantic_threads": (1, 200),
+        "semantic_max_depth": (0, 10),
+        "semantic_max_rate": (0, 10000),
     }
     customized = requested_mode == "custom"
     for field in bool_fields:

@@ -33,8 +33,8 @@ class AISettingsDialog(tk.Toplevel):
         super().__init__(parent)
         self.result: dict[str, object] | None = None
         self.title("STTool 全局设置")
-        self.geometry("780x720")
-        self.minsize(720, 660)
+        self.geometry("860x860")
+        self.minsize(780, 760)
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -69,6 +69,13 @@ class AISettingsDialog(tk.Toplevel):
         self.poll_seconds_var = tk.IntVar(
             value=int(workflow["coordinator_poll_seconds"])
         )
+        self.fscan_skip_poc_var = tk.BooleanVar(value=bool(workflow["fscan_skip_poc"]))
+        self.fscan_skip_brute_var = tk.BooleanVar(value=bool(workflow["fscan_skip_brute"]))
+        self.fscan_port_threads_var = tk.IntVar(value=int(workflow["fscan_port_threads"]))
+        self.semantic_threads_var = tk.IntVar(value=int(workflow["semantic_threads"]))
+        self.semantic_max_depth_var = tk.IntVar(value=int(workflow["semantic_max_depth"]))
+        self.semantic_run_dirsearch_var = tk.BooleanVar(value=bool(workflow["semantic_run_dirsearch"]))
+        self.semantic_max_rate_var = tk.IntVar(value=int(workflow["semantic_max_rate"]))
 
         content = ttk.Frame(self, padding=16)
         content.pack(fill="both", expand=True)
@@ -267,6 +274,18 @@ class AISettingsDialog(tk.Toplevel):
             tuning, 2, "协调器刷新间隔（秒）", self.poll_seconds_var, 1, 60
         )
 
+        scan = ttk.LabelFrame(tab, text="??????????????????", padding=12)
+        scan.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        scan.columnconfigure(1, weight=1)
+        ttk.Checkbutton(scan, text="fscan ?? POC ??????????", variable=self.fscan_skip_poc_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(scan, text="fscan ??????????????", variable=self.fscan_skip_brute_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
+        self._spin_field(scan, 2, "fscan ?????", self.fscan_port_threads_var, 1, 2000)
+        self._spin_field(scan, 3, "???????", self.semantic_threads_var, 1, 200)
+        self._spin_field(scan, 4, "??????????", self.semantic_max_depth_var, 0, 10)
+        ttk.Checkbutton(scan, text="?????? dirsearch ???", variable=self.semantic_run_dirsearch_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=3)
+        self._spin_field(scan, 6, "???????????/??0=???", self.semantic_max_rate_var, 0, 10000)
+        ttk.Label(scan, text="balanced/fast ??????????deep ????? POC/?????????????????????", wraplength=680).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+
     @staticmethod
     def _field(
         parent: ttk.Frame, row: int, label: str, variable: tk.StringVar
@@ -307,6 +326,13 @@ class AISettingsDialog(tk.Toplevel):
         self.settle_seconds_var.set(int(preset["asset_settle_seconds"]))
         self.max_batches_var.set(int(preset["max_agent_batches"]))
         self.poll_seconds_var.set(int(preset["coordinator_poll_seconds"]))
+        self.fscan_skip_poc_var.set(bool(preset["fscan_skip_poc"]))
+        self.fscan_skip_brute_var.set(bool(preset["fscan_skip_brute"]))
+        self.fscan_port_threads_var.set(int(preset["fscan_port_threads"]))
+        self.semantic_threads_var.set(int(preset["semantic_threads"]))
+        self.semantic_max_depth_var.set(int(preset["semantic_max_depth"]))
+        self.semantic_run_dirsearch_var.set(bool(preset["semantic_run_dirsearch"]))
+        self.semantic_max_rate_var.set(int(preset["semantic_max_rate"]))
 
     @staticmethod
     def _valid_optional_url(value: str) -> bool:
@@ -355,6 +381,13 @@ class AISettingsDialog(tk.Toplevel):
                 "asset_settle_seconds": self.settle_seconds_var.get(),
                 "max_agent_batches": self.max_batches_var.get(),
                 "coordinator_poll_seconds": self.poll_seconds_var.get(),
+                "fscan_skip_poc": self.fscan_skip_poc_var.get(),
+                "fscan_skip_brute": self.fscan_skip_brute_var.get(),
+                "fscan_port_threads": self.fscan_port_threads_var.get(),
+                "semantic_threads": self.semantic_threads_var.get(),
+                "semantic_max_depth": self.semantic_max_depth_var.get(),
+                "semantic_run_dirsearch": self.semantic_run_dirsearch_var.get(),
+                "semantic_max_rate": self.semantic_max_rate_var.get(),
             }
         )
         codex_effort = self.codex_reasoning_effort_var.get()

@@ -723,6 +723,13 @@ class LauncherApp(tk.Tk):
                 self.workflow_settings["coordinator_poll_seconds"]
             ),
             ai_summary_enabled=bool(self.workflow_settings["ai_summary_enabled"]),
+            fscan_skip_poc=bool(self.workflow_settings["fscan_skip_poc"]),
+            fscan_skip_brute=bool(self.workflow_settings["fscan_skip_brute"]),
+            fscan_port_threads=int(self.workflow_settings["fscan_port_threads"]),
+            semantic_threads=int(self.workflow_settings["semantic_threads"]),
+            semantic_max_depth=int(self.workflow_settings["semantic_max_depth"]),
+            semantic_run_dirsearch=bool(self.workflow_settings["semantic_run_dirsearch"]),
+            semantic_max_rate=int(self.workflow_settings["semantic_max_rate"]),
         )
 
     def _start(self) -> None:

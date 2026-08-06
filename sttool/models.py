@@ -68,6 +68,13 @@ class LaunchRequest:
     max_agent_batches: int = 8
     coordinator_poll_seconds: int = 2
     ai_summary_enabled: bool = True
+    fscan_skip_poc: bool = True
+    fscan_skip_brute: bool = True
+    fscan_port_threads: int = 600
+    semantic_threads: int = 40
+    semantic_max_depth: int = 2
+    semantic_run_dirsearch: bool = True
+    semantic_max_rate: int = 0
 
 
 @dataclass
@@ -137,10 +144,17 @@ class RunState:
     max_agent_batches: int = 8
     coordinator_poll_seconds: int = 2
     ai_summary_enabled: bool = True
+    fscan_skip_poc: bool = True
+    fscan_skip_brute: bool = True
+    fscan_port_threads: int = 600
+    semantic_threads: int = 40
+    semantic_max_depth: int = 2
+    semantic_run_dirsearch: bool = True
+    semantic_max_rate: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        value["schema_version"] = 4
+        value["schema_version"] = 5
         return value
 
     @classmethod
