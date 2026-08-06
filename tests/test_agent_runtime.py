@@ -101,6 +101,25 @@ class AgentRuntimeTests(unittest.TestCase):
 
             self.assertEqual(pid, os.getpid())
 
+    def test_existing_batch_shell_is_claimed_without_second_launch(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary) / "run"
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            script = batch_dir / "launch.ps1"
+            script.write_text("Write-Host running", encoding="utf-8")
+            with (
+                patch("sttool.agent_launcher.agent_shell_pids_for_script", return_value=[43210]),
+                patch("sttool.agent_launcher.subprocess.Popen") as popen,
+            ):
+                pid, returned_dir = launch_agent_batch(
+                    run_dir, "codexx", "demo", 1, "test prompt"
+                )
+            self.assertEqual(pid, 43210)
+            self.assertEqual(returned_dir, batch_dir)
+            popen.assert_not_called()
+            self.assertEqual((batch_dir / "agent.pid").read_text(encoding="ascii"), "43210")
+
     def test_incremental_batch_uses_shared_terminal_window(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary) / "run"

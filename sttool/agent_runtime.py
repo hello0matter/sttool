@@ -134,6 +134,24 @@ def agent_shell_pids_for_run(run_dir: str | Path) -> list[int]:
     return sorted(set(matches))
 
 
+def agent_shell_pids_for_script(script_path: str | Path) -> list[int]:
+    expected = _normalized(Path(script_path).resolve())
+    matches: list[int] = []
+    for process in psutil.process_iter(["pid", "name", "exe", "cmdline"]):
+        try:
+            info = process.info
+            name = _normalized(info.get("name"))
+            executable = _normalized(info.get("exe"))
+            if not any(shell in name or shell in executable for shell in ("powershell", "pwsh")):
+                continue
+            command = _normalized(" ".join(str(item) for item in info.get("cmdline") or []))
+            if expected and expected in command:
+                matches.append(int(info["pid"]))
+        except (psutil.Error, OSError, TypeError, ValueError):
+            continue
+    return sorted(set(matches))
+
+
 def coordinator_owner_matches(owner: dict[str, Any], run_dir: str | Path) -> bool:
     try:
         pid = int(owner.get("pid") or 0)

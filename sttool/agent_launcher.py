@@ -7,6 +7,7 @@ import time
 from pathlib import Path
 
 from .agent_runtime import (
+    agent_shell_pids_for_script,
     agent_terminal_window_name,
     powershell_quote,
     prepare_one_shot_agent_launch,
@@ -129,6 +130,19 @@ def launch_agent_batch(
         raise RuntimeError(f"Agent 批次 {batch_number} 正在由另一个协调器启动") from exc
     os.close(descriptor)
     try:
+        existing_pid = 0
+        try:
+            existing_pid = int((batch_dir / "agent.pid").read_text(encoding="ascii").strip())
+        except (OSError, UnicodeError, ValueError):
+            pass
+        existing_shells = agent_shell_pids_for_script(batch_dir / "launch.ps1")
+        if existing_pid and existing_pid in existing_shells:
+            return existing_pid, batch_dir
+        if existing_shells:
+            existing_pid = existing_shells[0]
+            (batch_dir / "agent.pid").write_text(str(existing_pid), encoding="ascii")
+            return existing_pid, batch_dir
+        (batch_dir / "agent.pid").unlink(missing_ok=True)
         (batch_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
         script, pid_path = write_agent_batch_script(
             batch_dir,
@@ -174,7 +188,10 @@ def launch_agent_batch(
                 cwd=run_dir,
                 creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NEW_CONSOLE,
             )
-        deadline = time.monotonic() + 12
+        # Windows Terminal returns before the inner PowerShell has started.
+        # Keep polling long enough to claim the existing batch instead of
+        # reporting a false failure and letting the coordinator launch it again.
+        deadline = time.monotonic() + 30
         while time.monotonic() < deadline:
             try:
                 pid = int(pid_path.read_text(encoding="ascii").strip())
@@ -197,6 +214,27 @@ def launch_agent_batch(
                 }
                 atomic_json_write(batch_dir / "batch.json", metadata)
                 return pid, batch_dir
+            if not pid:
+                shell_pids = agent_shell_pids_for_script(script)
+                if shell_pids:
+                    pid = shell_pids[0]
+                    pid_path.write_text(str(pid), encoding="ascii")
+                    metadata = {
+                        "batch": batch_number,
+                        "pid": pid,
+                        "creation_token": process_creation_token(pid),
+                        "provider": provider,
+                        "agent_model": agent_model.strip(),
+                        "reasoning_effort": reasoning_effort,
+                        "agent_base_url": agent_base_url.strip().rstrip("/"),
+                        "started_at": now_text(),
+                        "prompt": str(batch_dir / "prompt.txt"),
+                        "script": str(script),
+                        "terminal_window": window_name if terminal else "",
+                        "status": "running",
+                    }
+                    atomic_json_write(batch_dir / "batch.json", metadata)
+                    return pid, batch_dir
             if not terminal and launcher.poll() is not None:
                 break
             time.sleep(0.1)
