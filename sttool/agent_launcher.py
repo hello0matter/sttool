@@ -57,6 +57,27 @@ def write_agent_batch_script(
         f"$env:{name} = {powershell_quote(value)}\n"
         for name, value in agent_base_url_environment(provider, agent_base_url).items()
     )
+    if provider == "claude":
+        credential_setup = (
+            "if ($env:STTOOL_AGENT_API_KEY) {\n"
+            "$env:ANTHROPIC_API_KEY = $env:STTOOL_AGENT_API_KEY\n"
+            "Remove-Item Env:STTOOL_AGENT_API_KEY -ErrorAction SilentlyContinue\n"
+            "}\n"
+            "if ($env:STTOOL_SHARED_AI_KEY_INJECTED) {\n"
+            "Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue\n"
+            "Remove-Item Env:STTOOL_SHARED_AI_KEY_INJECTED -ErrorAction SilentlyContinue\n"
+            "}\n"
+        )
+    else:
+        credential_setup = (
+            "if ($env:STTOOL_AGENT_API_KEY) {\n"
+            "$env:OPENAI_API_KEY = $env:STTOOL_AGENT_API_KEY\n"
+            "Remove-Item Env:STTOOL_AGENT_API_KEY -ErrorAction SilentlyContinue\n"
+            "} elseif ($env:STTOOL_SHARED_AI_KEY_INJECTED) {\n"
+            "Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue\n"
+            "}\n"
+            "Remove-Item Env:STTOOL_SHARED_AI_KEY_INJECTED -ErrorAction SilentlyContinue\n"
+        )
     script = (
         "$ErrorActionPreference = 'Stop'\n"
         "$utf8 = [System.Text.UTF8Encoding]::new($false)\n"
@@ -73,6 +94,7 @@ def write_agent_batch_script(
         "try {\n"
         f"Set-Location -LiteralPath {powershell_quote(str(batch_dir.parents[1]))}\n"
         f"{environment_setup}"
+        f"{credential_setup}"
         f"$bootstrapPrompt = {bootstrap}\n"
         f"{invocation}\n"
         "$agentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }\n"

@@ -964,6 +964,34 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(first, (True, "已安装；登录检测超时，将在启动时验证"))
             self.assertEqual(cached, first)
 
+    def test_preflight_accepts_explicit_agent_key_without_cli_login(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = RuntimeManager(root, [], st_root=root)
+            request = LaunchRequest(
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=(),
+                user_prompt="",
+                authorization_confirmed=True,
+                agent_api_key="cli-secret",
+            )
+
+            with (
+                patch("sttool.runtime.shutil.which", return_value="codexx.exe"),
+                patch.object(
+                    manager,
+                    "provider_health",
+                    return_value=(False, "CLI 未登录"),
+                ) as health,
+            ):
+                self.assertEqual(manager.preflight(request), [])
+
+            health.assert_not_called()
+
     def test_preflight_rejects_url_as_project_name(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)
@@ -1250,6 +1278,7 @@ class RuntimeTests(unittest.TestCase):
                         "OPENAI_BASE_URL": "https://gateway.example/v1",
                         "OPENAI_MODEL": "gpt-5.5",
                         "OPENAI_API_KEY": "sk-runtime-only",
+                        "STTOOL_SHARED_AI_KEY_INJECTED": "1",
                     },
                 )
                 self.assertEqual(
@@ -1379,9 +1408,11 @@ class RuntimeTests(unittest.TestCase):
                 selected_tools=(),
                 user_prompt="test",
                 authorization_confirmed=True,
+                api_key="shared-secret-token",
                 agent_model="gpt-5.6-sol",
                 reasoning_effort="xhigh",
                 agent_base_url="https://codex.example/v1/",
+                agent_api_key="agent-secret-token",
                 github_token="github-secret-token",
                 work_mode="fast",
                 auto_agent=True,
@@ -1416,6 +1447,13 @@ class RuntimeTests(unittest.TestCase):
                     project["agent_base_url"], "https://codex.example/v1"
                 )
                 self.assertNotIn("github-secret-token", json.dumps(project))
+                self.assertNotIn("shared-secret-token", json.dumps(project))
+                self.assertNotIn("agent-secret-token", json.dumps(project))
+                run_value = json.loads(
+                    (Path(state.run_dir) / "run.json").read_text(encoding="utf-8")
+                )
+                self.assertNotIn("agent-secret-token", json.dumps(run_value))
+                self.assertNotIn("shared-secret-token", json.dumps(run_value))
                 self.assertEqual(project["work_mode"], "fast")
                 self.assertFalse(project["wait_for_asset_commander"])
                 self.assertFalse(project["wait_for_fscan"])
@@ -1432,7 +1470,26 @@ class RuntimeTests(unittest.TestCase):
                     manager.spawn_environments["project_coordinator"]["GITHUB_TOKEN"],
                     "github-secret-token",
                 )
+                self.assertEqual(
+                    manager.spawn_environments["project_coordinator"][
+                        "STTOOL_AGENT_API_KEY"
+                    ],
+                    "agent-secret-token",
+                )
+                self.assertEqual(
+                    manager.spawn_environments["project_coordinator"][
+                        "STTOOL_SHARED_AI_KEY_INJECTED"
+                    ],
+                    "1",
+                )
                 self.assertNotIn("github-secret-token", " ".join(coordinator))
+                self.assertNotIn("shared-secret-token", " ".join(coordinator))
+                self.assertNotIn("agent-secret-token", " ".join(coordinator))
+                launch_script = (Path(state.run_dir) / "launch_agent.ps1").read_text(
+                    encoding="utf-8-sig"
+                )
+                self.assertNotIn("agent-secret-token", launch_script)
+                self.assertNotIn("shared-secret-token", launch_script)
                 self.assertIn("--wait-asset-commander", coordinator)
                 self.assertIn("false", coordinator)
                 self.assertIn("--vulnx", coordinator)

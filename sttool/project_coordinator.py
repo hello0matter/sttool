@@ -31,6 +31,7 @@ from .runtime import (
     pid_alive,
     process_creation_token,
     process_record_alive,
+    terminate_agent_process_tree,
 )
 
 
@@ -119,15 +120,27 @@ def mark_agent_batch_finished(
         if not isinstance(item, dict) or int(item.get("pid") or 0) != pid:
             continue
         batch_dir = Path(str(item.get("run_dir") or ""))
+        terminal_state = agent_batch_terminal_state(batch_dir)
         exit_state = read_json(batch_dir / "agent_exit.json")
         has_exit_state = bool(exit_state)
-        try:
-            exit_code = int(exit_state.get("exit_code") or 0)
-        except (TypeError, ValueError):
-            exit_code = 1
-        status = "failed" if has_exit_state and exit_code != 0 else "completed"
+        if terminal_state:
+            status = str(terminal_state["status"])
+            completed_at = str(terminal_state.get("completed_at") or completed_at)
+            default_exit_code = 0 if status == "completed" else 1
+            try:
+                exit_code = int(terminal_state.get("exit_code", default_exit_code))
+            except (TypeError, ValueError):
+                exit_code = default_exit_code
+        else:
+            try:
+                exit_code = int(exit_state.get("exit_code") or 0)
+            except (TypeError, ValueError):
+                exit_code = 1
+            status = "failed" if has_exit_state and exit_code != 0 else "completed"
         item.update(status=status, completed_at=completed_at, exit_code=exit_code)
-        error = str(exit_state.get("error") or "").strip()
+        error = str(
+            (terminal_state or {}).get("error") or exit_state.get("error") or ""
+        ).strip()
         if error:
             item["error"] = error
         metadata_path = batch_dir / "batch.json"
@@ -143,6 +156,14 @@ def mark_agent_batch_finished(
             atomic_json_write(metadata_path, metadata)
         return item
     return None
+
+
+def agent_batch_terminal_state(batch_dir: Path) -> dict[str, object] | None:
+    """Return a trusted terminal marker written by an AI batch."""
+    value = read_json(batch_dir / "batch_status.json")
+    if str(value.get("status") or "").lower() not in {"completed", "failed"}:
+        return None
+    return value
 
 
 def agent_batch_last_activity(batch_dir: Path) -> float | None:
@@ -725,9 +746,33 @@ def main() -> int:
         if not isinstance(batches, list):
             batches = []
             state["agent_batches"] = batches
-        if active_pid and not tracked_process_alive(
-            active_pid, active_creation_token, run_dir
-        ):
+        active_batch = next(
+            (
+                item
+                for item in reversed(batches)
+                if isinstance(item, dict)
+                and int(item.get("pid") or 0) == active_pid
+            ),
+            None,
+        )
+        active_batch_dir = (
+            Path(str(active_batch.get("run_dir") or ""))
+            if active_batch
+            else Path()
+        )
+        terminal_state = (
+            agent_batch_terminal_state(active_batch_dir) if active_batch else None
+        )
+        active_alive = bool(
+            active_pid
+            and tracked_process_alive(active_pid, active_creation_token, run_dir)
+        )
+        if active_pid and terminal_state and active_alive:
+            terminate_agent_process_tree(active_pid)
+            active_alive = tracked_process_alive(
+                active_pid, active_creation_token, run_dir
+            )
+        if active_pid and not active_alive:
             finished_pid = active_pid
             finished = mark_agent_batch_finished(run_dir, batches, finished_pid)
             state["active_agent_pid"] = 0
@@ -753,15 +798,6 @@ def main() -> int:
 
         active_pid = int(state.get("active_agent_pid") or 0)
         if active_pid:
-            active_batch = next(
-                (
-                    item
-                    for item in reversed(batches)
-                    if isinstance(item, dict)
-                    and int(item.get("pid") or 0) == active_pid
-                ),
-                None,
-            )
             batch_dir = Path(str(active_batch.get("run_dir") or "")) if active_batch else Path()
             stall_status, elapsed_minutes, activity_text = agent_batch_health(
                 batch_dir, max(int(args.agent_stall_warn_minutes), 0)
@@ -956,6 +992,14 @@ def main() -> int:
                     "started_at": now_text(),
                     "status": "running",
                 }
+                batch_metadata_path = batch_dir / "batch.json"
+                batch_metadata = read_json(batch_metadata_path)
+                if batch_metadata:
+                    batch_metadata.update(
+                        generation_from=consumed + 1,
+                        generation_to=bus.generation,
+                    )
+                    atomic_json_write(batch_metadata_path, batch_metadata)
                 batches.append(batch)
                 state["active_agent_pid"] = pid
                 state["active_agent_creation_token"] = process_creation_token(pid)

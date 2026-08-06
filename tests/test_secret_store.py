@@ -41,17 +41,23 @@ class SecretStoreTests(unittest.TestCase):
                 path,
                 {
                     "shared_ai_api_key": "shared-key",
+                    "codex_api_key": "codex-key",
+                    "claude_api_key": "claude-key",
                     "github_token": "github-token",
                 },
             )
 
             encrypted = path.read_bytes()
             self.assertNotIn(b"shared-key", encrypted)
+            self.assertNotIn(b"codex-key", encrypted)
+            self.assertNotIn(b"claude-key", encrypted)
             self.assertNotIn(b"github-token", encrypted)
             self.assertEqual(
                 load_secret_values(path),
                 {
                     "shared_ai_api_key": "shared-key",
+                    "codex_api_key": "codex-key",
+                    "claude_api_key": "claude-key",
                     "github_token": "github-token",
                 },
             )

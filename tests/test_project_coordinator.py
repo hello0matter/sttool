@@ -19,6 +19,7 @@ from sttool.project_coordinator import (
     compact_ai_summary_input,
     component_process_alive,
     coordinator_wait_stage,
+    agent_batch_terminal_state,
     mark_agent_batch_finished,
     schedule_agent_retry,
     render_risk_summary,
@@ -233,6 +234,45 @@ class ProjectCoordinatorTests(unittest.TestCase):
             metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
             self.assertEqual(metadata["status"], "completed")
             self.assertTrue(metadata["completed_at"])
+
+    def test_batch_status_completes_batch_without_shell_exit_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            metadata_path = batch_dir / "batch.json"
+            metadata_path.write_text(
+                json.dumps({"batch": 1, "pid": 123, "status": "running"}),
+                encoding="utf-8",
+            )
+            completed_at = "2026-08-06T18:29:05+08:00"
+            (batch_dir / "batch_status.json").write_text(
+                json.dumps({"status": "completed", "completed_at": completed_at}),
+                encoding="utf-8",
+            )
+            batches: list[object] = [
+                {"batch": 1, "pid": 123, "run_dir": str(batch_dir), "status": "running"}
+            ]
+
+            marker = agent_batch_terminal_state(batch_dir)
+            finished = mark_agent_batch_finished(run_dir, batches, 123)
+
+            self.assertEqual(marker, {"status": "completed", "completed_at": completed_at})
+            self.assertEqual(
+                finished,
+                {
+                    "batch": 1,
+                    "pid": 123,
+                    "run_dir": str(batch_dir),
+                    "status": "completed",
+                    "completed_at": completed_at,
+                    "exit_code": 0,
+                },
+            )
+            metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+            self.assertEqual(metadata["status"], "completed")
+            self.assertEqual(metadata["completed_at"], completed_at)
+            self.assertEqual(metadata["exit_code"], 0)
 
     def test_response_text_supports_responses_and_chat_payloads(self) -> None:
         self.assertEqual(

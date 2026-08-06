@@ -447,9 +447,16 @@ class RuntimeManager:
                 raise LaunchError(f"{tool.name}: {reason}")
             selected.append(tool)
 
-        healthy, message = self.provider_health(request.provider)
-        if not healthy:
-            raise LaunchError(message)
+        if request.agent_api_key.strip():
+            provider = request.provider.lower()
+            if provider not in {"codex", "codexx", "claude"}:
+                raise LaunchError("不支持的 AI CLI")
+            if shutil.which(provider) is None:
+                raise LaunchError(f"未安装 {provider} CLI")
+        else:
+            healthy, message = self.provider_health(request.provider)
+            if not healthy:
+                raise LaunchError(message)
         return selected
 
     @contextmanager
@@ -666,6 +673,27 @@ class RuntimeManager:
                 request.provider, request.agent_base_url
             ).items()
         )
+        if request.provider == "claude":
+            credential_setup = (
+                "if ($env:STTOOL_AGENT_API_KEY) {\n"
+                "$env:ANTHROPIC_API_KEY = $env:STTOOL_AGENT_API_KEY\n"
+                "Remove-Item Env:STTOOL_AGENT_API_KEY -ErrorAction SilentlyContinue\n"
+                "}\n"
+                "if ($env:STTOOL_SHARED_AI_KEY_INJECTED) {\n"
+                "Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue\n"
+                "Remove-Item Env:STTOOL_SHARED_AI_KEY_INJECTED -ErrorAction SilentlyContinue\n"
+                "}\n"
+            )
+        else:
+            credential_setup = (
+                "if ($env:STTOOL_AGENT_API_KEY) {\n"
+                "$env:OPENAI_API_KEY = $env:STTOOL_AGENT_API_KEY\n"
+                "Remove-Item Env:STTOOL_AGENT_API_KEY -ErrorAction SilentlyContinue\n"
+                "} elseif ($env:STTOOL_SHARED_AI_KEY_INJECTED) {\n"
+                "Remove-Item Env:OPENAI_API_KEY -ErrorAction SilentlyContinue\n"
+                "}\n"
+                "Remove-Item Env:STTOOL_SHARED_AI_KEY_INJECTED -ErrorAction SilentlyContinue\n"
+            )
         script = (
             "$ErrorActionPreference = 'Stop'\n"
             f"{launch_guard}"
@@ -682,6 +710,7 @@ class RuntimeManager:
             f"$Host.UI.RawUI.WindowTitle = {title}\n"
             f"Set-Location -LiteralPath {run_quote}\n"
             f"{environment_setup}"
+            f"{credential_setup}"
             f"{prompt_setup}"
             f"{invocation}\n"
             "$agentExitCode = if ($null -eq $LASTEXITCODE) { 0 } else { [int]$LASTEXITCODE }\n"
@@ -736,6 +765,14 @@ class RuntimeManager:
             cwd=str(run_dir),
             creationflags=CREATE_NEW_PROCESS_GROUP,
             close_fds=True,
+            env={
+                **os.environ,
+                **(
+                    {"STTOOL_AGENT_API_KEY": request.agent_api_key.strip()}
+                    if request.agent_api_key.strip()
+                    else {}
+                ),
+            },
         )
         deadline = time.monotonic() + 12
         while time.monotonic() < deadline:
@@ -1006,6 +1043,11 @@ class RuntimeManager:
                 "未找到 Windows Terminal（wt.exe），本次 Agent 回退到系统控制台。",
             )
         shell = shutil.which("pwsh.exe") or "powershell.exe"
+        environment = (
+            {"STTOOL_AGENT_API_KEY": request.agent_api_key.strip()}
+            if request.agent_api_key.strip()
+            else None
+        )
         return self._spawn(
             "ai_agent",
             f"{self.provider_display_name(request.provider)} Agent",
@@ -1013,6 +1055,7 @@ class RuntimeManager:
             ["-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)],
             str(run_dir),
             True,
+            environment,
         )
 
     def _launch_coordinator(
@@ -1030,6 +1073,9 @@ class RuntimeManager:
         }
         if request.api_key.strip():
             environment["OPENAI_API_KEY"] = request.api_key.strip()
+            environment["STTOOL_SHARED_AI_KEY_INJECTED"] = "1"
+        if request.agent_api_key.strip():
+            environment["STTOOL_AGENT_API_KEY"] = request.agent_api_key.strip()
         if request.github_token.strip():
             environment["GITHUB_TOKEN"] = request.github_token.strip()
         vulnx_tool = self.tools.get("vulnx")
@@ -1108,6 +1154,7 @@ class RuntimeManager:
         state: RunState,
         authorization_confirmed: bool,
         api_key: str = "",
+        agent_api_key: str = "",
         github_token: str = "",
     ) -> tuple[LaunchRequest, list[str]]:
         run_dir = Path(state.run_dir)
@@ -1152,6 +1199,7 @@ class RuntimeManager:
                 agent_base_url=str(
                     value.get("agent_base_url", state.agent_base_url)
                 ),
+                agent_api_key=agent_api_key,
                 github_token=github_token,
                 work_mode=str(value.get("work_mode", state.work_mode)),
                 auto_agent=bool(value.get("auto_agent", state.auto_agent)),
@@ -1368,13 +1416,14 @@ class RuntimeManager:
         api_base_url: str | None = None,
         model: str | None = None,
         api_key: str = "",
+        agent_api_key: str = "",
         github_token: str = "",
     ) -> RunState:
         with self._launch_lock():
             run_dir = Path(state.run_dir).resolve()
             append_activity(run_dir, "收到恢复实例请求，正在检查现有组件。")
             request, skipped_tools = self._request_for_state(
-                state, authorization_confirmed, api_key, github_token
+                state, authorization_confirmed, api_key, agent_api_key, github_token
             )
             if api_base_url is not None or model is not None:
                 request = LaunchRequest(
@@ -1393,6 +1442,7 @@ class RuntimeManager:
                     agent_model=request.agent_model,
                     reasoning_effort=request.reasoning_effort,
                     agent_base_url=request.agent_base_url,
+                    agent_api_key=agent_api_key,
                     github_token=github_token,
                     work_mode=request.work_mode,
                     auto_agent=request.auto_agent,
@@ -1429,6 +1479,7 @@ class RuntimeManager:
                 agent_model=request.agent_model,
                 reasoning_effort=request.reasoning_effort,
                 agent_base_url=request.agent_base_url,
+                agent_api_key=agent_api_key,
                 github_token=github_token,
                 work_mode=request.work_mode,
                 auto_agent=request.auto_agent,
@@ -1599,7 +1650,7 @@ class RuntimeManager:
         if invalidated_scripts:
             append_activity(
                 state.run_dir,
-                f"??? {invalidated_scripts} ? Agent ?????????????????????",
+                f"已作废 {invalidated_scripts} 个 Agent 启动脚本，防止停止后被延迟执行。",
             )
         coordinator = read_json_file(
             run_dir / "tool_data" / "coordinator" / "state.json"

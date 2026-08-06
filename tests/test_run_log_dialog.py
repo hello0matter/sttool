@@ -6,6 +6,7 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sttool.run_log_dialog import (
+    AI_BATCH_COMPONENT_ID,
     component_display_runtime,
     filter_component_activity,
     component_paths,
@@ -17,6 +18,104 @@ from sttool.run_log_dialog import (
 
 
 class RunLogDialogTests(unittest.TestCase):
+    def test_ai_batches_are_rendered_as_chinese_summary(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            first = run_dir / "agent_batches" / "0001"
+            second = run_dir / "agent_batches" / "0002"
+            first.mkdir(parents=True)
+            second.mkdir(parents=True)
+            (first / "batch.json").write_text(
+                json.dumps({"batch": 1, "provider": "codex", "status": "completed"}),
+                encoding="utf-8",
+            )
+            second_state = second / "batch.json"
+            second_state.write_text(
+                json.dumps(
+                    {
+                        "batch": 2,
+                        "provider": "claude",
+                        "agent_model": "sonnet",
+                        "reasoning_effort": "high",
+                        "pid": 123,
+                        "status": "running",
+                        "generation_from": 3,
+                        "generation_to": 5,
+                        "started_at": "2026-08-06T12:00:00+08:00",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+            (second / "agent_exit.json").write_text(
+                json.dumps(
+                    {
+                        "exit_code": 1,
+                        "completed_at": "2026-08-06T12:05:00+08:00",
+                        "error": "模型线路不可用",
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            rendered = render_component_state(
+                second_state, AI_BATCH_COMPONENT_ID
+            )
+            sources = component_paths(run_dir, AI_BATCH_COMPONENT_ID)
+            status, stage, detail = component_runtime(
+                run_dir, AI_BATCH_COMPONENT_ID
+            )
+
+            self.assertIn("AI 执行批次 2", rendered)
+            self.assertIn("执行器：Claude CLI", rendered)
+            self.assertIn("资产代次：3 至 5", rendered)
+            self.assertIn("退出码：1", rendered)
+            self.assertIn("错误摘要：模型线路不可用", rendered)
+            self.assertEqual(len(sources["states"]), 2)
+            self.assertEqual(sources["workdir"], run_dir / "agent_batches")
+            self.assertEqual(status, "failed")
+            self.assertEqual(stage, "agent_batch")
+            self.assertIn("共 2 个批次", detail)
+
+    def test_ai_batch_status_file_completes_batch_without_shell_exit_file(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0003"
+            batch_dir.mkdir(parents=True)
+            batch_state = batch_dir / "batch.json"
+            batch_state.write_text(
+                json.dumps(
+                    {
+                        "batch": 3,
+                        "provider": "codexx",
+                        "status": "running",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (batch_dir / "batch_status.json").write_text(
+                json.dumps(
+                    {
+                        "batch": 3,
+                        "status": "completed",
+                        "completed_at": "2026-08-06T18:29:05+08:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            rendered = render_component_state(batch_state, AI_BATCH_COMPONENT_ID)
+            status, stage, detail = component_runtime(
+                run_dir, AI_BATCH_COMPONENT_ID
+            )
+
+            self.assertIn("状态：已完成", rendered)
+            self.assertIn("结束时间：2026-08-06T18:29:05+08:00", rendered)
+            self.assertEqual(status, "completed")
+            self.assertEqual(stage, "agent_batch")
+            self.assertIn("第 3 批", detail)
+
     def test_log_refresh_follows_when_already_at_bottom(self) -> None:
         self.assertEqual(
             log_refresh_scroll_policy((0.8, 1.0), False),
@@ -227,7 +326,7 @@ class RunLogDialogTests(unittest.TestCase):
                 sources["workdir"], run_dir / "tool_data" / "coordinator"
             )
             self.assertIn(asset_bus, sources["states"])
-            self.assertIn(batch, sources["logs"])
+            self.assertNotIn(batch, sources["logs"])
             self.assertIn(run_dir / "risk_summary.md", sources["results"])
             self.assertIn(run_dir / "agent_batches", sources["results"])
 

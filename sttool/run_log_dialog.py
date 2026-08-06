@@ -15,6 +15,8 @@ COORDINATOR_MANAGED_COMPONENTS = {
     "vulnx": "vulnx 漏洞情报",
     "find_gh_poc": "GitHub PoC 候选搜索",
 }
+AI_BATCH_COMPONENT_ID = "ai_execution_batches"
+AI_BATCH_COMPONENT_NAME = "AI 执行批次"
 
 
 LOG_BOTTOM_THRESHOLD = 0.98
@@ -61,6 +63,13 @@ def filter_component_activity(
         "tscan_plus": ("TscanPlus",),
         "project_coordinator": ("项目增量调度器", "资产总线", "Agent 批次"),
         "ai_agent": ("本地 Agent", "Codex Agent", "Codexx", "Codex", "Claude"),
+        AI_BATCH_COMPONENT_ID: (
+            "Agent 批次",
+            "AI 执行批次",
+            "Codex",
+            "Codexx",
+            "Claude",
+        ),
     }.get(component_id, ())
     candidates = [component_id, component_name, *aliases]
     normalized = [candidate.casefold() for candidate in candidates if candidate.strip()]
@@ -81,6 +90,11 @@ def filter_component_activity(
     selected: list[str] = []
     for line in content.splitlines():
         folded = line.casefold()
+        if component_id == AI_BATCH_COMPONENT_ID and any(
+            alias in folded for alias in normalized
+        ):
+            selected.append(line)
+            continue
         owner = next(
             (
                 owner_id
@@ -159,6 +173,19 @@ def component_paths(
     component_activity = refresh_component_activity_log(
         run_dir, component_id, component_name
     )
+    if component_id == AI_BATCH_COMPONENT_ID:
+        workdir = run_dir / "agent_batches"
+        return {
+            "workdir": workdir,
+            "states": sorted(workdir.glob("*/batch.json")),
+            "logs": [component_activity],
+            "results": [
+                run_dir / "findings.md",
+                run_dir / "risk_summary.md",
+                run_dir / "pentest_report.txt",
+                workdir,
+            ],
+        }
     if component_id == "asset_commander":
         workdir = run_dir / "tool_data" / "asset_commander"
         return {
@@ -214,7 +241,6 @@ def component_paths(
             ],
             "logs": [
                 component_activity,
-                *sorted(run_dir.glob("agent_batches/*/batch.json")),
             ],
             "results": [
                 run_dir / "pentest_report.md",
@@ -286,8 +312,8 @@ def human_status(value: object) -> str:
         "exited": "\u5df2\u9000\u51fa",
         "pending": "\u5f85\u8fd0\u884c",
         "not_selected": "未选择",
-        "blocked_without_vulnx": "?? vulnx",
-        "skipped_no_token": "?? GitHub Token",
+        "blocked_without_vulnx": "等待 vulnx",
+        "skipped_no_token": "未配置 GitHub Token",
         "unavailable": "不可用",
         "completed_with_errors": "完成（有错误）",
     }.get(text, text or "\u672a\u77e5")
@@ -327,6 +353,52 @@ def render_component_state(path: Path, component_id: str) -> str:
     if not state:
         return f"{path.name}\uff1a\u72b6\u6001\u6587\u4ef6\u4e3a\u7a7a\u6216\u6682\u65f6\u65e0\u6cd5\u8bfb\u53d6\u3002"
     lines: list[str] = []
+    if component_id == AI_BATCH_COMPONENT_ID:
+        exit_state = load_json(path.with_name("agent_exit.json"))
+        batch_status = load_json(path.with_name("batch_status.json"))
+        status = str(state.get("status") or "pending")
+        exit_code = exit_state.get("exit_code")
+        if exit_state:
+            status = "completed" if exit_code == 0 else "failed"
+        elif batch_status:
+            status = str(batch_status.get("status") or status)
+        provider = str(state.get("provider") or "-")
+        provider_name = {
+            "codex": "Codex CLI",
+            "codexx": "Codexx CLI",
+            "claude": "Claude CLI",
+        }.get(provider, provider)
+        batch_number = state.get("batch") or path.parent.name
+        lines.extend(
+            [
+                f"【AI 执行批次 {batch_number}】",
+                f"执行器：{provider_name}",
+                f"状态：{human_status(status)}",
+                f"模型：{state.get('agent_model') or 'CLI 默认'}",
+                f"推理强度：{state.get('reasoning_effort') or 'CLI 默认'}",
+                f"PID：{state.get('pid') or '-'}",
+                f"开始时间：{state.get('started_at') or '-'}",
+                f"结束时间：{exit_state.get('completed_at') or batch_status.get('completed_at') or state.get('completed_at') or '-'}",
+            ]
+        )
+        generation_from = state.get("generation_from")
+        generation_to = state.get("generation_to")
+        if generation_from is not None or generation_to is not None:
+            lines.append(
+                f"资产代次：{generation_from if generation_from is not None else '-'}"
+                f" 至 {generation_to if generation_to is not None else '-'}"
+            )
+        if exit_code is not None:
+            lines.append(f"退出码：{exit_code}")
+        error = str(
+            exit_state.get("error")
+            or batch_status.get("error")
+            or state.get("error")
+            or ""
+        ).strip()
+        if error:
+            lines.append(f"错误摘要：{error[:1000]}")
+        return "\n".join(lines)
     if component_id == "semantic_dirscan":
         if path.name == "sttool_bridge_state.json":
             lines.append("\u3010\u8d44\u4ea7\u540c\u6b65\u6982\u89c8\u3011")
@@ -480,6 +552,31 @@ def render_component_state(path: Path, component_id: str) -> str:
 
 
 def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
+    if component_id == AI_BATCH_COMPONENT_ID:
+        batches = sorted((run_dir / "agent_batches").glob("*/batch.json"))
+        if not batches:
+            return "pending", "waiting_first_batch", "尚未启动 AI 执行批次"
+        latest = batches[-1]
+        state = load_json(latest)
+        exit_state = load_json(latest.with_name("agent_exit.json"))
+        batch_status = load_json(latest.with_name("batch_status.json"))
+        status = str(state.get("status") or "pending")
+        if exit_state:
+            status = "completed" if exit_state.get("exit_code") == 0 else "failed"
+        elif batch_status:
+            status = str(batch_status.get("status") or status)
+        batch_number = state.get("batch") or latest.parent.name
+        provider = str(state.get("provider") or "未知执行器")
+        detail = f"共 {len(batches)} 个批次；最新为第 {batch_number} 批，执行器 {provider}"
+        error = str(
+            exit_state.get("error")
+            or batch_status.get("error")
+            or state.get("error")
+            or ""
+        ).strip()
+        if error:
+            detail += f"；{error[:300]}"
+        return status, "agent_batch", detail
     if component_id == "asset_commander":
         state = load_json(
             run_dir / "tool_data" / "asset_commander" / "workflow_state.json"
@@ -578,7 +675,7 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         if status == "skipped_no_token":
             return "manual_required", "waiting_github_token", "未配置 GitHub Token；已安全跳过，不影响其他阶段"
         if status in {"pending", "not_requested"}:
-            return "waiting_assets", "waiting_cve_candidates", "?? vulnx ?? CVE ??"
+            return "waiting_assets", "waiting_cve_candidates", "等待 vulnx 生成 CVE 候选"
         if status == "blocked_without_vulnx":
             return "waiting_assets", "waiting_vulnx", "已选择 find-gh-poc，但 vulnx 未选择"
         result = load_json(run_dir / "results" / "find_gh_poc.json")
@@ -957,6 +1054,7 @@ class RunLogDialog(tk.Toplevel):
             ("semantic_dirscan", "AI 路径发现"),
             ("tscan_plus", "TscanPlus"),
             ("project_coordinator", "项目增量调度/Agent"),
+            (AI_BATCH_COMPONENT_ID, AI_BATCH_COMPONENT_NAME),
         ):
             status, stage, detail = component_display_runtime(
                 self.run_dir, component_id
@@ -1031,6 +1129,23 @@ class RunLogDialog(tk.Toplevel):
                         detail,
                         "-",
                         "由协调器按资产代次执行",
+                    ),
+                )
+            if AI_BATCH_COMPONENT_ID not in process_ids:
+                status, stage, detail = component_display_runtime(
+                    self.run_dir, AI_BATCH_COMPONENT_ID
+                )
+                self.process_tree.insert(
+                    "",
+                    "end",
+                    iid=AI_BATCH_COMPONENT_ID,
+                    values=(
+                        AI_BATCH_COMPONENT_NAME,
+                        self._status_text(status),
+                        stage,
+                        detail,
+                        "-",
+                        "由协调器按资产代次启动",
                     ),
                 )
             for iid in selected:

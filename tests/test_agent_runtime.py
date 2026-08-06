@@ -59,6 +59,41 @@ class AgentRuntimeTests(unittest.TestCase):
             self.assertIn("Move-Item -LiteralPath $launchTokenPath", script)
             self.assertIn("stale or duplicate Agent launch", script)
 
+    def test_batch_scripts_map_private_key_without_embedding_a_secret(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary) / "run" / "agent_batches"
+            codex_dir = root / "0001"
+            claude_dir = root / "0002"
+            codex_dir.mkdir(parents=True)
+            claude_dir.mkdir(parents=True)
+            (codex_dir / "prompt.txt").write_text("test", encoding="utf-8")
+            (claude_dir / "prompt.txt").write_text("test", encoding="utf-8")
+
+            codex_script, _ = write_agent_batch_script(
+                codex_dir, "codex", "demo"
+            )
+            claude_script, _ = write_agent_batch_script(
+                claude_dir, "claude", "demo"
+            )
+            codex_text = codex_script.read_text(encoding="utf-8-sig")
+            claude_text = claude_script.read_text(encoding="utf-8-sig")
+
+            self.assertIn(
+                "$env:OPENAI_API_KEY = $env:STTOOL_AGENT_API_KEY", codex_text
+            )
+            self.assertIn(
+                "elseif ($env:STTOOL_SHARED_AI_KEY_INJECTED)", codex_text
+            )
+            self.assertIn(
+                "$env:ANTHROPIC_API_KEY = $env:STTOOL_AGENT_API_KEY",
+                claude_text,
+            )
+            self.assertIn(
+                "if ($env:STTOOL_SHARED_AI_KEY_INJECTED)", claude_text
+            )
+            self.assertNotIn("test-agent-secret", codex_text)
+            self.assertNotIn("test-agent-secret", claude_text)
+
     def test_terminal_handoff_waits_for_inner_powershell_pid(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary) / "run"

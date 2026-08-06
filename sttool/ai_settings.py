@@ -24,9 +24,11 @@ class AISettingsDialog(tk.Toplevel):
         codex_agent_model: str = "",
         codex_reasoning_effort: str = "",
         codex_agent_base_url: str = "",
+        codex_api_key: str = "",
         claude_agent_model: str = "",
         claude_reasoning_effort: str = "",
         claude_agent_base_url: str = "",
+        claude_api_key: str = "",
         github_token: str = "",
         workflow_settings: dict[str, object] | None = None,
     ) -> None:
@@ -48,11 +50,15 @@ class AISettingsDialog(tk.Toplevel):
             value=normalized_reasoning_effort(codex_reasoning_effort) or "CLI 默认"
         )
         self.codex_agent_base_url_var = tk.StringVar(value=codex_agent_base_url)
+        self.codex_api_key_var = tk.StringVar(value=codex_api_key)
+        self.show_codex_key_var = tk.BooleanVar(value=False)
         self.claude_agent_model_var = tk.StringVar(value=claude_agent_model)
         self.claude_reasoning_effort_var = tk.StringVar(
             value=normalized_reasoning_effort(claude_reasoning_effort) or "CLI 默认"
         )
         self.claude_agent_base_url_var = tk.StringVar(value=claude_agent_base_url)
+        self.claude_api_key_var = tk.StringVar(value=claude_api_key)
+        self.show_claude_key_var = tk.BooleanVar(value=False)
         self.github_token_var = tk.StringVar(value=github_token)
         self.show_github_token_var = tk.BooleanVar(value=False)
         self.work_mode_var = tk.StringVar(
@@ -112,26 +118,30 @@ class AISettingsDialog(tk.Toplevel):
         is_claude = provider == "claude"
         tab = ttk.Frame(notebook, padding=18)
         tab.columnconfigure(0, weight=1)
-        notebook.add(tab, text="Claude Agent" if is_claude else "Codex / Codexx")
+        notebook.add(tab, text="Claude CLI" if is_claude else "Codex / Codexx CLI")
         if is_claude:
             description = (
-                "只控制项目中选择 Claude CLI 时的模型、推理强度与可选 Base URL。"
-                "凭据仍使用 Claude CLI 自己的登录或环境配置，不写入项目文件。"
+                "Claude 是外部 CLI 执行器，不是 STTool 内置 AI。可单独配置模型、"
+                "推理强度、Base URL 和 API Key；Key 仅用 Windows DPAPI 加密保存。"
             )
             model_var = self.claude_agent_model_var
             effort_var = self.claude_reasoning_effort_var
             base_url_var = self.claude_agent_base_url_var
+            key_var = self.claude_api_key_var
+            show_key_var = self.show_claude_key_var
             models = ("", "sonnet", "opus", "haiku")
             url_label = "Anthropic API Base URL（可选，留空使用 CLI 配置）"
             efforts = ("CLI 默认", "low", "medium", "high")
         else:
             description = (
-                "只控制项目中选择 Codex 或 Codexx CLI 时的模型、推理强度与可选 Base URL。"
-                "凭据和模型线路仍可继续由 CLI 自身配置；留空不会覆盖。"
+                "Codex/Codexx 是外部 CLI 执行器，不是 STTool 内置 AI。可单独配置模型、"
+                "推理强度、Base URL 和 API Key；Key 仅用 Windows DPAPI 加密保存。"
             )
             model_var = self.codex_agent_model_var
             effort_var = self.codex_reasoning_effort_var
             base_url_var = self.codex_agent_base_url_var
+            key_var = self.codex_api_key_var
+            show_key_var = self.show_codex_key_var
             models = ("", "gpt-5.5", "gpt-5.6-sol")
             url_label = "OpenAI 兼容 API Base URL（可选，留空使用 CLI 配置）"
             efforts = ("CLI 默认", "low", "medium", "high", "xhigh")
@@ -154,6 +164,20 @@ class AISettingsDialog(tk.Toplevel):
             state="readonly",
         ).grid(row=4, column=0, sticky="ew", pady=(0, 16))
         self._field(tab, 5, url_label, base_url_var)
+        ttk.Label(tab, text="API Key（可选；留空使用 CLI 自身登录）").grid(
+            row=7, column=0, sticky="w", pady=(0, 5)
+        )
+        key_row = ttk.Frame(tab)
+        key_row.grid(row=8, column=0, sticky="ew")
+        key_row.columnconfigure(0, weight=1)
+        key_entry = ttk.Entry(key_row, textvariable=key_var, show="*", width=54)
+        key_entry.grid(row=0, column=0, sticky="ew")
+        ttk.Checkbutton(
+            key_row,
+            text="显示",
+            variable=show_key_var,
+            command=lambda: key_entry.configure(show="" if show_key_var.get() else "*"),
+        ).grid(row=0, column=1, padx=(8, 0))
 
     def _build_shared_ai_tab(self, notebook: ttk.Notebook) -> None:
         tab = ttk.Frame(notebook, padding=18)
@@ -290,17 +314,47 @@ class AISettingsDialog(tk.Toplevel):
             wraplength=680,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
-        scan = ttk.LabelFrame(tab, text="??????????????????", padding=12)
+        scan = ttk.LabelFrame(tab, text="扫描工具参数（按工作模式预设）", padding=12)
         scan.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         scan.columnconfigure(1, weight=1)
-        ttk.Checkbutton(scan, text="fscan ?? POC ??????????", variable=self.fscan_skip_poc_var).grid(row=0, column=0, columnspan=2, sticky="w", pady=3)
-        ttk.Checkbutton(scan, text="fscan ??????????????", variable=self.fscan_skip_brute_var).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
-        self._spin_field(scan, 2, "fscan ?????", self.fscan_port_threads_var, 1, 2000)
-        self._spin_field(scan, 3, "???????", self.semantic_threads_var, 1, 200)
-        self._spin_field(scan, 4, "??????????", self.semantic_max_depth_var, 0, 10)
-        ttk.Checkbutton(scan, text="?????? dirsearch ???", variable=self.semantic_run_dirsearch_var).grid(row=5, column=0, columnspan=2, sticky="w", pady=3)
-        self._spin_field(scan, 6, "???????????/??0=???", self.semantic_max_rate_var, 0, 10000)
-        ttk.Label(scan, text="balanced/fast ??????????deep ????? POC/?????????????????????", wraplength=680).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Checkbutton(
+            scan,
+            text="fscan 跳过 POC 检测（降低侵入性）",
+            variable=self.fscan_skip_poc_var,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(
+            scan,
+            text="fscan 跳过口令爆破（降低侵入性）",
+            variable=self.fscan_skip_brute_var,
+        ).grid(row=1, column=0, columnspan=2, sticky="w", pady=3)
+        self._spin_field(
+            scan, 2, "fscan 端口并发数", self.fscan_port_threads_var, 1, 2000
+        )
+        self._spin_field(scan, 3, "路径发现线程数", self.semantic_threads_var, 1, 200)
+        self._spin_field(
+            scan, 4, "路径发现最大深度", self.semantic_max_depth_var, 0, 10
+        )
+        ttk.Checkbutton(
+            scan,
+            text="路径发现同时运行 dirsearch 扫描",
+            variable=self.semantic_run_dirsearch_var,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=3)
+        self._spin_field(
+            scan,
+            6,
+            "路径发现最大请求速率（每秒，0=不限速）",
+            self.semantic_max_rate_var,
+            0,
+            10000,
+        )
+        ttk.Label(
+            scan,
+            text=(
+                "balanced/fast 默认降低并发与扫描深度；deep 模式允许 POC、"
+                "口令检测及更深的路径发现。请按授权范围选择。"
+            ),
+            wraplength=680,
+        ).grid(row=7, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     @staticmethod
     def _field(
@@ -419,9 +473,11 @@ class AISettingsDialog(tk.Toplevel):
             "codex_agent_model": self.codex_agent_model_var.get().strip(),
             "codex_reasoning_effort": "" if codex_effort == "CLI 默认" else codex_effort,
             "codex_agent_base_url": codex_base_url,
+            "codex_api_key": self.codex_api_key_var.get().strip(),
             "claude_agent_model": self.claude_agent_model_var.get().strip(),
             "claude_reasoning_effort": "" if claude_effort == "CLI 默认" else claude_effort,
             "claude_agent_base_url": claude_base_url,
+            "claude_api_key": self.claude_api_key_var.get().strip(),
             "github_token": self.github_token_var.get().strip(),
             "workflow": workflow,
         }

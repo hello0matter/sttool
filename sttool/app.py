@@ -105,6 +105,8 @@ class LauncherApp(tk.Tk):
             secret_values = {}
             self.secret_load_error = str(exc)
         self.api_key = secret_values.get("shared_ai_api_key", "")
+        self.codex_api_key = secret_values.get("codex_api_key", "")
+        self.claude_api_key = secret_values.get("claude_api_key", "")
         self.github_token = secret_values.get("github_token", "")
 
         self.title("STTool 渗透项目总控台")
@@ -275,7 +277,7 @@ class LauncherApp(tk.Tk):
 
         ttk.Label(
             right,
-            text="AI Agent",
+            text="AI 执行器（外部 CLI，三选一）",
             style="Panel.TLabel",
             font=("Microsoft YaHei UI", 12, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 14))
@@ -283,21 +285,21 @@ class LauncherApp(tk.Tk):
         provider_row.grid(row=1, column=0, sticky="ew", pady=(0, 12))
         ttk.Radiobutton(
             provider_row,
-            text="Codexx CLI",
+            text="Codexx CLI 执行器",
             value="codexx",
             variable=self.provider_var,
             command=self._provider_changed,
         ).pack(side="left", padx=(0, 18))
         ttk.Radiobutton(
             provider_row,
-            text="Codex CLI",
+            text="Codex CLI 执行器",
             value="codex",
             variable=self.provider_var,
             command=self._provider_changed,
         ).pack(side="left", padx=(0, 18))
         ttk.Radiobutton(
             provider_row,
-            text="Claude CLI",
+            text="Claude CLI 执行器",
             value="claude",
             variable=self.provider_var,
             command=self._provider_changed,
@@ -676,17 +678,21 @@ class LauncherApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _agent_settings_for_provider(self, provider: str) -> tuple[str, str, str]:
+    def _agent_settings_for_provider(
+        self, provider: str
+    ) -> tuple[str, str, str, str]:
         if provider == "claude":
             return (
                 self.claude_agent_model,
                 self.claude_reasoning_effort,
                 self.claude_agent_base_url,
+                self.claude_api_key,
             )
         return (
             self.codex_agent_model,
             self.codex_reasoning_effort,
             self.codex_agent_base_url,
+            self.codex_api_key,
         )
 
     def _request(self) -> LaunchRequest:
@@ -694,7 +700,7 @@ class LauncherApp(tk.Tk):
             tool_id for tool_id, variable in self.tool_vars.items() if variable.get()
         )
         provider = self.provider_var.get()
-        agent_model, reasoning_effort, agent_base_url = (
+        agent_model, reasoning_effort, agent_base_url, agent_api_key = (
             self._agent_settings_for_provider(provider)
         )
         return LaunchRequest(
@@ -711,6 +717,7 @@ class LauncherApp(tk.Tk):
             agent_model=agent_model,
             reasoning_effort=reasoning_effort,
             agent_base_url=agent_base_url,
+            agent_api_key=agent_api_key,
             github_token=self.github_token,
             work_mode=str(self.workflow_settings["work_mode"]),
             auto_agent=bool(self.workflow_settings["auto_agent"]),
@@ -874,6 +881,7 @@ class LauncherApp(tk.Tk):
                     state,
                     authorization_confirmed=True,
                     api_key=self.api_key,
+                    agent_api_key=self._agent_settings_for_provider(state.provider)[3],
                     github_token=self.github_token,
                 )
             except LaunchError as exc:
@@ -1041,9 +1049,11 @@ class LauncherApp(tk.Tk):
             codex_agent_model=self.codex_agent_model,
             codex_reasoning_effort=self.codex_reasoning_effort,
             codex_agent_base_url=self.codex_agent_base_url,
+            codex_api_key=self.codex_api_key,
             claude_agent_model=self.claude_agent_model,
             claude_reasoning_effort=self.claude_reasoning_effort,
             claude_agent_base_url=self.claude_agent_base_url,
+            claude_api_key=self.claude_api_key,
             github_token=self.github_token,
             workflow_settings=self.workflow_settings,
         )
@@ -1055,6 +1065,8 @@ class LauncherApp(tk.Tk):
                 self.launcher_secrets_path,
                 {
                     "shared_ai_api_key": str(dialog.result["api_key"]),
+                    "codex_api_key": str(dialog.result["codex_api_key"]),
+                    "claude_api_key": str(dialog.result["claude_api_key"]),
                     "github_token": str(dialog.result["github_token"]),
                 },
             )
@@ -1062,6 +1074,8 @@ class LauncherApp(tk.Tk):
             messagebox.showerror("STTool 全局设置", str(exc), parent=self)
             return
         self.api_key = str(dialog.result["api_key"])
+        self.codex_api_key = str(dialog.result["codex_api_key"])
+        self.claude_api_key = str(dialog.result["claude_api_key"])
         self.github_token = str(dialog.result["github_token"])
         self.api_base_url_var.set(str(dialog.result["api_base_url"]))
         self.default_model = str(dialog.result["model"])

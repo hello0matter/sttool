@@ -59,6 +59,7 @@ class LaunchRequest:
     agent_model: str = ""
     reasoning_effort: str = ""
     agent_base_url: str = ""
+    agent_api_key: str = field(default="", repr=False, compare=False)
     github_token: str = field(default="", repr=False, compare=False)
     work_mode: str = DEFAULT_WORK_MODE
     auto_agent: bool = True

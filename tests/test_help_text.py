@@ -18,15 +18,19 @@ class HelpTextTests(unittest.TestCase):
             "agent_batches",
             "AssetCommander",
             "TscanPlus",
-            "fscan ?? POC ??",
-            "??????????",
-            "?????????????",
+            "工具协作 AI",
+            "外部 CLI 执行器",
+            "Windows DPAPI",
+            "AI 执行批次",
+            "fscan POC 检测",
+            "增量调度如何工作",
             "metadata_only",
             "等待资产回传",
             "自动跟随最新日志",
             "回到底部",
         ):
             self.assertIn(expected, text)
+        self.assertNotIn("????????", text)
 
     def test_ensure_help_document_writes_txt_file(self) -> None:
         with TemporaryDirectory() as temporary:
