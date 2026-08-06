@@ -946,6 +946,7 @@ def main() -> int:
                     f"Agent 批次 {batch_number} 启动失败：{exc}；{delay} 秒后重试。",
                 )
             else:
+                clear_agent_retry(state)
                 batch = {
                     "batch": batch_number,
                     "generation_from": consumed + 1,
