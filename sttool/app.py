@@ -541,6 +541,7 @@ class LauncherApp(tk.Tk):
             model=self.default_model,
             api_key=self.api_key,
             github_token=self.github_token,
+            workflow_settings=self.workflow_settings,
             github_token_saver=self._save_github_token_from_tool,
         )
 

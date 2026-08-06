@@ -36,7 +36,7 @@ from .models import (
     normalize_provider,
 )
 from .registry import DEFAULT_ST_ROOT, availability
-from .workflow_settings import normalized_reasoning_effort
+from .workflow_settings import normalize_workflow_settings, normalized_reasoning_effort
 
 
 CREATE_NEW_CONSOLE = getattr(subprocess, "CREATE_NEW_CONSOLE", 0)
@@ -863,6 +863,7 @@ class RuntimeManager:
         model: str,
         api_key: str = "",
         github_token: str = "",
+        workflow_settings: dict[str, object] | None = None,
     ) -> StandaloneRunState:
         tool = self.tools.get(tool_id)
         if tool is None:
@@ -881,6 +882,7 @@ class RuntimeManager:
         with self._launch_lock():
             run_id, run_dir = self._new_standalone_dir(tool.tool_id)
             (run_dir / "results").mkdir()
+            workflow = normalize_workflow_settings(workflow_settings)
             context = {
                 **target_values(normalized_target),
                 "run_dir": str(run_dir),
@@ -893,6 +895,17 @@ class RuntimeManager:
                 "model": model.strip(),
                 "api_key": api_key.strip(),
                 "github_token": github_token.strip(),
+                "fscan_port_threads": str(workflow["fscan_port_threads"]),
+                "fscan_skip_poc_flag": "-nopoc" if workflow["fscan_skip_poc"] else "",
+                "fscan_skip_brute_flag": "-nobr" if workflow["fscan_skip_brute"] else "",
+                "semantic_threads": str(workflow["semantic_threads"]),
+                "semantic_max_depth": str(workflow["semantic_max_depth"]),
+                "semantic_max_rate": str(workflow["semantic_max_rate"]),
+                "semantic_dirsearch_flag": (
+                    "--run-dirsearch"
+                    if workflow["semantic_run_dirsearch"]
+                    else "--no-dirsearch"
+                ),
             }
             executable = self._format(tool.executable, context)
             result_context = {

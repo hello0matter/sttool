@@ -32,6 +32,7 @@ class ToolDetailsDialog(tk.Toplevel):
         model: str = "",
         api_key: str = "",
         github_token: str = "",
+        workflow_settings: dict[str, object] | None = None,
         github_token_saver: Callable[[str], None] | None = None,
     ) -> None:
         super().__init__(parent)
@@ -48,6 +49,7 @@ class ToolDetailsDialog(tk.Toplevel):
         self.model = model
         self.api_key = api_key
         self.github_token = github_token
+        self.workflow_settings = workflow_settings
         self.github_token_saver = github_token_saver
         self.github_token_var = tk.StringVar(value=github_token)
         self.show_github_token_var = tk.BooleanVar(value=False)
@@ -318,6 +320,7 @@ class ToolDetailsDialog(tk.Toplevel):
             model=self.model,
             api_key=self.api_key,
             github_token=self.github_token,
+            workflow_settings=self.workflow_settings,
         )
 
     def _open_result(self) -> None:

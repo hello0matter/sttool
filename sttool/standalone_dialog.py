@@ -21,6 +21,7 @@ class StandaloneToolDialog(tk.Toplevel):
         model: str = "",
         api_key: str = "",
         github_token: str = "",
+        workflow_settings: dict[str, object] | None = None,
     ) -> None:
         super().__init__(parent)
         self.manager = manager
@@ -29,6 +30,7 @@ class StandaloneToolDialog(tk.Toplevel):
         self.model = model
         self.api_key = api_key
         self.github_token = github_token
+        self.workflow_settings = workflow_settings
         self.state: StandaloneRunState | None = None
         self.result_by_item: dict[str, Path] = {}
 
@@ -135,6 +137,7 @@ class StandaloneToolDialog(tk.Toplevel):
                     self.model,
                     self.api_key,
                     self.github_token,
+                    self.workflow_settings,
                 )
                 error = ""
             except (LaunchError, OSError, ValueError) as exc:

@@ -660,7 +660,12 @@ class RuntimeTests(unittest.TestCase):
                 category="test",
                 description="test",
                 executable=sys.executable,
-                args=("--target", "{target}", "--output", "{run_dir}/results/out.txt"),
+                args=(
+                    "--target", "{target}",
+                    "-t", "{fscan_port_threads}",
+                    "{fscan_skip_poc_flag}", "{fscan_skip_brute_flag}",
+                    "--output", "{run_dir}/results/out.txt",
+                ),
                 cwd="{run_dir}",
                 sends_requests=True,
                 result_paths=("{run_dir}/results/out.txt",),
@@ -674,6 +679,12 @@ class RuntimeTests(unittest.TestCase):
                     authorization_confirmed=True,
                     api_base_url="https://gateway.example/v1",
                     model="tool-model",
+                    workflow_settings={
+                        "work_mode": "balanced",
+                        "fscan_port_threads": 123,
+                        "fscan_skip_poc": True,
+                        "fscan_skip_brute": True,
+                    },
                 )
 
                 run_dir = Path(state.run_dir)
@@ -693,6 +704,11 @@ class RuntimeTests(unittest.TestCase):
                     [str(run_dir / "results" / "out.txt")],
                 )
                 self.assertEqual(state.status, "running")
+                command = manager.spawn_commands["one_shot"]
+                self.assertIn("123", command)
+                self.assertIn("-nopoc", command)
+                self.assertIn("-nobr", command)
+                self.assertNotIn("", command)
             finally:
                 manager.cleanup()
 
