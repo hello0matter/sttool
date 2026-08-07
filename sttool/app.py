@@ -234,7 +234,6 @@ class LauncherApp(tk.Tk):
 
         self.project_var = tk.StringVar()
         self.target_var = tk.StringVar()
-        self.scope_var = tk.StringVar(value="*")
         self.provider_var = tk.StringVar(value="codexx")
         self.auth_var = tk.BooleanVar(value=False)
 
@@ -253,10 +252,35 @@ class LauncherApp(tk.Tk):
         project_box.grid(row=2, column=0, sticky="ew", pady=(0, 14))
         project_box.bind("<<ComboboxSelected>>", lambda _event: self._load_project())
         self._field(left, 3, "主要目标（URL、域名或 IP）", self.target_var)
-        self._field(left, 5, "授权范围", self.scope_var)
+        ttk.Label(
+            left,
+            text="授权范围（每行一个域名、IP、CIDR 或 URL；必须是已获授权范围）",
+            style="Panel.TLabel",
+        ).grid(row=5, column=0, sticky="w", pady=(0, 5))
+        scope_row = ttk.Frame(left)
+        scope_row.grid(row=6, column=0, sticky="ew", pady=(0, 14))
+        scope_row.columnconfigure(0, weight=1)
+        self.scope_text = tk.Text(
+            scope_row,
+            width=1,
+            height=4,
+            wrap="word",
+            relief="solid",
+            borderwidth=1,
+            font=("Microsoft YaHei UI", 10),
+        )
+        self.scope_text.grid(row=0, column=0, sticky="ew")
+        scope_scroll = ttk.Scrollbar(
+            scope_row, orient="vertical", command=self.scope_text.yview
+        )
+        scope_scroll.grid(row=0, column=1, sticky="ns")
+        self.scope_text.configure(yscrollcommand=scope_scroll.set)
+        ttk.Button(
+            scope_row, text="使用主要目标", command=self._use_target_as_scope
+        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
 
         ttk.Label(left, text="补充任务", style="Panel.TLabel").grid(
-            row=7, column=0, sticky="w", pady=(0, 5)
+            row=8, column=0, sticky="w", pady=(0, 5)
         )
         self.prompt_text = tk.Text(
             left,
@@ -267,8 +291,8 @@ class LauncherApp(tk.Tk):
             borderwidth=1,
             font=("Microsoft YaHei UI", 10),
         )
-        self.prompt_text.grid(row=8, column=0, sticky="nsew", pady=(0, 12))
-        left.rowconfigure(8, weight=1)
+        self.prompt_text.grid(row=9, column=0, sticky="nsew", pady=(0, 12))
+        left.rowconfigure(9, weight=1)
         ttk.Checkbutton(
             left,
             text="我确认已获得上述范围的安全测试授权",
@@ -706,7 +730,7 @@ class LauncherApp(tk.Tk):
         return LaunchRequest(
             project_name=self.project_var.get(),
             target=self.target_var.get(),
-            scope=self.scope_var.get(),
+            scope=self.scope_text.get("1.0", "end").strip(),
             provider=provider,
             model=self.default_model,
             selected_tools=selected,
@@ -993,7 +1017,8 @@ class LauncherApp(tk.Tk):
     def _apply_project_value(self, value: dict[str, object]) -> None:
         self.project_var.set(str(value.get("name", self.project_var.get())))
         self.target_var.set(str(value.get("target", "")))
-        self.scope_var.set(str(value.get("scope") or "*"))
+        self.scope_text.delete("1.0", "end")
+        self.scope_text.insert("1.0", str(value.get("scope") or ""))
         try:
             schema_version = int(value.get("schema_version", 1))
         except (TypeError, ValueError):
@@ -1026,6 +1051,12 @@ class LauncherApp(tk.Tk):
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
         self.auth_var.set(False)
+
+    def _use_target_as_scope(self) -> None:
+        target = self.target_var.get().strip()
+        self.scope_text.delete("1.0", "end")
+        if target:
+            self.scope_text.insert("1.0", target)
 
     def _load_project(self) -> None:
         value = self.manager.load_project(self.project_var.get())

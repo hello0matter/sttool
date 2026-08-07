@@ -1256,8 +1256,9 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn("cve_triage.md", prompt)
                 self.assertIn("evidence/poc_review/<CVE>/", prompt)
                 self.assertIn("不要只输出可能漏洞清单", prompt)
-                self.assertIn("由这些 IPv4 资产派生的对应 /24 网段", prompt)
-                self.assertIn("不得扩展到无关互联网目标", prompt)
+                self.assertIn("只能处理上面列出的域名、IP、CIDR 或 URL", prompt)
+                self.assertIn("不能因为资产发现自动扩大授权范围", prompt)
+                self.assertNotIn("派生的对应 /24 网段", prompt)
                 self.assertTrue((Path(state.run_dir) / "run.json").is_file())
                 project = json.loads(
                     (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
