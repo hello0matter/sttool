@@ -34,9 +34,14 @@ class AISettingsDialog(tk.Toplevel):
     ) -> None:
         super().__init__(parent)
         self.result: dict[str, object] | None = None
+        self._scroll_canvases: list[tk.Canvas] = []
         self.title("STTool 全局设置")
-        self.geometry("860x860")
-        self.minsize(780, 760)
+        screen_width = self.winfo_screenwidth()
+        screen_height = self.winfo_screenheight()
+        window_width = min(900, max(screen_width - 80, 700))
+        window_height = min(860, max(screen_height - 120, 560))
+        self.geometry(f"{window_width}x{window_height}")
+        self.minsize(min(700, window_width), min(560, window_height))
         self.transient(parent)
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
@@ -104,6 +109,9 @@ class AISettingsDialog(tk.Toplevel):
         )
 
         self.bind("<Escape>", lambda _event: self.destroy())
+        self.bind("<MouseWheel>", self._scroll_with_mousewheel, add="+")
+        self.bind("<Button-4>", self._scroll_with_mousewheel, add="+")
+        self.bind("<Button-5>", self._scroll_with_mousewheel, add="+")
         self.update_idletasks()
         x = parent.winfo_rootx() + max(
             20, (parent.winfo_width() - self.winfo_width()) // 2
@@ -114,11 +122,90 @@ class AISettingsDialog(tk.Toplevel):
         self.geometry(f"+{x}+{y}")
         self.grab_set()
 
+    def _add_scrollable_tab(
+        self, notebook: ttk.Notebook, title: str
+    ) -> ttk.Frame:
+        page = ttk.Frame(notebook)
+        page.rowconfigure(0, weight=1)
+        page.columnconfigure(0, weight=1)
+        notebook.add(page, text=title)
+
+        background = ttk.Style(self).lookup("TFrame", "background") or "#f0f0f0"
+        canvas = tk.Canvas(
+            page,
+            background=background,
+            borderwidth=0,
+            highlightthickness=0,
+        )
+        scrollbar = ttk.Scrollbar(page, orient="vertical", command=canvas.yview)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.grid(row=0, column=0, sticky="nsew")
+        scrollbar.grid(row=0, column=1, sticky="ns")
+
+        tab = ttk.Frame(canvas, padding=18)
+        window = canvas.create_window((0, 0), window=tab, anchor="nw")
+        tab.bind(
+            "<Configure>",
+            lambda _event, target=canvas: target.configure(
+                scrollregion=target.bbox("all")
+            ),
+        )
+        canvas.bind(
+            "<Configure>",
+            lambda event, target=canvas, item=window: target.itemconfigure(
+                item, width=event.width
+            ),
+        )
+        self._scroll_canvases.append(canvas)
+        return tab
+
+    def _scroll_with_mousewheel(self, event: tk.Event) -> str | None:
+        widget = self.winfo_containing(event.x_root, event.y_root)
+        canvas = next(
+            (
+                item
+                for item in self._scroll_canvases
+                if widget is not None and self._is_descendant(widget, item)
+            ),
+            None,
+        )
+        if canvas is None:
+            return None
+        top, bottom = canvas.yview()
+        if top <= 0.0 and bottom >= 1.0:
+            return None
+        if getattr(event, "num", None) == 4:
+            units = -3
+        elif getattr(event, "num", None) == 5:
+            units = 3
+        else:
+            delta = int(getattr(event, "delta", 0))
+            units = -3 if delta > 0 else 3 if delta < 0 else 0
+        if units:
+            canvas.yview_scroll(units, "units")
+            return "break"
+        return None
+
+    @staticmethod
+    def _is_descendant(widget: tk.Misc, ancestor: tk.Misc) -> bool:
+        current: tk.Misc | None = widget
+        while current is not None:
+            if current == ancestor:
+                return True
+            parent_name = current.winfo_parent()
+            if not parent_name:
+                break
+            try:
+                current = current._nametowidget(parent_name)
+            except KeyError:
+                break
+        return False
+
     def _build_agent_tab(self, notebook: ttk.Notebook, provider: str) -> None:
         is_claude = provider == "claude"
-        tab = ttk.Frame(notebook, padding=18)
+        title = "Claude CLI" if is_claude else "Codex / Codexx CLI"
+        tab = self._add_scrollable_tab(notebook, title)
         tab.columnconfigure(0, weight=1)
-        notebook.add(tab, text="Claude CLI" if is_claude else "Codex / Codexx CLI")
         if is_claude:
             description = (
                 "Claude 是外部 CLI 执行器，不是 STTool 内置 AI。可单独配置模型、"
@@ -180,9 +267,8 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=0, column=1, padx=(8, 0))
 
     def _build_shared_ai_tab(self, notebook: ttk.Notebook) -> None:
-        tab = ttk.Frame(notebook, padding=18)
+        tab = self._add_scrollable_tab(notebook, "工具协作 AI")
         tab.columnconfigure(0, weight=1)
-        notebook.add(tab, text="工具协作 AI")
         ttk.Label(
             tab,
             text=(
@@ -211,9 +297,8 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=0, column=1, padx=(8, 0))
 
     def _build_vulnerability_intel_tab(self, notebook: ttk.Notebook) -> None:
-        tab = ttk.Frame(notebook, padding=18)
+        tab = self._add_scrollable_tab(notebook, "漏洞情报")
         tab.columnconfigure(0, weight=1)
-        notebook.add(tab, text="漏洞情报")
         ttk.Label(
             tab,
             text=(
@@ -246,9 +331,8 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=3, column=0, sticky="w", pady=(12, 0))
 
     def _build_workflow_tab(self, notebook: ttk.Notebook) -> None:
-        tab = ttk.Frame(notebook, padding=18)
+        tab = self._add_scrollable_tab(notebook, "调度方式")
         tab.columnconfigure(1, weight=1)
-        notebook.add(tab, text="调度方式")
         ttk.Label(
             tab,
             text=(
