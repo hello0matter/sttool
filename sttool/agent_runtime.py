@@ -44,13 +44,13 @@ def prepare_one_shot_agent_launch(token_path: Path) -> str:
         "$actualLaunchToken = [System.IO.File]::ReadAllText($claimedLaunchTokenPath).Trim()\n"
         "if ($actualLaunchToken -ne $expectedLaunchToken) {\n"
         "Remove-Item -LiteralPath $claimedLaunchTokenPath -Force -ErrorAction SilentlyContinue\n"
-        "Write-Host 'STTool ignored an invalid Agent launch token.'\n"
+        "Write-Host 'STTool ignored an invalid AI launch token.'\n"
         "exit 0\n"
         "}\n"
         "Remove-Item -LiteralPath $claimedLaunchTokenPath -Force -ErrorAction SilentlyContinue\n"
         "} catch {\n"
         "Remove-Item -LiteralPath $claimedLaunchTokenPath -Force -ErrorAction SilentlyContinue\n"
-        "Write-Host 'STTool ignored a stale or duplicate Agent launch.'\n"
+        "Write-Host 'STTool ignored a stale or duplicate AI launch.'\n"
         "exit 0\n"
         "}\n"
     )
@@ -72,7 +72,7 @@ def invalidate_agent_launch_scripts(run_dir: str | Path) -> int:
     stub = (
         "\ufeff"
         f"{marker}\n"
-        "Write-Host 'This STTool Agent launch was disabled because the project is stopped.'\n"
+        "Write-Host 'This STTool AI launch was disabled because the project is stopped.'\n"
         "exit 0\n"
     )
     for script_path in scripts:

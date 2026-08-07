@@ -67,16 +67,16 @@ class RunLogDialogTests(unittest.TestCase):
                 run_dir, AI_BATCH_COMPONENT_ID
             )
 
-            self.assertIn("AI 执行批次 2", rendered)
+            self.assertIn("AI 执行记录 2", rendered)
             self.assertIn("执行器：Claude CLI", rendered)
-            self.assertIn("资产代次：3 至 5", rendered)
+            self.assertIn("资产更新轮次：3 至 5", rendered)
             self.assertIn("退出码：1", rendered)
             self.assertIn("错误摘要：模型线路不可用", rendered)
             self.assertEqual(len(sources["states"]), 2)
             self.assertEqual(sources["workdir"], run_dir / "agent_batches")
             self.assertEqual(status, "failed")
             self.assertEqual(stage, "agent_batch")
-            self.assertIn("共 2 个批次", detail)
+            self.assertIn("共 2 次 AI 执行", detail)
 
     def test_ai_batch_status_file_completes_batch_without_shell_exit_file(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -114,7 +114,7 @@ class RunLogDialogTests(unittest.TestCase):
             self.assertIn("结束时间：2026-08-06T18:29:05+08:00", rendered)
             self.assertEqual(status, "completed")
             self.assertEqual(stage, "agent_batch")
-            self.assertIn("第 3 批", detail)
+            self.assertIn("第 3 次", detail)
 
     def test_log_refresh_follows_when_already_at_bottom(self) -> None:
         self.assertEqual(
@@ -302,7 +302,7 @@ class RunLogDialogTests(unittest.TestCase):
                     {
                         "status": "running",
                         "stage": "agent_running",
-                        "detail": "资产代次 3；Agent 已消费到 2；当前 Agent PID 123",
+                        "detail": "资产更新轮次 3；AI 已处理到第 2 轮；当前 AI 进程 PID 123",
                     }
                 ),
                 encoding="utf-8",
@@ -311,7 +311,7 @@ class RunLogDialogTests(unittest.TestCase):
             batch.write_text(json.dumps({"batch": 1}), encoding="utf-8")
 
             sources = component_paths(
-                run_dir, "project_coordinator", "项目增量调度/Agent"
+                run_dir, "project_coordinator", "自动调度与 AI 执行"
             )
 
             self.assertEqual(
@@ -319,7 +319,7 @@ class RunLogDialogTests(unittest.TestCase):
                 (
                     "running",
                     "agent_running",
-                    "资产代次 3；Agent 已消费到 2；当前 Agent PID 123",
+                    "资产更新轮次 3；AI 已处理到第 2 轮；当前 AI 进程 PID 123",
                 ),
             )
             self.assertEqual(
@@ -333,18 +333,18 @@ class RunLogDialogTests(unittest.TestCase):
     def test_project_coordinator_activity_filter_owns_asset_bus_events(self) -> None:
         content = "\n".join(
             (
-                "[1] 资产总线接收 fscan 新增资产 5 条，代次 2。",
+                "[1] 资产汇总队列接收 fscan 新增资产 5 条，资产更新轮次为 2。",
                 "[2] fscan 基础探测已结束。",
-                "[3] Agent 批次 1 已启动。",
+                "[3] 第 1 次 AI 执行已启动。",
             )
         )
 
         filtered = filter_component_activity(
-            content, "project_coordinator", "项目增量调度/Agent"
+            content, "project_coordinator", "自动调度与 AI 执行"
         )
 
-        self.assertIn("资产总线", filtered)
-        self.assertIn("Agent 批次", filtered)
+        self.assertIn("资产汇总队列", filtered)
+        self.assertIn("AI 执行", filtered)
         self.assertNotIn("fscan 基础探测已结束", filtered)
 
 

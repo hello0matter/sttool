@@ -21,7 +21,7 @@ class HelpTextTests(unittest.TestCase):
             "工具协作 AI",
             "外部 CLI 执行器",
             "Windows DPAPI",
-            "AI 执行批次",
+            "AI 执行记录",
             "fscan POC 检测",
             "增量调度如何工作",
             "metadata_only",

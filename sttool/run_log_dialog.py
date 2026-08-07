@@ -16,7 +16,7 @@ COORDINATOR_MANAGED_COMPONENTS = {
     "find_gh_poc": "GitHub PoC 候选搜索",
 }
 AI_BATCH_COMPONENT_ID = "ai_execution_batches"
-AI_BATCH_COMPONENT_NAME = "AI 执行批次"
+AI_BATCH_COMPONENT_NAME = "AI 执行记录"
 
 
 LOG_BOTTOM_THRESHOLD = 0.98
@@ -61,11 +61,18 @@ def filter_component_activity(
         "vulnx": ("vulnx", "漏洞情报"),
         "find_gh_poc": ("find-gh-poc", "GitHub PoC"),
         "tscan_plus": ("TscanPlus",),
-        "project_coordinator": ("项目增量调度器", "资产总线", "Agent 批次"),
+        "project_coordinator": (
+            "自动调度器",
+            "项目增量调度器",
+            "资产汇总队列",
+            "资产总线",
+            "AI 第",
+            "Agent 批次",
+        ),
         "ai_agent": ("本地 Agent", "Codex Agent", "Codexx", "Codex", "Claude"),
         AI_BATCH_COMPONENT_ID: (
             "Agent 批次",
-            "AI 执行批次",
+            "AI 执行记录",
             "Codex",
             "Codexx",
             "Claude",
@@ -82,7 +89,15 @@ def filter_component_activity(
         ("find_gh_poc", ("find-gh-poc", "github poc")),
         (
             "project_coordinator",
-            ("项目增量调度器", "资产总线", "agent 批次"),
+            (
+                "自动调度器",
+                "项目增量调度器",
+                "资产汇总队列",
+                "资产总线",
+                "ai 第",
+                "ai 执行",
+                "agent 批次",
+            ),
         ),
         ("fscan", ("fscan",)),
         ("ai_agent", ("本地 agent", "codex agent", "codexx", "codex", "claude")),
@@ -371,7 +386,7 @@ def render_component_state(path: Path, component_id: str) -> str:
         batch_number = state.get("batch") or path.parent.name
         lines.extend(
             [
-                f"【AI 执行批次 {batch_number}】",
+                f"【AI 执行记录 {batch_number}】",
                 f"执行器：{provider_name}",
                 f"状态：{human_status(status)}",
                 f"模型：{state.get('agent_model') or 'CLI 默认'}",
@@ -385,7 +400,7 @@ def render_component_state(path: Path, component_id: str) -> str:
         generation_to = state.get("generation_to")
         if generation_from is not None or generation_to is not None:
             lines.append(
-                f"资产代次：{generation_from if generation_from is not None else '-'}"
+                f"资产更新轮次：{generation_from if generation_from is not None else '-'}"
                 f" 至 {generation_to if generation_to is not None else '-'}"
             )
         if exit_code is not None:
@@ -555,7 +570,7 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
     if component_id == AI_BATCH_COMPONENT_ID:
         batches = sorted((run_dir / "agent_batches").glob("*/batch.json"))
         if not batches:
-            return "pending", "waiting_first_batch", "尚未启动 AI 执行批次"
+            return "pending", "waiting_first_batch", "尚未启动 AI 执行"
         latest = batches[-1]
         state = load_json(latest)
         exit_state = load_json(latest.with_name("agent_exit.json"))
@@ -567,7 +582,7 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             status = str(batch_status.get("status") or status)
         batch_number = state.get("batch") or latest.parent.name
         provider = str(state.get("provider") or "未知执行器")
-        detail = f"共 {len(batches)} 个批次；最新为第 {batch_number} 批，执行器 {provider}"
+        detail = f"共 {len(batches)} 次 AI 执行；最新为第 {batch_number} 次，执行器 {provider}"
         error = str(
             exit_state.get("error")
             or batch_status.get("error")
@@ -588,8 +603,8 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             if state.get("monitoring_asset_bus"):
                 generation = int(state.get("asset_bus_generation") or 0)
                 detail = (
-                    "资产工作流已完成；正在监听资产总线并执行增量对撞；"
-                    f"已消费代次 {generation}；窗口仍保留"
+                    "资产工作流已完成；正在监听资产汇总队列并处理新增资产；"
+                    f"AI 已处理到第 {generation} 轮；窗口仍保留"
                 )
             else:
                 detail = "资产工作流已完成；AssetCommander 窗口仍保留，可继续手动操作"
@@ -1053,7 +1068,7 @@ class RunLogDialog(tk.Toplevel):
             ("asset_commander", "AssetCommander"),
             ("semantic_dirscan", "AI 路径发现"),
             ("tscan_plus", "TscanPlus"),
-            ("project_coordinator", "项目增量调度/Agent"),
+            ("project_coordinator", "自动调度与 AI 执行"),
             (AI_BATCH_COMPONENT_ID, AI_BATCH_COMPONENT_NAME),
         ):
             status, stage, detail = component_display_runtime(
@@ -1128,7 +1143,7 @@ class RunLogDialog(tk.Toplevel):
                         stage,
                         detail,
                         "-",
-                        "由协调器按资产代次执行",
+                        "由自动调度器按资产更新轮次执行",
                     ),
                 )
             if AI_BATCH_COMPONENT_ID not in process_ids:
@@ -1145,7 +1160,7 @@ class RunLogDialog(tk.Toplevel):
                         stage,
                         detail,
                         "-",
-                        "由协调器按资产代次启动",
+                        "由自动调度器按资产更新轮次启动",
                     ),
                 )
             for iid in selected:

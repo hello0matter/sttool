@@ -1215,7 +1215,7 @@ class RuntimeTests(unittest.TestCase):
                 activity = (Path(state.run_dir) / "activity.log").read_text(
                     encoding="utf-8"
                 )
-                self.assertIn("Intel；等待资产稳定后按代次执行", activity)
+                self.assertIn("Intel；等待资产稳定后按更新轮次执行", activity)
             finally:
                 manager.cleanup()
 
@@ -1294,7 +1294,7 @@ class RuntimeTests(unittest.TestCase):
                     encoding="utf-8"
                 )
                 self.assertIn("工具已启动：Dummy", activity)
-                self.assertIn("项目增量调度器已启动", activity)
+                self.assertIn("自动调度器已启动", activity)
                 self.assertIn("运行实例启动完成", activity)
                 self.assertNotIn("sk-runtime-only", activity)
             finally:

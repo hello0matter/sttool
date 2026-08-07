@@ -85,7 +85,7 @@ def write_agent_batch_script(
         "[Console]::OutputEncoding = $utf8\n"
         "$OutputEncoding = $utf8\n"
         f"{launch_guard}"
-        f"$Host.UI.RawUI.WindowTitle = {powershell_quote(f'STTool {project_name} - {provider} 增量批次')}\n"
+        f"$Host.UI.RawUI.WindowTitle = {powershell_quote(f'STTool {project_name} - {provider} AI 执行')}\n"
         f"$agentPidPath = {powershell_quote(str(pid_path))}\n"
         f"$agentExitPath = {powershell_quote(str(exit_path))}\n"
         "Set-Content -LiteralPath $agentPidPath -Value $PID -Encoding ascii\n"
@@ -149,7 +149,7 @@ def launch_agent_batch(
                 agent_base_url,
                 terminal_window,
             )
-        raise RuntimeError(f"Agent 批次 {batch_number} 正在由另一个协调器启动") from exc
+        raise RuntimeError(f"AI 执行记录 {batch_number} 正在由另一个自动调度器启动") from exc
     os.close(descriptor)
     try:
         existing_pid = 0
@@ -191,7 +191,7 @@ def launch_agent_batch(
                 window_name,
                 "new-tab",
                 "--title",
-                f"STTool {project_name} - {provider} 批次 {batch_number}",
+                f"STTool {project_name} - {provider} AI 执行 {batch_number}",
                 "--startingDirectory",
                 str(run_dir),
                 shell,
@@ -260,6 +260,6 @@ def launch_agent_batch(
             if not terminal and launcher.poll() is not None:
                 break
             time.sleep(0.1)
-        raise RuntimeError("Agent 终端已启动，但未检测到批次 PowerShell 进程")
+        raise RuntimeError("AI 终端已启动，但未检测到执行 PowerShell 进程")
     finally:
         launch_lock.unlink(missing_ok=True)

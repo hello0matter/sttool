@@ -235,7 +235,7 @@ class AISettingsDialog(tk.Toplevel):
         ttk.Label(tab, text=description, wraplength=660).grid(
             row=0, column=0, sticky="w", pady=(0, 18)
         )
-        ttk.Label(tab, text="Agent 模型（可编辑，留空使用 CLI 默认）").grid(
+        ttk.Label(tab, text="AI 模型（可编辑，留空使用 CLI 默认）").grid(
             row=1, column=0, sticky="w", pady=(0, 5)
         )
         ttk.Combobox(tab, textvariable=model_var, values=models).grid(
@@ -303,7 +303,7 @@ class AISettingsDialog(tk.Toplevel):
             tab,
             text=(
                 "find-gh-poc 使用 GitHub GraphQL API，建议配置个人访问 Token。Token 仅通过"
-                "协调器进程环境和一次性临时文件传递，不进入项目、日志或命令行。"
+                "自动调度器进程环境和一次性临时文件传递，不进入项目、日志或命令行。"
             ),
             wraplength=660,
         ).grid(row=0, column=0, sticky="w", pady=(0, 16))
@@ -336,8 +336,8 @@ class AISettingsDialog(tk.Toplevel):
         ttk.Label(
             tab,
             text=(
-                "预设会调整 Agent 的启动时机和增量节奏；下列细项会真正传给项目协调器。"
-                "平衡模式默认等待 AssetCommander 与 fscan 完成后再启动 Agent。"
+                "预设会调整 AI 的启动时机和新增资产处理节奏；下列细项会真正传给自动调度器。"
+                "平衡模式默认等待 AssetCommander 与 fscan 完成后再启动 AI。"
             ),
             wraplength=660,
         ).grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 16))
@@ -354,7 +354,7 @@ class AISettingsDialog(tk.Toplevel):
         checks = ttk.LabelFrame(tab, text="启动条件", padding=12)
         checks.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 14))
         ttk.Checkbutton(
-            checks, text="自动启动增量 Agent", variable=self.auto_agent_var
+            checks, text="自动启动新增资产的 AI 执行", variable=self.auto_agent_var
         ).grid(row=0, column=0, sticky="w", pady=3)
         ttk.Checkbutton(
             checks,
@@ -363,7 +363,7 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=1, column=0, sticky="w", pady=3)
         ttk.Checkbutton(
             checks,
-            text="等待 fscan 完整输出后再启动 Agent",
+            text="等待 fscan 完整输出后再启动 AI",
             variable=self.wait_fscan_var,
         ).grid(row=2, column=0, sticky="w", pady=3)
         ttk.Checkbutton(
@@ -379,22 +379,22 @@ class AISettingsDialog(tk.Toplevel):
             tuning, 0, "资产稳定等待（秒）", self.settle_seconds_var, 1, 600
         )
         self._spin_field(
-            tuning, 1, "单项目最大 Agent 批次数", self.max_batches_var, 1, 100
+            tuning, 1, "单项目最大 AI 执行次数", self.max_batches_var, 1, 100
         )
         self._spin_field(
-            tuning, 2, "协调器刷新间隔（秒）", self.poll_seconds_var, 1, 60
+            tuning, 2, "自动调度器刷新间隔（秒）", self.poll_seconds_var, 1, 60
         )
         self._spin_field(
             tuning,
             3,
-            "Agent 停滞告警（分钟，0=关闭）",
+            "AI 停滞告警（分钟，0=关闭）",
             self.agent_stall_warn_minutes_var,
             0,
             1440,
         )
         ttk.Label(
             tuning,
-            text="仅记录疑似等待模型/CLI 的状态，不会自动结束或重启 Agent。",
+            text="仅记录疑似等待模型/CLI 的状态，不会自动结束或重启 AI。",
             wraplength=680,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 

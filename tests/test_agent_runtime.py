@@ -57,7 +57,7 @@ class AgentRuntimeTests(unittest.TestCase):
             token_path = batch_dir / "launch.token"
             self.assertTrue(token_path.is_file())
             self.assertIn("Move-Item -LiteralPath $launchTokenPath", script)
-            self.assertIn("stale or duplicate Agent launch", script)
+            self.assertIn("stale or duplicate AI launch", script)
 
     def test_batch_scripts_map_private_key_without_embedding_a_secret(self) -> None:
         with TemporaryDirectory() as temporary:

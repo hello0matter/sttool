@@ -94,22 +94,22 @@ def coordinator_wait_stage(
     retry_seconds: int = 0,
 ) -> tuple[str, str]:
     if active_pid > 0:
-        return "agent_running", f"Agent PID {active_pid} 正在处理当前批次"
+        return "agent_running", f"AI 进程 PID {active_pid} 正在处理当前资产"
     if not auto_agent:
-        return "manual_agent", "自动 Agent 已关闭；资产与摘要仍会持续更新"
+        return "manual_agent", "自动 AI 执行已关闭；资产与摘要仍会持续更新"
     if not retry_ready:
-        return "agent_backoff", f"Agent 启动失败，等待 {max(retry_seconds, 1)} 秒后自动重试"
+        return "agent_backoff", f"AI 启动失败，等待 {max(retry_seconds, 1)} 秒后自动重试"
     if not asset_ready:
         return "waiting_asset_commander", "等待 AssetCommander 完成资产收集与碰撞"
     if not fscan_ready:
         return "waiting_fscan", "等待 fscan 执行结束并保存完整输出"
     if not quiet:
-        return "settling_assets", "资产仍在增长，等待安静窗口后再启动 Agent"
+        return "settling_assets", "资产仍在增长，等待稳定后再启动 AI"
     if batch_count >= max(max_batches, 1):
-        return "batch_limit_reached", "Agent 批次已达上限，保留新增资产供人工处理"
+        return "batch_limit_reached", "AI 执行次数已达上限，保留新增资产供人工处理"
     if generation <= consumed_generation:
-        return "waiting_new_assets", "当前资产已全部消费，等待工具回传新资产"
-    return "ready_for_agent", "资产已稳定，准备启动下一个 Agent 批次"
+        return "waiting_new_assets", "当前资产已全部处理，等待工具回传新资产"
+    return "ready_for_agent", "资产已稳定，准备启动下一次 AI 执行"
 
 
 def mark_agent_batch_finished(
@@ -233,7 +233,7 @@ def tracked_process_alive(pid: int, creation_token: int, run_dir: Path) -> bool:
         return process_creation_token(pid) == creation_token
     legacy = ProcessRecord(
         component_id="agent_batch",
-        name="Agent batch",
+        name="AI execution",
         pid=pid,
         command=[],
         cwd=str(run_dir),
@@ -344,7 +344,7 @@ def render_risk_summary(
         "",
         f"- 生成时间：{now_text()}",
         f"- 阶段：{stage}",
-        f"- 资产代次：{bus.generation}",
+        f"- 资产更新轮次：{bus.generation}",
         f"- Web URL：{len(bundle['urls'])}",
         f"- IP：{len(bundle['ips'])}",
         f"- 域名：{len(bundle['domains'])}",
@@ -545,8 +545,8 @@ def build_batch_prompt(
     return (
         base_prompt.rstrip()
         + "\n\n"
-        + f"## STTool Agent 批次 {batch_number}：{label}\n\n"
-        + f"统一资产总线：{run_dir / 'tool_data' / 'asset_bus' / 'assets.json'}\n"
+        + f"## STTool AI 执行记录 {batch_number}：{label}\n\n"
+        + f"资产汇总队列文件：{run_dir / 'tool_data' / 'asset_bus' / 'assets.json'}\n"
         + f"fscan 完整输出：{run_dir / 'results' / 'fscan.txt'}\n"
         + f"项目风险摘要：{run_dir / 'risk_summary.md'}\n"
         + f"漏洞情报与 PoC 候选：{run_dir / 'vulnerability_intel.md'}\n"
@@ -560,7 +560,7 @@ def build_batch_prompt(
         + ("\n".join(f"- {value}" for value in urls) or "- 本批次没有新增 Web URL")
         + "\n\n### 本批次非 Web 端点\n"
         + ("\n".join(f"- {value}" for value in endpoints) or "- 本批次没有新增端点")
-        + "\n\n后续若工具发现新资产，只处理尚未消费的增量，不要重复启动相同高并发任务。\n"
+        + "\n\n后续若工具发现新资产，只处理 AI 尚未处理的新增内容，不要重复启动相同高并发任务。\n"
     )
 
 
@@ -575,7 +575,7 @@ def parse_bool(value: str) -> bool:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
-        description="STTool project asset bus and delayed Agent coordinator"
+        description="STTool project asset queue and delayed AI scheduler"
     )
     parser.add_argument("--run-dir", type=Path, required=True)
     parser.add_argument("--target", required=True)
@@ -623,7 +623,7 @@ def main() -> int:
     owner_path = state_path.parent / "owner.json"
     owner = claim_coordinator_owner(owner_path, run_dir)
     if owner is None:
-        append_activity(run_dir, "检测到同一运行实例已有项目协调器，本次重复启动已退出。")
+        append_activity(run_dir, "检测到同一运行实例已有自动调度器，本次重复启动已退出。")
         return 0
     atexit.register(release_coordinator_owner, owner_path, owner)
     bus = AssetBus(bus_path, args.scope)
@@ -669,12 +669,12 @@ def main() -> int:
         if args.wait_fscan:
             wait_items.append("fscan")
         wait_text = "、".join(wait_items) or "资产稳定窗口"
-        launch_policy = f"Agent 将等待 {wait_text} 后自动启动"
+        launch_policy = f"AI 将等待 {wait_text} 后自动启动"
     else:
-        launch_policy = "自动 Agent 已关闭，只持续汇总资产与风险摘要"
+        launch_policy = "自动 AI 执行已关闭，只持续汇总资产与风险摘要"
     append_activity(
         run_dir,
-        f"项目增量调度器已启动：{launch_policy}；资产稳定等待 {args.settle_seconds:g} 秒，最多 {args.max_agent_batches} 个批次。",
+        f"自动调度器已启动：{launch_policy}；资产稳定等待 {args.settle_seconds:g} 秒，最多 {args.max_agent_batches} 次 AI 执行。",
     )
 
     sources = {
@@ -724,7 +724,7 @@ def main() -> int:
                 last_new = time.monotonic()
                 append_activity(
                     run_dir,
-                    f"资产总线接收 {source} 新增资产 {added} 条，代次 {bus.generation}。",
+                    f"资产汇总队列接收 {source} 新增资产 {added} 条，资产更新轮次为 {bus.generation}。",
                 )
         if changed:
             state["asset_generation"] = bus.generation
@@ -780,10 +780,10 @@ def main() -> int:
             active_pid = 0
             if finished and finished.get("status") == "failed":
                 exit_code = int(finished.get("exit_code") or 1)
-                delay = schedule_agent_retry(state, f"Agent 退出码 {exit_code}")
+                delay = schedule_agent_retry(state, f"AI 退出码 {exit_code}")
                 append_activity(
                     run_dir,
-                    f"Agent 批次 PID {finished_pid} 启动或运行失败（退出码 {exit_code}），{delay} 秒后重试当前资产。",
+                    f"AI 执行记录 PID {finished_pid} 启动或运行失败（退出码 {exit_code}），{delay} 秒后重试当前资产。",
                 )
             else:
                 generation_to = int((finished or {}).get("generation_to") or 0)
@@ -793,7 +793,7 @@ def main() -> int:
                 clear_agent_retry(state)
                 append_activity(
                     run_dir,
-                    f"Agent 批次 PID {finished_pid} 已结束并记录完成，等待新资产。",
+                    f"AI 执行记录 PID {finished_pid} 已结束并记录完成，等待新资产。",
                 )
 
         active_pid = int(state.get("active_agent_pid") or 0)
@@ -819,9 +819,9 @@ def main() -> int:
                     state["agent_stall_warning_at"] = now_text()
                     append_activity(
                         run_dir,
-                        f"Agent 批次 {active_pid} 疑似停滞：批次文件已有 "
+                        f"AI 执行记录 {active_pid} 疑似停滞：执行文件已有 "
                         f"{elapsed_minutes:.1f} 分钟未更新；保留进程不自动结束，"
-                        "请检查模型/CLI 网络与 Agent 窗口。",
+                        "请检查模型/CLI 网络与 AI 窗口。",
                     )
         else:
             state["agent_stall_status"] = "disabled"
@@ -894,7 +894,7 @@ def main() -> int:
                     atomic_json_write(state_path, state)
                     append_activity(
                         run_dir,
-                        f"开始生成漏洞情报，处理资产代次 {bus.generation}；PoC 仅收集元数据，不自动执行。",
+                        f"开始生成漏洞情报，处理资产更新第 {bus.generation} 轮；PoC 仅收集元数据，不自动执行。",
                     )
                     try:
                         intel = generate_vulnerability_intel(
@@ -909,7 +909,7 @@ def main() -> int:
                         state["vuln_intel_candidates"] = 0
                         append_activity(
                             run_dir,
-                            f"漏洞情报生成失败：{type(exc).__name__}: {exc}；Agent 仍按已有证据继续。",
+                            f"漏洞情报生成失败：{type(exc).__name__}: {exc}；AI 仍按已有证据继续。",
                         )
                     else:
                         state["vuln_intel_status"] = str(
@@ -979,7 +979,7 @@ def main() -> int:
                 delay = schedule_agent_retry(state, error)
                 append_activity(
                     run_dir,
-                    f"Agent 批次 {batch_number} 启动失败：{exc}；{delay} 秒后重试。",
+                    f"AI 执行记录 {batch_number} 启动失败：{exc}；{delay} 秒后重试。",
                 )
             else:
                 clear_agent_retry(state)
@@ -1008,7 +1008,7 @@ def main() -> int:
                 state.pop("agent_launch_error", None)
                 append_activity(
                     run_dir,
-                    f"资产已稳定，启动 Agent 批次 {batch_number}，消费资产代次 {consumed + 1}-{bus.generation}。",
+                    f"资产已稳定，启动第 {batch_number} 次 AI 执行，处理资产更新第 {consumed + 1}-{bus.generation} 轮。",
                 )
 
         retry_not_before = float(state.get("agent_retry_not_before") or 0)
@@ -1041,10 +1041,10 @@ def main() -> int:
                 "wait_for_fscan": args.wait_fscan,
             },
             detail=(
-                f"{stage_detail}；资产代次 {bus.generation}；"
-                f"Agent 已消费到 {state.get('agent_consumed_generation', 0)}；"
-                f"当前 Agent PID {state.get('active_agent_pid', 0) or '无'}；"
-                f"Agent 健康状态 {state.get('agent_stall_status', 'disabled')}"
+                f"{stage_detail}；资产更新轮次 {bus.generation}；"
+                f"AI 已处理到第 {state.get('agent_consumed_generation', 0)} 轮；"
+                f"当前 AI 进程 PID {state.get('active_agent_pid', 0) or '无'}；"
+                f"AI 运行状态 {state.get('agent_stall_status', 'disabled')}"
             ),
             updated_at=now_text(),
         )

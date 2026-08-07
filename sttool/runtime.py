@@ -431,11 +431,11 @@ class RuntimeManager:
         if not 1 <= request.asset_settle_seconds <= 600:
             raise LaunchError("资产稳定等待必须在 1-600 秒之间")
         if not 1 <= request.max_agent_batches <= 100:
-            raise LaunchError("Agent 批次数必须在 1-100 之间")
+            raise LaunchError("AI 执行次数必须在 1-100 之间")
         if not 1 <= request.coordinator_poll_seconds <= 60:
-            raise LaunchError("协调器刷新间隔必须在 1-60 秒之间")
+            raise LaunchError("自动调度器刷新间隔必须在 1-60 秒之间")
         if not 0 <= request.agent_stall_warn_minutes <= 1440:
-            raise LaunchError("Agent 停滞告警必须在 0-1440 分钟之间，0 表示关闭")
+            raise LaunchError("AI 停滞告警必须在 0-1440 分钟之间，0 表示关闭")
 
         selected: list[ToolDefinition] = []
         for tool_id in request.selected_tools:
@@ -777,7 +777,7 @@ class RuntimeManager:
             if shell_pid and pid_alive(shell_pid):
                 return ProcessRecord(
                     component_id="ai_agent",
-                    name=f"{self.provider_display_name(request.provider)} Agent",
+                    name=f"{self.provider_display_name(request.provider)} AI 执行器",
                     pid=shell_pid,
                     command=command,
                     cwd=str(run_dir),
@@ -787,7 +787,7 @@ class RuntimeManager:
             time.sleep(0.1)
         if launcher.poll() is None:
             terminate_process_tree(launcher.pid)
-        raise LaunchError("Windows Terminal 已启动，但未检测到 Agent 终端进程")
+        raise LaunchError("Windows Terminal 已启动，但未检测到 AI 终端进程")
 
     def _spawn(
         self,
@@ -1034,7 +1034,7 @@ class RuntimeManager:
                 )
             append_activity(
                 run_dir,
-                "未找到 Windows Terminal（wt.exe），本次 Agent 回退到系统控制台。",
+                "未找到 Windows Terminal（wt.exe），本次 AI 执行回退到系统控制台。",
             )
         shell = shutil.which("pwsh.exe") or "powershell.exe"
         environment = (
@@ -1044,7 +1044,7 @@ class RuntimeManager:
         )
         return self._spawn(
             "ai_agent",
-            f"{self.provider_display_name(request.provider)} Agent",
+            f"{self.provider_display_name(request.provider)} AI 执行器",
             shell,
             ["-NoLogo", "-ExecutionPolicy", "Bypass", "-File", str(script)],
             str(run_dir),
@@ -1086,7 +1086,7 @@ class RuntimeManager:
                 find_gh_poc_path = Path(find_gh_poc_tool.args[executable_index])
         return self._spawn(
             "project_coordinator",
-            "项目增量调度与 Agent",
+            "自动调度与 AI 执行",
             str(python),
             [
                 "-m",
@@ -1335,9 +1335,9 @@ class RuntimeManager:
             (run_dir / "agent_prompt.txt").write_text(prompt, encoding="utf-8")
             self._agent_script(request, run_dir)
             if request.auto_agent:
-                policy_text = "Agent 将按本次工作模式由增量调度器自动启动"
+                policy_text = "AI 将按本次工作模式由自动调度器自动启动"
             else:
-                policy_text = "本次已关闭自动 Agent，协调器只持续汇总资产和摘要"
+                policy_text = "本次已关闭自动 AI 执行，自动调度器只持续汇总资产和摘要"
             append_activity(
                 run_dir,
                 f"项目配置已保存；先启动资产与检测工具；{policy_text}。",
@@ -1349,7 +1349,7 @@ class RuntimeManager:
                     if tool.coordinator_managed:
                         append_activity(
                             run_dir,
-                            f"工具已加入协调器阶段：{tool.name}；等待资产稳定后按代次执行。",
+                            f"工具已加入自动调度阶段：{tool.name}；等待资产稳定后按更新轮次执行。",
                         )
                         continue
                     append_activity(run_dir, f"正在启动工具：{tool.name}。")
@@ -1359,12 +1359,12 @@ class RuntimeManager:
                         run_dir, f"工具已启动：{tool.name}，PID {record.pid}。"
                     )
 
-                append_activity(run_dir, "正在启动项目增量调度器。")
+                append_activity(run_dir, "正在启动自动调度器。")
                 coordinator_record = self._launch_coordinator(request, run_dir)
                 started.append(coordinator_record)
                 append_activity(
                     run_dir,
-                    f"项目增量调度器已启动，PID {coordinator_record.pid}；Agent 等待资产稳定。",
+                    f"自动调度器已启动，PID {coordinator_record.pid}；AI 等待资产稳定。",
                 )
                 state.processes = started
                 atomic_json_write(state_path, state.to_dict())
@@ -1510,8 +1510,8 @@ class RuntimeManager:
             ]
             restart_coordinator = "project_coordinator" not in active_components
             if not recoverable and not restart_coordinator:
-                append_activity(run_dir, "恢复取消：常驻工具和 Agent 仍在运行。")
-                raise LaunchError("没有需要恢复的组件；常驻工具和 Agent 仍在运行")
+                append_activity(run_dir, "恢复取消：常驻工具和 AI 执行器仍在运行。")
+                raise LaunchError("没有需要恢复的组件；常驻工具和 AI 执行器仍在运行")
 
             started: list[ProcessRecord] = []
             try:
@@ -1523,12 +1523,12 @@ class RuntimeManager:
                         run_dir, f"工具已恢复：{tool.name}，PID {record.pid}。"
                     )
                 if restart_coordinator:
-                    append_activity(run_dir, "正在恢复项目增量调度器。")
+                    append_activity(run_dir, "正在恢复自动调度器。")
                     record = self._launch_coordinator(request, run_dir)
                     started.append(record)
                     append_activity(
                         run_dir,
-                        f"项目增量调度器已恢复，PID {record.pid}；将按断点继续资产与 Agent 批次。",
+                        f"自动调度器已恢复，PID {record.pid}；将按断点继续处理资产与 AI 执行。",
                     )
                 time.sleep(0.8)
                 dead = [
@@ -1644,7 +1644,7 @@ class RuntimeManager:
         if invalidated_scripts:
             append_activity(
                 state.run_dir,
-                f"已作废 {invalidated_scripts} 个 Agent 启动脚本，防止停止后被延迟执行。",
+                f"已作废 {invalidated_scripts} 个 AI 启动脚本，防止停止后被延迟执行。",
             )
         coordinator = read_json_file(
             run_dir / "tool_data" / "coordinator" / "state.json"
@@ -1661,7 +1661,7 @@ class RuntimeManager:
         managed_pids.extend(agent_shell_pids_for_run(run_dir))
         for pid in dict.fromkeys(managed_pids):
             if process_belongs_to_run(pid, run_dir):
-                append_activity(state.run_dir, f"正在停止 Agent 关联进程树，PID {pid}。")
+                append_activity(state.run_dir, f"正在停止 AI 关联进程树，PID {pid}。")
                 terminate_agent_process_tree(pid)
             elif pid_alive(pid):
                 append_activity(

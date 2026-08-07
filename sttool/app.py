@@ -417,7 +417,7 @@ class LauncherApp(tk.Tk):
         headings = {
             "project": "项目",
             "run_id": "实例",
-            "provider": "Agent",
+            "provider": "AI 执行器",
             "status": "状态",
             "components": "组件",
             "created": "启动时间",
@@ -887,7 +887,7 @@ class LauncherApp(tk.Tk):
             "恢复实例",
             (
                 f"将在原运行目录恢复 {state.project_name} / {state.run_id}。\n\n"
-                "会重新启动已结束的常驻 GUI 工具和 AI Agent；"
+                "会重新启动已结束的常驻 GUI 工具和 AI 执行器；"
                 "fscan、nuclei 等一次性任务不会自动重复。\n"
                 "已有结果、断点和工程文件都会保留。\n\n"
                 f"授权范围仍为：{state.scope}\n"
