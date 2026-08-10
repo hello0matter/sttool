@@ -32,6 +32,16 @@ WORK_MODE_PRESETS: Final = {
         "semantic_max_depth": 2,
         "semantic_run_dirsearch": True,
         "semantic_max_rate": 0,
+        "allow_cidr_expansion": False,
+        "new_asset_approval_mode": "countdown_accept",
+        "new_asset_countdown_seconds": 10,
+        "new_asset_popup_enabled": True,
+        "new_asset_popup_topmost": True,
+        "workload_approval_mode": "countdown_accept",
+        "workload_countdown_seconds": 10,
+        "workload_agent_threshold": 50,
+        "workload_popup_enabled": True,
+        "workload_popup_topmost": True,
     },
     "fast": {
         "auto_agent": True,
@@ -49,6 +59,16 @@ WORK_MODE_PRESETS: Final = {
         "semantic_max_depth": 1,
         "semantic_run_dirsearch": False,
         "semantic_max_rate": 0,
+        "allow_cidr_expansion": False,
+        "new_asset_approval_mode": "countdown_accept",
+        "new_asset_countdown_seconds": 10,
+        "new_asset_popup_enabled": True,
+        "new_asset_popup_topmost": True,
+        "workload_approval_mode": "countdown_accept",
+        "workload_countdown_seconds": 10,
+        "workload_agent_threshold": 50,
+        "workload_popup_enabled": True,
+        "workload_popup_topmost": True,
     },
     "deep": {
         "auto_agent": True,
@@ -66,6 +86,16 @@ WORK_MODE_PRESETS: Final = {
         "semantic_max_depth": 3,
         "semantic_run_dirsearch": True,
         "semantic_max_rate": 0,
+        "allow_cidr_expansion": False,
+        "new_asset_approval_mode": "countdown_accept",
+        "new_asset_countdown_seconds": 10,
+        "new_asset_popup_enabled": True,
+        "new_asset_popup_topmost": True,
+        "workload_approval_mode": "countdown_accept",
+        "workload_countdown_seconds": 10,
+        "workload_agent_threshold": 50,
+        "workload_popup_enabled": True,
+        "workload_popup_topmost": True,
     },
     "cautious": {
         "auto_agent": True,
@@ -83,6 +113,16 @@ WORK_MODE_PRESETS: Final = {
         "semantic_max_depth": 1,
         "semantic_run_dirsearch": False,
         "semantic_max_rate": 50,
+        "allow_cidr_expansion": False,
+        "new_asset_approval_mode": "countdown_accept",
+        "new_asset_countdown_seconds": 10,
+        "new_asset_popup_enabled": True,
+        "new_asset_popup_topmost": True,
+        "workload_approval_mode": "countdown_accept",
+        "workload_countdown_seconds": 10,
+        "workload_agent_threshold": 50,
+        "workload_popup_enabled": True,
+        "workload_popup_topmost": True,
     },
     "manual": {
         "auto_agent": False,
@@ -100,6 +140,16 @@ WORK_MODE_PRESETS: Final = {
         "semantic_max_depth": 1,
         "semantic_run_dirsearch": False,
         "semantic_max_rate": 50,
+        "allow_cidr_expansion": False,
+        "new_asset_approval_mode": "countdown_accept",
+        "new_asset_countdown_seconds": 10,
+        "new_asset_popup_enabled": True,
+        "new_asset_popup_topmost": True,
+        "workload_approval_mode": "countdown_accept",
+        "workload_countdown_seconds": 10,
+        "workload_agent_threshold": 50,
+        "workload_popup_enabled": True,
+        "workload_popup_topmost": True,
     },
 }
 
@@ -132,6 +182,11 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
         "fscan_skip_poc",
         "fscan_skip_brute",
         "semantic_run_dirsearch",
+        "allow_cidr_expansion",
+        "new_asset_popup_enabled",
+        "new_asset_popup_topmost",
+        "workload_popup_enabled",
+        "workload_popup_topmost",
     )
     int_ranges = {
         "asset_settle_seconds": (1, 600),
@@ -142,7 +197,26 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
         "semantic_threads": (1, 200),
         "semantic_max_depth": (0, 10),
         "semantic_max_rate": (0, 10000),
+        "new_asset_countdown_seconds": (3, 3600),
+        "workload_countdown_seconds": (3, 3600),
+        "workload_agent_threshold": (1, 100000),
     }
+    approval_mode = str(
+        source.get("new_asset_approval_mode")
+        or result.get("new_asset_approval_mode")
+        or "countdown_accept"
+    ).strip().lower()
+    if approval_mode not in {"automatic", "countdown_accept", "countdown_reject", "manual"}:
+        approval_mode = "countdown_accept"
+    result["new_asset_approval_mode"] = approval_mode
+    workload_mode = str(
+        source.get("workload_approval_mode")
+        or result.get("workload_approval_mode")
+        or "countdown_accept"
+    ).strip().lower()
+    if workload_mode not in {"automatic", "countdown_accept", "countdown_reject", "manual"}:
+        workload_mode = "countdown_accept"
+    result["workload_approval_mode"] = workload_mode
     customized = requested_mode == "custom"
     for field in bool_fields:
         if field in source:
@@ -159,6 +233,8 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
             continue
         result[field] = max(minimum, min(maximum, number))
         customized = customized or result[field] != WORK_MODE_PRESETS[base_mode][field]
+    customized = customized or result["new_asset_approval_mode"] != WORK_MODE_PRESETS[base_mode]["new_asset_approval_mode"]
+    customized = customized or result["workload_approval_mode"] != WORK_MODE_PRESETS[base_mode]["workload_approval_mode"]
     if customized:
         result["work_mode"] = "custom"
     return result

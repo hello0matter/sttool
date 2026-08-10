@@ -519,6 +519,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("--sttool-export", tool.args)
         self.assertIn("--sttool-asset-bus", tool.args)
         self.assertIn("{run_dir}/tool_data/asset_bus/assets.json", tool.args)
+        self.assertIn("--sttool-allow-cidr-expansion", tool.args)
+        self.assertIn("{allow_cidr_expansion}", tool.args)
         self.assertIn("{scope}", tool.args)
         self.assertTrue(
             any(path.endswith("asset_workflow.py") for path in tool.required_paths)
@@ -539,6 +541,8 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("--sttool-asset-export", tool.args)
         self.assertIn("--sttool-asset-state", tool.args)
         self.assertIn("--sttool-fscan-result", tool.args)
+        self.assertIn("--sttool-asset-bus", tool.args)
+        self.assertIn("{run_dir}/tool_data/asset_bus/assets.json", tool.args)
         self.assertIn("--sttool-auto-start", tool.args)
         self.assertTrue(
             any(path.endswith("sttool_bridge.py") for path in tool.required_paths)
@@ -1430,16 +1434,24 @@ class RuntimeTests(unittest.TestCase):
                 semantic_max_depth=4,
                 semantic_run_dirsearch=False,
                 semantic_max_rate=25,
+                allow_cidr_expansion=True,
             )
             state = manager.start(request)
             try:
                 project = json.loads(
                     (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(project["schema_version"], 5)
+                self.assertEqual(project["schema_version"], 7)
                 self.assertEqual(project["fscan_port_threads"], 321)
                 self.assertEqual(project["semantic_threads"], 17)
                 self.assertEqual(project["semantic_max_depth"], 4)
+                self.assertTrue(project["allow_cidr_expansion"])
+                self.assertEqual(project["workload_agent_threshold"], 50)
+                self.assertEqual(project["workload_approval_mode"], "countdown_accept")
+                context = manager._run_context(
+                    request, root / "project", Path(state.run_dir)
+                )
+                self.assertEqual(context["allow_cidr_expansion"], "true")
                 self.assertFalse(project["semantic_run_dirsearch"])
                 self.assertEqual(project["semantic_max_rate"], 25)
                 self.assertEqual(project["agent_model"], "gpt-5.6-sol")
@@ -1492,10 +1504,31 @@ class RuntimeTests(unittest.TestCase):
                 self.assertNotIn("agent-secret-token", launch_script)
                 self.assertNotIn("shared-secret-token", launch_script)
                 self.assertIn("--wait-asset-commander", coordinator)
+                self.assertIn("--workload-approval-mode", coordinator)
+                self.assertEqual(
+                    coordinator[coordinator.index("--workload-approval-mode") + 1],
+                    "countdown_accept",
+                )
+                self.assertIn("--workload-agent-threshold", coordinator)
+                self.assertEqual(
+                    coordinator[coordinator.index("--workload-agent-threshold") + 1],
+                    "50",
+                )
                 self.assertIn("false", coordinator)
                 self.assertIn("--vulnx", coordinator)
                 self.assertIn(str((root / "vulnx" / "vulnx.exe").resolve()), coordinator)
                 self.assertIn("--find-gh-poc", coordinator)
+                self.assertIn("--fscan-exe", coordinator)
+                self.assertIn(
+                    str((root / "fscan" / "fscan.exe").resolve()), coordinator
+                )
+                self.assertIn("--fscan-port-threads", coordinator)
+                self.assertEqual(
+                    coordinator[
+                        coordinator.index("--fscan-port-threads") + 1
+                    ],
+                    "321",
+                )
             finally:
                 manager.cleanup()
 

@@ -436,6 +436,28 @@ class RuntimeManager:
             raise LaunchError("自动调度器刷新间隔必须在 1-60 秒之间")
         if not 0 <= request.agent_stall_warn_minutes <= 1440:
             raise LaunchError("AI 停滞告警必须在 0-1440 分钟之间，0 表示关闭")
+        if request.new_asset_approval_mode not in {
+            "automatic",
+            "countdown_accept",
+            "countdown_reject",
+            "manual",
+        }:
+            raise LaunchError("新增资产准入策略无效")
+        if not 3 <= request.new_asset_countdown_seconds <= 3600:
+            raise LaunchError("新增资产确认倒计时必须在 3-3600 秒之间")
+        if request.workload_approval_mode not in {
+            "automatic",
+            "countdown_accept",
+            "countdown_reject",
+            "manual",
+        }:
+            raise LaunchError("\u5927\u6279\u91cf Agent \u51c6\u5165\u7b56\u7565\u65e0\u6548")
+        if not 3 <= request.workload_countdown_seconds <= 3600:
+            raise LaunchError("\u5927\u6279\u91cf Agent \u786e\u8ba4\u5012\u8ba1\u65f6\u5fc5\u987b\u5728 3-3600 \u79d2\u4e4b\u95f4")
+        if not 1 <= request.workload_agent_threshold <= 100000:
+            raise LaunchError("Agent \u6279\u91cf\u51c6\u5165\u9608\u503c\u5fc5\u987b\u5728 1-100000 \u6761\u4e4b\u95f4")
+        if request.workload_approval_mode == "manual" and not request.workload_popup_enabled:
+            raise LaunchError("\u624b\u52a8\u51c6\u5165\u6a21\u5f0f\u5fc5\u987b\u5f00\u542f\u6279\u91cf Agent \u5f39\u7a97\uff0c\u5426\u5219\u65e0\u6cd5\u5b8c\u6210\u786e\u8ba4")
 
         selected: list[ToolDefinition] = []
         for tool_id in request.selected_tools:
@@ -835,6 +857,7 @@ class RuntimeManager:
             "model": request.model.strip(),
             "api_key": request.api_key.strip(),
             "fscan_port_threads": str(request.fscan_port_threads),
+            "allow_cidr_expansion": str(request.allow_cidr_expansion).lower(),
             "fscan_skip_poc_flag": "-nopoc" if request.fscan_skip_poc else "",
             "fscan_skip_brute_flag": "-nobr" if request.fscan_skip_brute else "",
             "semantic_threads": str(request.semantic_threads),
@@ -1084,6 +1107,12 @@ class RuntimeManager:
             executable_index = find_gh_poc_tool.args.index("--exe") + 1
             if executable_index < len(find_gh_poc_tool.args):
                 find_gh_poc_path = Path(find_gh_poc_tool.args[executable_index])
+        fscan_tool = self.tools.get("fscan")
+        fscan_path = (
+            Path(fscan_tool.executable)
+            if fscan_tool is not None
+            else self.st_root / "fscan" / "fscan.exe"
+        )
         return self._spawn(
             "project_coordinator",
             "自动调度与 AI 执行",
@@ -1127,6 +1156,26 @@ class RuntimeManager:
                 str(vulnx_path),
                 "--find-gh-poc",
                 str(find_gh_poc_path),
+                "--fscan-exe",
+                str(fscan_path),
+                "--fscan-port-threads",
+                str(request.fscan_port_threads),
+                "--allow-cidr-expansion",
+                str(request.allow_cidr_expansion).lower(),
+                "--new-asset-approval-mode",
+                request.new_asset_approval_mode,
+                "--new-asset-countdown-seconds",
+                str(request.new_asset_countdown_seconds),
+                "--workload-approval-mode",
+                request.workload_approval_mode,
+                "--workload-countdown-seconds",
+                str(request.workload_countdown_seconds),
+                "--workload-agent-threshold",
+                str(request.workload_agent_threshold),
+                "--workload-popup-enabled",
+                str(request.workload_popup_enabled).lower(),
+                "--workload-popup-topmost",
+                str(request.workload_popup_topmost).lower(),
                 "--terminal-window",
                 agent_terminal_window_name(self.app_dir),
             ],
@@ -1243,6 +1292,45 @@ class RuntimeManager:
                 semantic_max_rate=int(
                     value.get("semantic_max_rate", state.semantic_max_rate)
                 ),
+                allow_cidr_expansion=bool(
+                    value.get("allow_cidr_expansion", state.allow_cidr_expansion)
+                ),
+                new_asset_approval_mode=str(
+                    value.get(
+                        "new_asset_approval_mode", state.new_asset_approval_mode
+                    )
+                ),
+                new_asset_countdown_seconds=int(
+                    value.get(
+                        "new_asset_countdown_seconds",
+                        state.new_asset_countdown_seconds,
+                    )
+                ),
+                new_asset_popup_enabled=bool(
+                    value.get(
+                        "new_asset_popup_enabled", state.new_asset_popup_enabled
+                    )
+                ),
+                new_asset_popup_topmost=bool(
+                    value.get(
+                        "new_asset_popup_topmost", state.new_asset_popup_topmost
+                    )
+                ),
+                workload_approval_mode=str(
+                    value.get("workload_approval_mode", state.workload_approval_mode)
+                ),
+                workload_countdown_seconds=int(
+                    value.get("workload_countdown_seconds", state.workload_countdown_seconds)
+                ),
+                workload_agent_threshold=int(
+                    value.get("workload_agent_threshold", state.workload_agent_threshold)
+                ),
+                workload_popup_enabled=bool(
+                    value.get("workload_popup_enabled", state.workload_popup_enabled)
+                ),
+                workload_popup_topmost=bool(
+                    value.get("workload_popup_topmost", state.workload_popup_topmost)
+                ),
             ),
             skipped_tools,
         )
@@ -1290,12 +1378,17 @@ class RuntimeManager:
                 semantic_max_depth=request.semantic_max_depth,
                 semantic_run_dirsearch=request.semantic_run_dirsearch,
                 semantic_max_rate=request.semantic_max_rate,
+                allow_cidr_expansion=request.allow_cidr_expansion,
+                new_asset_approval_mode=request.new_asset_approval_mode,
+                new_asset_countdown_seconds=request.new_asset_countdown_seconds,
+                new_asset_popup_enabled=request.new_asset_popup_enabled,
+                new_asset_popup_topmost=request.new_asset_popup_topmost,
             )
             state_path = run_dir / "run.json"
             atomic_json_write(state_path, state.to_dict())
 
             project_value = {
-                "schema_version": 5,
+                "schema_version": 7,
                 "name": request.project_name.strip(),
                 "target": request.target.strip(),
                 "scope": request.scope.strip(),
@@ -1321,6 +1414,16 @@ class RuntimeManager:
                 "semantic_max_depth": request.semantic_max_depth,
                 "semantic_run_dirsearch": request.semantic_run_dirsearch,
                 "semantic_max_rate": request.semantic_max_rate,
+                "allow_cidr_expansion": request.allow_cidr_expansion,
+                "new_asset_approval_mode": request.new_asset_approval_mode,
+                "new_asset_countdown_seconds": request.new_asset_countdown_seconds,
+                "new_asset_popup_enabled": request.new_asset_popup_enabled,
+                "new_asset_popup_topmost": request.new_asset_popup_topmost,
+                "workload_approval_mode": request.workload_approval_mode,
+                "workload_countdown_seconds": request.workload_countdown_seconds,
+                "workload_agent_threshold": request.workload_agent_threshold,
+                "workload_popup_enabled": request.workload_popup_enabled,
+                "workload_popup_topmost": request.workload_popup_topmost,
                 "selected_tools": list(request.selected_tools),
                 "user_prompt": request.user_prompt,
                 "last_run_id": run_id,
@@ -1454,6 +1557,16 @@ class RuntimeManager:
                     semantic_max_depth=request.semantic_max_depth,
                     semantic_run_dirsearch=request.semantic_run_dirsearch,
                     semantic_max_rate=request.semantic_max_rate,
+                    allow_cidr_expansion=request.allow_cidr_expansion,
+                    new_asset_approval_mode=request.new_asset_approval_mode,
+                    new_asset_countdown_seconds=request.new_asset_countdown_seconds,
+                    new_asset_popup_enabled=request.new_asset_popup_enabled,
+                    new_asset_popup_topmost=request.new_asset_popup_topmost,
+                    workload_approval_mode=request.workload_approval_mode,
+                    workload_countdown_seconds=request.workload_countdown_seconds,
+                    workload_agent_threshold=request.workload_agent_threshold,
+                    workload_popup_enabled=request.workload_popup_enabled,
+                    workload_popup_topmost=request.workload_popup_topmost,
                 )
             recovery_request = LaunchRequest(
                 project_name=request.project_name,
@@ -1491,6 +1604,11 @@ class RuntimeManager:
                 semantic_max_depth=request.semantic_max_depth,
                 semantic_run_dirsearch=request.semantic_run_dirsearch,
                 semantic_max_rate=request.semantic_max_rate,
+                allow_cidr_expansion=request.allow_cidr_expansion,
+                new_asset_approval_mode=request.new_asset_approval_mode,
+                new_asset_countdown_seconds=request.new_asset_countdown_seconds,
+                new_asset_popup_enabled=request.new_asset_popup_enabled,
+                new_asset_popup_topmost=request.new_asset_popup_topmost,
             )
             selected = self.preflight(
                 recovery_request, allow_legacy_url_project=True
@@ -1582,6 +1700,16 @@ class RuntimeManager:
             state.semantic_max_depth = request.semantic_max_depth
             state.semantic_run_dirsearch = request.semantic_run_dirsearch
             state.semantic_max_rate = request.semantic_max_rate
+            state.allow_cidr_expansion = request.allow_cidr_expansion
+            state.new_asset_approval_mode = request.new_asset_approval_mode
+            state.new_asset_countdown_seconds = request.new_asset_countdown_seconds
+            state.new_asset_popup_enabled = request.new_asset_popup_enabled
+            state.new_asset_popup_topmost = request.new_asset_popup_topmost
+            state.workload_approval_mode = request.workload_approval_mode
+            state.workload_countdown_seconds = request.workload_countdown_seconds
+            state.workload_agent_threshold = request.workload_agent_threshold
+            state.workload_popup_enabled = request.workload_popup_enabled
+            state.workload_popup_topmost = request.workload_popup_topmost
             state.selected_tools = list(request.selected_tools)
             state.recovery_count += 1
             state.recovery_history.append(

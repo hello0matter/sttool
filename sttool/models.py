@@ -77,6 +77,16 @@ class LaunchRequest:
     semantic_max_depth: int = 2
     semantic_run_dirsearch: bool = True
     semantic_max_rate: int = 0
+    allow_cidr_expansion: bool = False
+    new_asset_approval_mode: str = "countdown_accept"
+    new_asset_countdown_seconds: int = 10
+    new_asset_popup_enabled: bool = True
+    new_asset_popup_topmost: bool = True
+    workload_approval_mode: str = "countdown_accept"
+    workload_countdown_seconds: int = 10
+    workload_agent_threshold: int = 50
+    workload_popup_enabled: bool = True
+    workload_popup_topmost: bool = True
 
 
 @dataclass
@@ -154,10 +164,20 @@ class RunState:
     semantic_max_depth: int = 2
     semantic_run_dirsearch: bool = True
     semantic_max_rate: int = 0
+    allow_cidr_expansion: bool = False
+    new_asset_approval_mode: str = "countdown_accept"
+    new_asset_countdown_seconds: int = 10
+    new_asset_popup_enabled: bool = True
+    new_asset_popup_topmost: bool = True
+    workload_approval_mode: str = "countdown_accept"
+    workload_countdown_seconds: int = 10
+    workload_agent_threshold: int = 50
+    workload_popup_enabled: bool = True
+    workload_popup_topmost: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
-        value["schema_version"] = 5
+        value["schema_version"] = 7
         return value
 
     @classmethod

@@ -14,6 +14,7 @@ from .agent_runtime import (
     prompt_file_bootstrap,
 )
 from .asset_bus import atomic_json_write, now_text
+from .report_integrity import snapshot_report_files
 from .runtime import (
     agent_base_url_environment,
     agent_cli_arguments,
@@ -166,6 +167,7 @@ def launch_agent_batch(
             return existing_pid, batch_dir
         (batch_dir / "agent.pid").unlink(missing_ok=True)
         (batch_dir / "prompt.txt").write_text(prompt, encoding="utf-8")
+        snapshot_report_files(run_dir, batch_dir)
         script, pid_path = write_agent_batch_script(
             batch_dir,
             provider,

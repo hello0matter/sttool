@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import json
 import os
@@ -14,11 +14,41 @@ from sttool.asset_bus import (
     extract_tscan_assets,
     normalize_asset,
     parse_asset_export,
+    parse_dirsearch_output,
     parse_fscan_output,
+    read_json,
 )
 
 
 class AssetBusTests(unittest.TestCase):
+    def test_dirsearch_parser_suppresses_repeated_soft_200_wall(self) -> None:
+        repeated = "\n".join(
+            f"200    32KB  https://app.example.test/fake-{index}"
+            for index in range(20)
+        )
+        content = (
+            repeated
+            + "\n401   143B   https://app.example.test/models"
+            + "\n401   143B   https://app.example.test/responses"
+            + "\n200    15B   https://app.example.test/health"
+        )
+
+        self.assertEqual(
+            parse_dirsearch_output(content),
+            [
+                ("https://app.example.test/models", "url"),
+                ("https://app.example.test/responses", "url"),
+                ("https://app.example.test/health", "url"),
+            ],
+        )
+
+    def test_read_json_accepts_utf8_bom_status_files(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "batch_status.json"
+            path.write_text('{"status":"completed"}', encoding="utf-8-sig")
+
+            self.assertEqual(read_json(path), {"status": "completed"})
+
     def test_atomic_json_write_retries_transient_replace_lock(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "assets.json"
@@ -58,6 +88,30 @@ https://app.example.com:443/login 200
         self.assertIn(("10.17.200.115", "ip"), assets)
         self.assertIn(("http://10.17.200.115:81/", "url"), assets)
         self.assertIn(("https://app.example.com/login", "url"), assets)
+
+    def test_fscan_parser_does_not_promote_non_web_services_to_urls(self) -> None:
+        content = """http://192.0.2.10:6379
+http://192.0.2.11:25
+http://192.0.2.12:1080
+"""
+
+        assets = parse_fscan_output(content)
+
+        self.assertNotIn(("http://192.0.2.10:6379/", "url"), assets)
+        self.assertNotIn(("http://192.0.2.11:25/", "url"), assets)
+        self.assertNotIn(("http://192.0.2.12:1080/", "url"), assets)
+        self.assertIn(("192.0.2.10:6379", "endpoint"), assets)
+        self.assertIn(("192.0.2.11:25", "endpoint"), assets)
+        self.assertIn(("192.0.2.12:1080", "endpoint"), assets)
+
+    def test_fscan_parser_keeps_nonstandard_web_port_with_http_evidence(self) -> None:
+        assets = parse_fscan_output(
+            "http://192.0.2.20:8005 [403 Forbidden] 403 kngx/1.10.2\n"
+            "http://192.0.2.21:6379 [200 OK] 200 nginx\n"
+        )
+
+        self.assertIn(("http://192.0.2.20:8005/", "url"), assets)
+        self.assertIn(("http://192.0.2.21:6379/", "url"), assets)
 
     def test_bus_deduplicates_and_tracks_generation_and_sources(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -108,6 +162,135 @@ https://app.example.com:443/login 200
             self.assertEqual(added, 1)
             self.assertEqual(bus.bundle()["domains"], [])
             self.assertEqual(bus.value["rejected"][0]["value"], "boengg.top")
+
+    def test_rejected_assets_are_deduplicated_by_value_type_and_source(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(Path(temporary) / "assets.json", "example.com")
+
+            bus.ingest([('outside.test', 'domain')], "tscan")
+            bus.ingest([('outside.test', 'domain')], "tscan")
+            bus.ingest([('outside.test', 'domain')], "asset_commander")
+
+            self.assertEqual(len(bus.value["rejected"]), 2)
+            self.assertEqual(
+                {item["source"] for item in bus.value["rejected"]},
+                {"tscan", "asset_commander"},
+            )
+
+    def test_stale_bus_reloads_disk_before_writing(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            first = AssetBus(path, "example.com")
+            first.ingest([("outside.test", "domain")], "tscan")
+            stale = AssetBus(path, "example.com")
+
+            value = json.loads(path.read_text(encoding="utf-8"))
+            value["rejected"] = []
+            atomic_json_write(path, value)
+
+            stale.ingest([("app.example.com", "domain")], "semantic_dirscan")
+
+            current = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(current["rejected"], [])
+            self.assertEqual(
+                [item["value"] for item in current["assets"]],
+                ["app.example.com"],
+            )
+
+    def test_wildcard_scope_queues_new_host_instead_of_auto_authorizing_it(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(
+                Path(temporary) / "assets.json",
+                "*",
+                "https://app.example.com/",
+                approval_mode="countdown_accept",
+                allow_cidr_expansion=False,
+            )
+            bus.ingest([("https://app.example.com/", "url")], "project_target")
+
+            added = bus.ingest(
+                [("api.other.test", "domain")], "asset_commander"
+            )
+
+            self.assertEqual(added, 0)
+            self.assertEqual(bus.bundle()["urls"], ["https://app.example.com/"])
+            self.assertEqual(bus.pending_count, 1)
+            self.assertEqual(bus.value["pending"][0]["reason"], "new_host")
+
+    def test_cidr_expansion_switch_blocks_same_c_segment_by_default(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(
+                Path(temporary) / "assets.json",
+                "*",
+                "10.17.200.115",
+                approval_mode="countdown_accept",
+                allow_cidr_expansion=False,
+            )
+            bus.ingest([("10.17.200.115", "ip")], "project_target")
+
+            bus.ingest([("10.17.200.99", "ip")], "asset_commander")
+
+            self.assertEqual(bus.pending_count, 0)
+            self.assertEqual(bus.value["rejected"][0]["reason"], "cidr_expansion_disabled")
+
+    def test_approved_cidr_candidate_promotes_entire_selected_host_group(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(
+                path,
+                "*",
+                "10.17.200.115",
+                approval_mode="countdown_accept",
+                allow_cidr_expansion=True,
+            )
+            bus.ingest([("10.17.200.115", "ip")], "project_target")
+            bus.ingest(
+                [
+                    ("10.17.200.99", "ip"),
+                    ("10.17.200.99:8080", "endpoint"),
+                    ("http://10.17.200.99:8080/", "url"),
+                ],
+                "asset_commander",
+            )
+            decisions = [
+                {"id": item["id"], "action": "accept"}
+                for item in bus.value["pending"]
+            ]
+
+            added = bus.apply_decisions(decisions)
+
+            self.assertEqual(added, 3)
+            self.assertEqual(bus.pending_count, 0)
+            self.assertIn("10.17.200.99", bus.bundle()["ips"])
+            self.assertIn("10.17.200.99:8080", bus.bundle()["endpoints"])
+            self.assertIn("http://10.17.200.99:8080/", bus.bundle()["urls"])
+            self.assertEqual(bus.generation, 2)
+
+    def test_countdown_default_can_accept_or_reject_without_ui(self) -> None:
+        for mode, expected_added, expected_rejected in (
+            ("countdown_accept", 1, 0),
+            ("countdown_reject", 0, 1),
+        ):
+            with self.subTest(mode=mode), TemporaryDirectory() as temporary:
+                path = Path(temporary) / "assets.json"
+                bus = AssetBus(
+                    path,
+                    "*",
+                    "example.com",
+                    approval_mode=mode,
+                    approval_seconds=3,
+                )
+                bus.ingest([("example.com", "domain")], "project_target")
+                bus.ingest([("new.example.net", "domain")], "asset_commander")
+                value = read_json(path)
+                value["pending"][0]["decision_deadline_at"] = "2000-01-01T00:00:00+00:00"
+                atomic_json_write(path, value)
+
+                added = bus.resolve_due_pending()
+
+                self.assertEqual(added, expected_added)
+                self.assertEqual(bus.pending_count, 0)
+                self.assertEqual(bus.last_resolution_stats["rejected"], expected_rejected)
 
     def test_asset_export_and_tscan_database_are_parsed(self) -> None:
         with TemporaryDirectory() as temporary:

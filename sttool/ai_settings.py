@@ -13,6 +13,21 @@ from .workflow_settings import (
 )
 
 
+WORKLOAD_APPROVAL_LABELS = {
+    "automatic": "\u81ea\u52a8\u542f\u52a8\uff08\u4e0d\u5f39\u7a97\uff09",
+    "countdown_accept": "\u5f39\u7a97\u63d0\u9192\uff0c\u5012\u8ba1\u65f6\u540e\u542f\u52a8",
+    "countdown_reject": "\u5f39\u7a97\u63d0\u9192\uff0c\u5012\u8ba1\u65f6\u540e\u8df3\u8fc7",
+    "manual": "\u59cb\u7ec8\u7b49\u5f85\u4eba\u5de5\u786e\u8ba4",
+}
+
+ASSET_APPROVAL_LABELS = {
+    "automatic": "自动加入（不弹窗）",
+    "countdown_accept": "弹窗提醒，倒计时后自动加入",
+    "countdown_reject": "弹窗提醒，倒计时后自动排除",
+    "manual": "始终等待人工确认（不自动处理）",
+}
+
+
 class AISettingsDialog(tk.Toplevel):
     def __init__(
         self,
@@ -90,6 +105,36 @@ class AISettingsDialog(tk.Toplevel):
         self.semantic_max_depth_var = tk.IntVar(value=int(workflow["semantic_max_depth"]))
         self.semantic_run_dirsearch_var = tk.BooleanVar(value=bool(workflow["semantic_run_dirsearch"]))
         self.semantic_max_rate_var = tk.IntVar(value=int(workflow["semantic_max_rate"]))
+        self.allow_cidr_expansion_var = tk.BooleanVar(
+            value=bool(workflow["allow_cidr_expansion"])
+        )
+        self.new_asset_approval_var = tk.StringVar(
+            value=ASSET_APPROVAL_LABELS[str(workflow["new_asset_approval_mode"])]
+        )
+        self.new_asset_countdown_var = tk.IntVar(
+            value=int(workflow["new_asset_countdown_seconds"])
+        )
+        self.new_asset_popup_enabled_var = tk.BooleanVar(
+            value=bool(workflow["new_asset_popup_enabled"])
+        )
+        self.new_asset_popup_topmost_var = tk.BooleanVar(
+            value=bool(workflow["new_asset_popup_topmost"])
+        )
+        self.workload_approval_var = tk.StringVar(
+            value=WORKLOAD_APPROVAL_LABELS[str(workflow["workload_approval_mode"])]
+        )
+        self.workload_countdown_var = tk.IntVar(
+            value=int(workflow["workload_countdown_seconds"])
+        )
+        self.workload_agent_threshold_var = tk.IntVar(
+            value=int(workflow["workload_agent_threshold"])
+        )
+        self.workload_popup_enabled_var = tk.BooleanVar(
+            value=bool(workflow["workload_popup_enabled"])
+        )
+        self.workload_popup_topmost_var = tk.BooleanVar(
+            value=bool(workflow["workload_popup_topmost"])
+        )
 
         content = ttk.Frame(self, padding=16)
         content.pack(fill="both", expand=True)
@@ -398,8 +443,88 @@ class AISettingsDialog(tk.Toplevel):
             wraplength=680,
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
+        approval = ttk.LabelFrame(
+            tab, text="新增主机与 C 段资产准入（全局默认策略）", padding=12
+        )
+        approval.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        approval.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            approval,
+            text="允许同一 C 段发现的其他 IP 进入候选队列（默认关闭）",
+            variable=self.allow_cidr_expansion_var,
+        ).grid(row=0, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(approval, text="新增主机默认处理").grid(
+            row=1, column=0, sticky="w", pady=4
+        )
+        ttk.Combobox(
+            approval,
+            textvariable=self.new_asset_approval_var,
+            values=tuple(ASSET_APPROVAL_LABELS.values()),
+            state="readonly",
+        ).grid(row=1, column=1, sticky="ew", padx=(16, 0), pady=4)
+        self._spin_field(
+            approval,
+            2,
+            "弹窗倒计时（秒）",
+            self.new_asset_countdown_var,
+            3,
+            3600,
+        )
+        ttk.Checkbutton(
+            approval,
+            text="发现待确认资产时显示醒目弹窗",
+            variable=self.new_asset_popup_enabled_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(
+            approval,
+            text="资产确认弹窗置顶并响铃提醒",
+            variable=self.new_asset_popup_topmost_var,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(
+            approval,
+            text=(
+                "授权范围决定能不能测试；本开关和弹窗只决定发现的新主机是否值得继续耗时。"
+                "“*”不再代表自动扫描任意 C 段：目标本身自动允许，扩展主机先进入候选队列。"
+                "同一已批准主机的新端口和新路径会继续自动增量处理，不反复弹窗。"
+            ),
+            wraplength=680,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        workload = ttk.LabelFrame(
+            tab, text="\u5927\u6279\u91cf Agent \u51c6\u5165\uff08\u8fd0\u884c\u4e2d\u4e34\u65f6\u51b3\u7b56\uff09", padding=12
+        )
+        workload.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        workload.columnconfigure(1, weight=1)
+        ttk.Label(workload, text="\u5927\u6279\u91cf\u9ed8\u8ba4\u5904\u7406").grid(
+            row=0, column=0, sticky="w", pady=4
+        )
+        ttk.Combobox(
+            workload,
+            textvariable=self.workload_approval_var,
+            values=tuple(WORKLOAD_APPROVAL_LABELS.values()),
+            state="readonly",
+        ).grid(row=0, column=1, sticky="ew", padx=(16, 0), pady=4)
+        self._spin_field(
+            workload, 1, "Agent \u5f39\u7a97\u5012\u8ba1\u65f6\uff08\u79d2\uff09", self.workload_countdown_var, 3, 3600
+        )
+        self._spin_field(
+            workload, 2, "\u89e6\u53d1\u9608\u503c\uff08\u8d44\u4ea7\u6761\u6570\uff09", self.workload_agent_threshold_var, 1, 100000
+        )
+        ttk.Checkbutton(
+            workload, text="\u5927\u6279\u91cf Agent \u65f6\u663e\u793a\u9192\u76ee\u5f39\u7a97",
+            variable=self.workload_popup_enabled_var,
+        ).grid(row=3, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Checkbutton(
+            workload, text="\u5f39\u7a97\u7f6e\u9876\uff08\u59cb\u7ec8\u663e\u793a\u5728\u6700\u524d\uff09",
+            variable=self.workload_popup_topmost_var,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=3)
+        ttk.Label(
+            workload,
+            text="\u8be5\u5f39\u7a97\u53ea\u5ef6\u540e Agent\uff0c\u4e0d\u6682\u505c\u8d44\u4ea7\u53d1\u73b0\u3001fscan\u3001Tscan\u3001dirsearch \u6216\u62a5\u544a\u6574\u7406\u3002",
+            wraplength=680,
+        ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
         scan = ttk.LabelFrame(tab, text="扫描工具参数（按工作模式预设）", padding=12)
-        scan.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        scan.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         scan.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             scan,
@@ -490,6 +615,26 @@ class AISettingsDialog(tk.Toplevel):
         self.semantic_max_depth_var.set(int(preset["semantic_max_depth"]))
         self.semantic_run_dirsearch_var.set(bool(preset["semantic_run_dirsearch"]))
         self.semantic_max_rate_var.set(int(preset["semantic_max_rate"]))
+        self.allow_cidr_expansion_var.set(bool(preset["allow_cidr_expansion"]))
+        self.new_asset_approval_var.set(
+            ASSET_APPROVAL_LABELS[str(preset["new_asset_approval_mode"])]
+        )
+        self.new_asset_countdown_var.set(
+            int(preset["new_asset_countdown_seconds"])
+        )
+        self.new_asset_popup_enabled_var.set(
+            bool(preset["new_asset_popup_enabled"])
+        )
+        self.new_asset_popup_topmost_var.set(
+            bool(preset["new_asset_popup_topmost"])
+        )
+        self.workload_approval_var.set(
+            WORKLOAD_APPROVAL_LABELS[str(preset["workload_approval_mode"])]
+        )
+        self.workload_countdown_var.set(int(preset["workload_countdown_seconds"]))
+        self.workload_agent_threshold_var.set(int(preset["workload_agent_threshold"]))
+        self.workload_popup_enabled_var.set(bool(preset["workload_popup_enabled"]))
+        self.workload_popup_topmost_var.set(bool(preset["workload_popup_topmost"]))
 
     @staticmethod
     def _valid_optional_url(value: str) -> bool:
@@ -546,6 +691,20 @@ class AISettingsDialog(tk.Toplevel):
                 "semantic_max_depth": self.semantic_max_depth_var.get(),
                 "semantic_run_dirsearch": self.semantic_run_dirsearch_var.get(),
                 "semantic_max_rate": self.semantic_max_rate_var.get(),
+                "allow_cidr_expansion": self.allow_cidr_expansion_var.get(),
+                "new_asset_approval_mode": {
+                    label: mode for mode, label in ASSET_APPROVAL_LABELS.items()
+                }.get(self.new_asset_approval_var.get(), "countdown_accept"),
+                "new_asset_countdown_seconds": self.new_asset_countdown_var.get(),
+                "new_asset_popup_enabled": self.new_asset_popup_enabled_var.get(),
+                "new_asset_popup_topmost": self.new_asset_popup_topmost_var.get(),
+                "workload_approval_mode": {
+                    label: mode for mode, label in WORKLOAD_APPROVAL_LABELS.items()
+                }.get(self.workload_approval_var.get(), "countdown_accept"),
+                "workload_countdown_seconds": self.workload_countdown_var.get(),
+                "workload_agent_threshold": self.workload_agent_threshold_var.get(),
+                "workload_popup_enabled": self.workload_popup_enabled_var.get(),
+                "workload_popup_topmost": self.workload_popup_topmost_var.get(),
             }
         )
         codex_effort = self.codex_reasoning_effort_var.get()

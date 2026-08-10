@@ -3,11 +3,16 @@ from __future__ import annotations
 import json
 import os
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
 from .ai_settings import AISettingsDialog
+from .asset_approval_dialog import AssetApprovalDialog, pending_asset_groups
+from .workload_approval import read_request
+from .workload_approval_dialog import WorkloadApprovalDialog
+from .asset_bus import read_json
 from .asset_settings import AssetCommanderSettingsDialog
 from .help_text import ensure_help_document
 from .models import (
@@ -58,6 +63,10 @@ class LauncherApp(tk.Tk):
         self.tool_vars: dict[str, tk.BooleanVar] = {}
         self.run_states: dict[str, RunState] = {}
         self._busy = False
+        self._asset_approval_dialogs: dict[str, AssetApprovalDialog] = {}
+        self._asset_approval_snooze_until: dict[str, float] = {}
+        self._workload_approval_dialogs: dict[str, WorkloadApprovalDialog] = {}
+        self._workload_approval_snooze_until: dict[str, float] = {}
         self.launcher_settings_path = self.manager.app_dir / "launcher_settings.json"
         self.launcher_secrets_path = self.manager.app_dir / "launcher_secrets.dat"
         launcher_settings = self._load_launcher_settings()
@@ -278,6 +287,14 @@ class LauncherApp(tk.Tk):
         ttk.Button(
             scope_row, text="使用主要目标", command=self._use_target_as_scope
         ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(
+            scope_row,
+            text=(
+                "说明：* 只表示目标本身自动准入；新主机、其他 IP 和 C 段资产仍按全局准入策略确认，"
+                "不会自动全网段渗透。"
+            ),
+            wraplength=470,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
         ttk.Label(left, text="补充任务", style="Panel.TLabel").grid(
             row=8, column=0, sticky="w", pady=(0, 5)
@@ -762,6 +779,36 @@ class LauncherApp(tk.Tk):
             semantic_max_depth=int(self.workflow_settings["semantic_max_depth"]),
             semantic_run_dirsearch=bool(self.workflow_settings["semantic_run_dirsearch"]),
             semantic_max_rate=int(self.workflow_settings["semantic_max_rate"]),
+            allow_cidr_expansion=bool(
+                self.workflow_settings["allow_cidr_expansion"]
+            ),
+            new_asset_approval_mode=str(
+                self.workflow_settings["new_asset_approval_mode"]
+            ),
+            new_asset_countdown_seconds=int(
+                self.workflow_settings["new_asset_countdown_seconds"]
+            ),
+            new_asset_popup_enabled=bool(
+                self.workflow_settings["new_asset_popup_enabled"]
+            ),
+            new_asset_popup_topmost=bool(
+                self.workflow_settings["new_asset_popup_topmost"]
+            ),
+            workload_approval_mode=str(
+                self.workflow_settings["workload_approval_mode"]
+            ),
+            workload_countdown_seconds=int(
+                self.workflow_settings["workload_countdown_seconds"]
+            ),
+            workload_agent_threshold=int(
+                self.workflow_settings["workload_agent_threshold"]
+            ),
+            workload_popup_enabled=bool(
+                self.workflow_settings["workload_popup_enabled"]
+            ),
+            workload_popup_topmost=bool(
+                self.workflow_settings["workload_popup_topmost"]
+            ),
         )
 
     def _start(self) -> None:
@@ -851,6 +898,80 @@ class LauncherApp(tk.Tk):
             )
         if selected_id and self.run_tree.exists(selected_id):
             self.run_tree.selection_set(selected_id)
+
+    def _refresh_asset_approval_dialogs(self) -> None:
+        for key, dialog in list(self._asset_approval_dialogs.items()):
+            try:
+                exists = bool(dialog.winfo_exists())
+            except tk.TclError:
+                exists = False
+            if not exists:
+                self._asset_approval_dialogs.pop(key, None)
+        for state in self.run_states.values():
+            key = self._state_key(state)
+            if state.status != "running" or not state.new_asset_popup_enabled:
+                continue
+            if state.new_asset_approval_mode == "automatic":
+                continue
+            if key in self._asset_approval_dialogs:
+                continue
+            if time.monotonic() < self._asset_approval_snooze_until.get(key, 0):
+                continue
+            bus_value = read_json(
+                Path(state.run_dir) / "tool_data" / "asset_bus" / "assets.json"
+            )
+            if not pending_asset_groups(bus_value):
+                continue
+
+            def closed(state_key: str = key) -> None:
+                self._asset_approval_dialogs.pop(state_key, None)
+                self._asset_approval_snooze_until[state_key] = time.monotonic() + 30
+
+            dialog = AssetApprovalDialog(
+                self,
+                project_name=state.project_name,
+                run_id=state.run_id,
+                run_dir=Path(state.run_dir),
+                pending_value=bus_value,
+                topmost=state.new_asset_popup_topmost,
+                on_close=closed,
+            )
+            self._asset_approval_dialogs[key] = dialog
+
+    def _refresh_workload_approval_dialogs(self) -> None:
+        for key, dialog in list(self._workload_approval_dialogs.items()):
+            try:
+                exists = bool(dialog.winfo_exists())
+            except tk.TclError:
+                exists = False
+            if not exists:
+                self._workload_approval_dialogs.pop(key, None)
+        for state in self.run_states.values():
+            key = self._state_key(state)
+            if state.status != "running" or not state.workload_popup_enabled:
+                continue
+            if state.workload_approval_mode == "automatic":
+                continue
+            if key in self._workload_approval_dialogs:
+                continue
+            if time.monotonic() < self._workload_approval_snooze_until.get(key, 0):
+                continue
+            request = read_request(Path(state.run_dir))
+            if not request or request.get("status") not in {"pending", ""}:
+                continue
+
+            def closed(state_key: str = key) -> None:
+                self._workload_approval_dialogs.pop(state_key, None)
+                self._workload_approval_snooze_until[state_key] = time.monotonic() + 30
+
+            dialog = WorkloadApprovalDialog(
+                self,
+                request=request,
+                run_dir=Path(state.run_dir),
+                topmost=state.workload_popup_topmost,
+                on_close=closed,
+            )
+            self._workload_approval_dialogs[key] = dialog
 
     @staticmethod
     def _provider_text(provider: str) -> str:
@@ -1154,5 +1275,7 @@ class LauncherApp(tk.Tk):
     def _tick(self) -> None:
         try:
             self._refresh_runs()
+            self._refresh_asset_approval_dialogs()
+            self._refresh_workload_approval_dialogs()
         finally:
             self.after(2000, self._tick)

@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import argparse
 import atexit
+import ipaddress
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import time
+
+import psutil
 from datetime import datetime
 from pathlib import Path
 from urllib.error import URLError
@@ -20,6 +25,7 @@ from .asset_bus import (
     extract_tscan_assets,
     now_text,
     parse_asset_export,
+    parse_dirsearch_output,
     parse_fscan_output,
     read_json,
     target_assets,
@@ -27,7 +33,17 @@ from .asset_bus import (
 from .models import ProcessRecord
 from .pentest_report import write_pentest_report
 from .vulnerability_intel import generate_vulnerability_intel
+from .workload_approval import (
+    create_request,
+    read_request,
+    resolve_due_request,
+    workload_counts,
+    workload_total,
+)
+from .report_integrity import restore_corrupted_report_files
 from .runtime import (
+    CREATE_NEW_PROCESS_GROUP,
+    CREATE_NO_WINDOW,
     pid_alive,
     process_creation_token,
     process_record_alive,
@@ -154,6 +170,9 @@ def mark_agent_batch_finished(
             if error:
                 metadata["error"] = error
             atomic_json_write(metadata_path, metadata)
+        integrity = restore_corrupted_report_files(run_dir, batch_dir)
+        if integrity.get("status") != "not_available":
+            item["report_integrity"] = integrity
         return item
     return None
 
@@ -189,6 +208,125 @@ def agent_batch_health(
         timespec="seconds"
     )
     return status, elapsed_minutes, activity_text
+
+
+def codex_session_candidates(
+    run_dir: Path,
+    batch_dir: Path,
+    session_root: Path | None = None,
+) -> list[tuple[float, Path]]:
+    """Return recent Codex sessions whose working directory matches this run."""
+    root = session_root or Path.home() / ".codex" / "sessions"
+    if not root.is_dir():
+        return []
+    try:
+        started_at = (batch_dir / "prompt.txt").stat().st_mtime
+    except OSError:
+        return []
+
+    candidates: list[tuple[float, Path]] = []
+    try:
+        paths = root.rglob("*.jsonl")
+        expected_cwd = os.path.normcase(str(run_dir.resolve()))
+        for path in paths:
+            try:
+                modified_at = path.stat().st_mtime
+            except OSError:
+                continue
+            if modified_at < started_at:
+                continue
+            session_cwd = ""
+            try:
+                with path.open(encoding="utf-8", errors="replace") as handle:
+                    for index, line in enumerate(handle):
+                        if index >= 10:
+                            break
+                        try:
+                            event = json.loads(line)
+                        except (TypeError, ValueError, json.JSONDecodeError):
+                            continue
+                        if str(event.get("type") or "") != "session_meta":
+                            continue
+                        payload = event.get("payload")
+                        if isinstance(payload, dict):
+                            session_cwd = str(payload.get("cwd") or "")
+                        break
+            except OSError:
+                continue
+            try:
+                normalized_session_cwd = os.path.normcase(
+                    str(Path(session_cwd).resolve())
+                )
+            except (OSError, ValueError):
+                continue
+            if normalized_session_cwd == expected_cwd:
+                candidates.append((modified_at, path))
+    except OSError:
+        return []
+    return sorted(candidates, reverse=True)
+
+
+def codex_session_last_activity(
+    run_dir: Path,
+    batch_dir: Path,
+    session_root: Path | None = None,
+) -> tuple[float, Path] | None:
+    candidates = codex_session_candidates(run_dir, batch_dir, session_root)
+    return candidates[0] if candidates else None
+
+
+def codex_session_terminal_state(
+    run_dir: Path,
+    batch_dir: Path,
+    session_root: Path | None = None,
+) -> dict[str, object] | None:
+    """Recover a completed Codex turn whose CLI wrapper did not exit."""
+    for _modified_at, path in codex_session_candidates(
+        run_dir, batch_dir, session_root
+    ):
+        try:
+            content = path.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        lines = content.splitlines()
+        previous_event = ""
+        previous_error = ""
+        for line in lines:
+            try:
+                event = json.loads(line)
+            except (TypeError, ValueError, json.JSONDecodeError):
+                continue
+            payload = event.get("payload")
+            if not isinstance(payload, dict):
+                continue
+            event_type = str(payload.get("type") or "")
+            if event_type == "task_complete":
+                status = "failed" if previous_event == "error" else "completed"
+                result: dict[str, object] = {
+                    "status": status,
+                    "completed_at": str(event.get("timestamp") or now_text()),
+                    "exit_code": 1 if status == "failed" else 0,
+                    "source": "codex_session",
+                }
+                if status == "failed":
+                    match = re.search(
+                        r"(?i)(?:status\s+)?(\d{3}\s+[^,\n]{1,80})",
+                        previous_error,
+                    )
+                    result["error"] = (
+                        f"Codex provider error: {match.group(1)}"
+                        if match
+                        else "Codex provider request failed"
+                    )
+                return result
+            if event_type in {"token_count", "agent_reasoning"}:
+                continue
+            previous_event = event_type
+            if event_type == "error":
+                previous_error = str(
+                    payload.get("message") or payload.get("error") or ""
+                )
+    return None
 
 
 def schedule_agent_retry(state: dict[str, object], reason: str) -> int:
@@ -242,12 +380,281 @@ def tracked_process_alive(pid: int, creation_token: int, run_dir: Path) -> bool:
     return process_record_alive(legacy, run_dir)
 
 
+def remember_agent_process_tree(batch: dict[str, object], root_pid: int) -> None:
+    """Persist verified descendants so they can be reclaimed after the wrapper exits."""
+    if root_pid <= 0 or not pid_alive(root_pid):
+        return
+    try:
+        processes = [psutil.Process(root_pid), *psutil.Process(root_pid).children(recursive=True)]
+    except (psutil.Error, OSError, ValueError):
+        return
+    remembered = batch.get("owned_processes")
+    by_pid: dict[int, dict[str, int]] = {}
+    if isinstance(remembered, list):
+        for item in remembered:
+            if not isinstance(item, dict):
+                continue
+            try:
+                pid = int(item.get("pid") or 0)
+                creation_token = int(item.get("creation_token") or 0)
+            except (TypeError, ValueError):
+                continue
+            if pid > 0 and creation_token > 0:
+                by_pid[pid] = {"pid": pid, "creation_token": creation_token}
+    for process in processes:
+        try:
+            pid = int(process.pid)
+            creation_token = int(process.create_time() * 1_000_000)
+        except (psutil.Error, OSError, ValueError):
+            continue
+        by_pid[pid] = {"pid": pid, "creation_token": creation_token}
+    batch["owned_processes"] = list(by_pid.values())
+
+
+def terminate_remembered_agent_processes(
+    batch: dict[str, object] | None, run_dir: Path
+) -> None:
+    """Terminate only processes whose PID and creation time match this AI batch."""
+    if not batch:
+        return
+    remembered = batch.get("owned_processes")
+    if not isinstance(remembered, list):
+        return
+    for item in reversed(remembered):
+        if not isinstance(item, dict):
+            continue
+        try:
+            pid = int(item.get("pid") or 0)
+            creation_token = int(item.get("creation_token") or 0)
+        except (TypeError, ValueError):
+            continue
+        if tracked_process_alive(pid, creation_token, run_dir):
+            terminate_agent_process_tree(pid)
+
+
+def completed_batch_orphan_processes(
+    batch: dict[str, object], run_dir: Path
+) -> list[dict[str, int]]:
+    """Find a completed batch's AI CLI after its PowerShell wrapper has exited."""
+    if str(batch.get("status") or "").lower() not in {"completed", "failed"}:
+        return []
+    batch_dir = Path(str(batch.get("run_dir") or ""))
+    prompt_path = batch_dir / "prompt.txt"
+    metadata = read_json(batch_dir / "batch.json")
+    provider = str(
+        metadata.get("provider") or batch.get("provider") or ""
+    ).lower()
+    if provider not in {"codex", "codexx", "claude"} or not prompt_path.is_file():
+        return []
+    started_at = str(metadata.get("started_at") or batch.get("started_at") or "")
+    completed_at = str(
+        metadata.get("completed_at") or batch.get("completed_at") or ""
+    )
+    try:
+        started_timestamp = datetime.fromisoformat(
+            started_at.replace("Z", "+00:00")
+        ).timestamp()
+        completed_timestamp = datetime.fromisoformat(
+            completed_at.replace("Z", "+00:00")
+        ).timestamp()
+    except ValueError:
+        return []
+    if completed_timestamp < started_timestamp:
+        return []
+    expected_prompts = {
+        os.path.normcase(str(prompt_path.absolute())),
+        os.path.normcase(str(prompt_path.resolve())),
+    }
+    expected_run_dir = os.path.normcase(str(run_dir.resolve()))
+    matches: list[dict[str, int]] = []
+    for process in psutil.process_iter(["pid", "name", "cmdline", "create_time"]):
+        try:
+            name = Path(str(process.info.get("name") or "")).stem.lower()
+            if name != provider:
+                continue
+            cmdline = [str(item) for item in process.info.get("cmdline") or []]
+            command_text = os.path.normcase(" ".join(cmdline))
+            if not any(expected in command_text for expected in expected_prompts):
+                continue
+            cwd = os.path.normcase(str(Path(process.cwd()).resolve()))
+            if cwd != expected_run_dir:
+                continue
+            create_time = float(process.info["create_time"])
+            if not started_timestamp - 120 <= create_time <= completed_timestamp + 60:
+                continue
+            creation_token = int(create_time * 1_000_000)
+            matches.append(
+                {
+                    "pid": int(process.info["pid"]),
+                    "creation_token": creation_token,
+                }
+            )
+        except (KeyError, TypeError, ValueError, OSError, psutil.Error):
+            continue
+    return matches
+
+
+def recover_completed_batch_orphans(
+    batches: list[object], run_dir: Path
+) -> list[int]:
+    """Reclaim strictly matched AI CLIs left by already completed batches."""
+    recovered: list[int] = []
+    for item in batches:
+        if not isinstance(item, dict):
+            continue
+        matches = completed_batch_orphan_processes(item, run_dir)
+        for process in matches:
+            pid = process["pid"]
+            if tracked_process_alive(pid, process["creation_token"], run_dir):
+                terminate_agent_process_tree(pid)
+                recovered.append(pid)
+        if matches:
+            remembered = item.setdefault("owned_processes", [])
+            if isinstance(remembered, list):
+                known = {
+                    int(entry.get("pid") or 0)
+                    for entry in remembered
+                    if isinstance(entry, dict)
+                }
+                remembered.extend(
+                    match for match in matches if match["pid"] not in known
+                )
+    return recovered
+
+
+def incremental_fscan_candidates(
+    bus: AssetBus, attempted_ips: list[object]
+) -> list[str]:
+    attempted = {str(item) for item in attempted_ips}
+    candidates: list[str] = []
+    for value in bus.bundle().get("ips", []):
+        try:
+            normalized = ipaddress.ip_address(value).compressed
+        except ValueError:
+            continue
+        if normalized not in attempted:
+            candidates.append(normalized)
+    return list(dict.fromkeys(candidates))
+
+
+def build_incremental_fscan_command(
+    executable: Path, target_file: Path, output_file: Path, port_threads: int
+) -> list[str]:
+    return [
+        str(executable),
+        "-hf",
+        str(target_file),
+        "-t",
+        str(max(port_threads, 1)),
+        "-nobr",
+        "-nopoc",
+        "-o",
+        str(output_file),
+    ]
+
+
+def launch_incremental_fscan(
+    *,
+    executable: Path,
+    run_dir: Path,
+    batch_number: int,
+    targets: list[str],
+    port_threads: int,
+) -> dict[str, object]:
+    batch_dir = (
+        run_dir / "tool_data" / "fscan_incremental" / f"batch-{batch_number:04d}"
+    )
+    batch_dir.mkdir(parents=True, exist_ok=True)
+    target_file = batch_dir / "targets.txt"
+    output_file = batch_dir / "result.txt"
+    log_file = batch_dir / "process.log"
+    target_file.write_text("\n".join(targets) + "\n", encoding="utf-8")
+    command = build_incremental_fscan_command(
+        executable, target_file, output_file, port_threads
+    )
+    with log_file.open("ab") as output:
+        process = subprocess.Popen(
+            command,
+            cwd=str(run_dir),
+            stdin=subprocess.DEVNULL,
+            stdout=output,
+            stderr=subprocess.STDOUT,
+            creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
+            close_fds=True,
+        )
+    return {
+        "batch": batch_number,
+        "pid": process.pid,
+        "creation_token": process_creation_token(process.pid),
+        "targets": targets,
+        "target_file": str(target_file),
+        "output_file": str(output_file),
+        "log_file": str(log_file),
+        "command": command,
+        "status": "running",
+        "started_at": now_text(),
+    }
+
+
+def asset_commander_collision_paths(run_dir: Path) -> tuple[list[Path], list[Path]]:
+    workspace = run_dir / "tool_data" / "asset_commander" / "workspace"
+    if not workspace.is_dir():
+        return [], []
+    result_files = sorted(workspace.glob("*/results.csv"))
+    evidence_dirs = sorted(
+        path for path in workspace.glob("*/evidence") if path.is_dir()
+    )
+    return result_files, evidence_dirs
+
+
 def semantic_assets(path: Path) -> list[tuple[str, str]]:
     value = read_json(path)
     targets = value.get("targets", [])
     if not isinstance(targets, list):
         return []
     return [(str(item), "url") for item in targets]
+
+
+def semantic_dirsearch_output_files(semantic_state: Path) -> list[Path]:
+    projects_dir = semantic_state.parent / "projects"
+    if not projects_dir.is_dir():
+        return []
+    return sorted(projects_dir.glob("*/runs/*/dirsearch.txt"))
+
+
+def semantic_dirsearch_marker(
+    run_dir: Path, paths: list[Path]
+) -> list[list[object]]:
+    result: list[list[object]] = []
+    for path in paths:
+        marker = file_marker(path)
+        if marker is None:
+            continue
+        try:
+            rendered_path = path.relative_to(run_dir).as_posix()
+        except ValueError:
+            rendered_path = str(path)
+        result.append([rendered_path, marker[0], marker[1]])
+    return result
+
+
+def semantic_dirsearch_output_active(paths: list[Path]) -> bool:
+    targets = {os.path.normcase(os.path.normpath(str(path))) for path in paths}
+    if not targets:
+        return False
+    for process in psutil.process_iter(["name", "cmdline"]):
+        try:
+            arguments = [
+                os.path.normcase(os.path.normpath(str(value).strip('"')))
+                for value in process.info.get("cmdline") or []
+            ]
+        except (psutil.Error, OSError, ValueError):
+            continue
+        if not any("dirsearch" in value.lower() for value in arguments):
+            continue
+        if any(value in targets for value in arguments):
+            return True
+    return False
 
 
 def tscan_findings(database: Path) -> list[dict[str, str]]:
@@ -283,9 +690,10 @@ def tscan_findings(database: Path) -> list[dict[str, str]]:
                 for row in connection.execute(f'pragma table_info("{table}")')
             ]
             lowered = {name.lower(): name for name in columns}
-            candidates = [
-                lowered[key]
-                for key in (
+            candidate_keys = (
+                ("target", "host", "pocvul", "title", "statuscode", "status")
+                if table == "poccheck"
+                else (
                     "target",
                     "url",
                     "host",
@@ -293,8 +701,13 @@ def tscan_findings(database: Path) -> list[dict[str, str]]:
                     "pocvul",
                     "message",
                     "title",
+                    "statuscode",
                     "status",
                 )
+            )
+            candidates = [
+                lowered[key]
+                for key in candidate_keys
                 if key in lowered
             ]
             if not candidates:
@@ -339,6 +752,7 @@ def render_risk_summary(
         for item in records
     }
     findings = tscan_findings(database)
+    collision_results, collision_evidence = asset_commander_collision_paths(run_dir)
     lines = [
         "# 项目风险成果摘要",
         "",
@@ -349,6 +763,7 @@ def render_risk_summary(
         f"- IP：{len(bundle['ips'])}",
         f"- 域名：{len(bundle['domains'])}",
         f"- 端点：{len(bundle['endpoints'])}",
+        f"- 待用户确认的新资产：{bus.pending_count}",
         "",
         "## Web 目标（必须逐个检查）",
         "",
@@ -362,10 +777,31 @@ def render_risk_summary(
     lines.extend(f"- `{value}`" for value in [*bundle["ips"], *bundle["endpoints"]])
     if not bundle["ips"] and not bundle["endpoints"]:
         lines.append("- 暂无")
-    lines.extend(["", "## 工具风险线索", ""])
-    lines.extend(f"- **{item['source']}**：{item['detail']}" for item in findings)
+    lines.extend(
+        [
+            "",
+            "## 工具风险线索（全部待验证）",
+            "",
+            "以下内容是工具原始标签，不代表已确认漏洞；风险等级、命中状态和模板名称均需人工复核。",
+            "",
+        ]
+    )
+    lines.extend(
+        f"- **待验证自动线索 {item['source']}**：工具原始标签（未确认）：{item['detail']}"
+        for item in findings
+    )
     if not findings:
         lines.append("- 当前尚无已结构化的漏洞结果；版本或开放服务只能作为待验证线索。")
+    lines.extend(["", "## Host/SNI 碰撞证据", ""])
+    if collision_results:
+        lines.extend(f"- 碰撞结果：`{path}`" for path in collision_results)
+        lines.extend(f"- 原始请求/响应：`{path}`" for path in collision_evidence)
+        lines.append(
+            "- 复核时必须保留实际连接 IP/端口、HTTP Host、TLS SNI 和请求模式，"
+            "不能把碰撞结果简化成普通 URL。"
+        )
+    else:
+        lines.append("- 当前尚未生成 AssetCommander Host/SNI 碰撞结果。")
     lines.extend(
         [
             "",
@@ -541,6 +977,23 @@ def build_batch_prompt(
     all_assets = bus.bundle()
     urls = delta["urls"] if after_generation else all_assets["urls"]
     endpoints = delta["endpoints"] if after_generation else all_assets["endpoints"]
+    collision_results, collision_evidence = asset_commander_collision_paths(run_dir)
+    pending_rows = [
+        item for item in bus.value.get("pending", []) if isinstance(item, dict)
+    ]
+    pending_text = (
+        "\n".join(
+            f"- {item.get('value')}（来源：{item.get('source')}；原因：{item.get('reason')}）"
+            for item in pending_rows[:100]
+        )
+        or "- 当前没有待确认资产"
+    )
+    collision_result_text = (
+        "\n".join(str(path) for path in collision_results) or "尚未生成"
+    )
+    collision_evidence_text = (
+        "\n".join(str(path) for path in collision_evidence) or "尚未生成"
+    )
     label = "新增资产增量复测" if after_generation else "资产收集稳定后的首次全量测试"
     return (
         base_prompt.rstrip()
@@ -551,17 +1004,75 @@ def build_batch_prompt(
         + f"项目风险摘要：{run_dir / 'risk_summary.md'}\n"
         + f"漏洞情报与 PoC 候选：{run_dir / 'vulnerability_intel.md'}\n"
         + f"结构化漏洞情报：{run_dir / 'results' / 'vulnerability_intel.json'}\n\n"
+        + f"AssetCommander Host/SNI 碰撞结果：\n{collision_result_text}\n"
+        + f"AssetCommander 原始请求/响应证据目录：\n{collision_evidence_text}\n\n"
         + "必须先完整读取 fscan 输出和漏洞情报，逐个检查下列 Web URL，不能只检查项目主 URL。"
         + "对每个 URL 分别记录页面取证、产品/版本、候选 CVE、验证状态和证据路径。"
+        + "对 AssetCommander 碰撞结果必须按实际连接 IP/端口、Host 请求头、TLS SNI、请求模式"
+        + "和原始请求/响应成组复核；不能脱离 Host/SNI 上下文直接访问裸 IP 后下结论。"
         + "PoC 链接只是不可信候选，不得直接下载执行；必须先核对厂商公告、受影响版本、前置条件和模板副作用，"
         + "优先使用已审查的 verified Nuclei 模板或无害请求。"
-        + "禁止自动写文件、创建账号、反弹 Shell、抓取凭据、持久化和横向移动。\n\n"
-        + "### 本批次 Web URL\n"
+        + "禁止自动写文件、创建账号、反弹 Shell、抓取凭据、持久化和横向移动。\n"
+        + "\u6240\u6709 Markdown\u3001JSON\u3001\u65e5\u5fd7\u548c\u8bc1\u636e\u7d22\u5f15\u5fc5\u987b\u4f7f\u7528 UTF-8 \u5199\u5165\uff1b\u4e0d\u8981\u901a\u8fc7\u7cfb\u7edf\u9ed8\u8ba4\u4ee3\u7801\u9875\u5199\u4e2d\u6587\u3002\n"
+        + "PowerShell \u5199\u6587\u4ef6\u5fc5\u987b\u663e\u5f0f\u6307\u5b9a UTF-8\uff1b\u4f18\u5148\u4f7f\u7528 Python pathlib.write_text(encoding=\"utf-8\")\u3002\n"
+        + "\u4e0d\u8981\u628a\u7ec8\u7aef\u989c\u8272\u63a7\u5236\u7801\u5199\u5165\u62a5\u544a\uff1b\u9519\u8bef\u4fe1\u606f\u9700\u5148\u53bb\u9664 ANSI \u63a7\u5236\u5e8f\u5217\u3002\n"
+        + "下面的待确认资产尚未获得准入，不得测试，也不得自行扩大授权范围：\n"
+        + pending_text
+        + "\n\n### 本批次 Web URL\n"
         + ("\n".join(f"- {value}" for value in urls) or "- 本批次没有新增 Web URL")
         + "\n\n### 本批次非 Web 端点\n"
         + ("\n".join(f"- {value}" for value in endpoints) or "- 本批次没有新增端点")
         + "\n\n后续若工具发现新资产，只处理 AI 尚未处理的新增内容，不要重复启动相同高并发任务。\n"
     )
+
+
+def agent_workload_gate(
+    run_dir: Path,
+    state: dict[str, object],
+    bus: AssetBus,
+    *,
+    consumed_generation: int,
+    mode: str,
+    countdown_seconds: int,
+    threshold: int,
+    project_name: str,
+    run_id: str,
+) -> str:
+    counts = workload_counts(bus.value, consumed_generation)
+    total = workload_total(counts)
+    if mode == "automatic" or total < max(threshold, 1):
+        state.pop("workload_approval", None)
+        return "accepted"
+    request = read_request(run_dir)
+    same_batch = (
+        request
+        and int(request.get("generation_from") or 0) == consumed_generation + 1
+        and int(request.get("generation_to") or 0) == bus.generation
+    )
+    if not same_batch or request.get("status") not in {"pending", "decided"}:
+        request = create_request(
+            run_dir,
+            project_name=project_name,
+            run_id=run_id,
+            generation_from=consumed_generation + 1,
+            generation_to=bus.generation,
+            counts=counts,
+            mode=mode,
+            countdown_seconds=countdown_seconds,
+        )
+        append_activity(
+            run_dir,
+            f"\u5927\u6279\u91cf Agent \u51c6\u5165\u63d0\u9192\uff1a\u672c\u6279\u9884\u8ba1\u5904\u7406 {total} \u6761\u8d44\u4ea7\uff0c\u5df2\u521b\u5efa\u786e\u8ba4\u8bf7\u6c42\u3002",
+        )
+    request = resolve_due_request(run_dir)
+    state["workload_approval"] = request
+    if request.get("status") in {"pending", ""}:
+        return "pending"
+    if request.get("decision") == "accept":
+        return "accepted"
+    state["agent_consumed_generation"] = bus.generation
+    append_activity(run_dir, "\u7528\u6237\u9009\u62e9\u8df3\u8fc7\u672c\u6279 Agent\uff1b\u672c\u6279\u8d44\u4ea7\u6807\u8bb0\u4e3a\u5df2\u6d88\u8d39\uff0c\u4e0d\u91cd\u590d\u5f39\u7a97\u3002")
+    return "rejected"
 
 
 def parse_bool(value: str) -> bool:
@@ -601,6 +1112,24 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--ai-summary", type=parse_bool, default=True)
     parser.add_argument("--vulnx", type=Path, default=None)
     parser.add_argument("--find-gh-poc", type=Path, default=None)
+    parser.add_argument("--fscan-exe", type=Path, default=None)
+    parser.add_argument("--fscan-port-threads", type=int, default=600)
+    parser.add_argument("--allow-cidr-expansion", type=parse_bool, default=False)
+    parser.add_argument(
+        "--new-asset-approval-mode",
+        choices=("automatic", "countdown_accept", "countdown_reject", "manual"),
+        default="countdown_accept",
+    )
+    parser.add_argument("--new-asset-countdown-seconds", type=int, default=10)
+    parser.add_argument(
+        "--workload-approval-mode",
+        choices=("automatic", "countdown_accept", "countdown_reject", "manual"),
+        default="countdown_accept",
+    )
+    parser.add_argument("--workload-countdown-seconds", type=int, default=10)
+    parser.add_argument("--workload-agent-threshold", type=int, default=50)
+    parser.add_argument("--workload-popup-enabled", type=parse_bool, default=True)
+    parser.add_argument("--workload-popup-topmost", type=parse_bool, default=True)
     parser.add_argument("--terminal-window", default="")
     return parser.parse_args()
 
@@ -615,6 +1144,7 @@ def main() -> int:
     args = parse_args()
     run_dir = args.run_dir.resolve()
     bus_path = run_dir / "tool_data" / "asset_bus" / "assets.json"
+    decisions_path = run_dir / "tool_data" / "asset_bus" / "decisions.json"
     state_path = run_dir / "tool_data" / "coordinator" / "state.json"
     asset_export = run_dir / "results" / "asset_commander_assets.json"
     fscan_path = run_dir / "results" / "fscan.txt"
@@ -626,7 +1156,14 @@ def main() -> int:
         append_activity(run_dir, "检测到同一运行实例已有自动调度器，本次重复启动已退出。")
         return 0
     atexit.register(release_coordinator_owner, owner_path, owner)
-    bus = AssetBus(bus_path, args.scope)
+    bus = AssetBus(
+        bus_path,
+        args.scope,
+        args.target,
+        approval_mode=args.new_asset_approval_mode,
+        approval_seconds=args.new_asset_countdown_seconds,
+        allow_cidr_expansion=args.allow_cidr_expansion,
+    )
     state = read_json(state_path)
     state.setdefault("schema_version", 1)
     state.setdefault("created_at", now_text())
@@ -639,6 +1176,23 @@ def main() -> int:
     state.setdefault("vuln_intel_generation", 0)
     state.setdefault("vuln_intel_status", "pending")
     state.setdefault("find_gh_poc_status", "pending")
+    initial_fscan_ips = [
+        value for value, kind in target_assets(args.target) if kind == "ip"
+    ]
+    state.setdefault("incremental_fscan_attempted_ips", initial_fscan_ips)
+    state.setdefault("incremental_fscan_batches", [])
+    state.setdefault("active_incremental_fscan", {})
+    existing_batches = state.get("agent_batches")
+    recovered_orphans = recover_completed_batch_orphans(
+        existing_batches if isinstance(existing_batches, list) else [], run_dir
+    )
+    if recovered_orphans:
+        append_activity(
+            run_dir,
+            "自动调度器启动时回收已结束 AI 批次的遗留进程："
+            + "、".join(str(pid) for pid in recovered_orphans)
+            + "。",
+        )
     state["agent_failure_count"] = 0
     state["agent_retry_not_before"] = 0
     state.update(
@@ -657,6 +1211,16 @@ def main() -> int:
             "reasoning_effort": args.reasoning_effort,
             "vulnx": str(args.vulnx or ""),
             "find_gh_poc": str(args.find_gh_poc or ""),
+            "incremental_fscan": bool(args.fscan_exe),
+            "fscan_port_threads": max(args.fscan_port_threads, 1),
+            "allow_cidr_expansion": args.allow_cidr_expansion,
+            "new_asset_approval_mode": args.new_asset_approval_mode,
+            "new_asset_countdown_seconds": max(args.new_asset_countdown_seconds, 3),
+            "workload_approval_mode": args.workload_approval_mode,
+            "workload_countdown_seconds": max(args.workload_countdown_seconds, 3),
+            "workload_agent_threshold": max(args.workload_agent_threshold, 1),
+            "workload_popup_enabled": args.workload_popup_enabled,
+            "workload_popup_topmost": args.workload_popup_topmost,
         },
         updated_at=now_text(),
     )
@@ -688,6 +1252,36 @@ def main() -> int:
         last_new = time.monotonic()
     while True:
         changed = False
+        tools = selected_tools(run_dir)
+        decision_value = read_json(decisions_path)
+        decision_rows = decision_value.get("decisions")
+        if not isinstance(decision_rows, list):
+            decision_rows = []
+        decision_added = bus.apply_decisions(
+            [item for item in decision_rows if isinstance(item, dict)]
+        )
+        decision_stats = dict(bus.last_resolution_stats)
+        expired_added = bus.resolve_due_pending(grace_seconds=2)
+        expired_stats = dict(bus.last_resolution_stats)
+        resolved_added = decision_added + expired_added
+        resolved_accepted = int(decision_stats.get("accepted") or 0) + int(
+            expired_stats.get("accepted") or 0
+        )
+        resolved_rejected = int(decision_stats.get("rejected") or 0) + int(
+            expired_stats.get("rejected") or 0
+        )
+        if resolved_accepted or resolved_rejected:
+            state["pending_asset_count"] = bus.pending_count
+            state["last_asset_decision_at"] = now_text()
+            append_activity(
+                run_dir,
+                "新增资产准入决策已生效："
+                f"加入 {resolved_accepted} 条、排除 {resolved_rejected} 条，"
+                f"当前待确认 {bus.pending_count} 条。",
+            )
+        if resolved_added:
+            changed = True
+            last_new = time.monotonic()
         markers = state.get("source_markers")
         if not isinstance(markers, dict):
             markers = {}
@@ -711,6 +1305,13 @@ def main() -> int:
                     assets = parse_fscan_output(
                         path.read_text(encoding="utf-8", errors="replace")
                     )
+                    attempted = state.get("incremental_fscan_attempted_ips")
+                    if not isinstance(attempted, list):
+                        attempted = []
+                        state["incremental_fscan_attempted_ips"] = attempted
+                    for value, kind in assets:
+                        if kind == "ip" and value not in attempted:
+                            attempted.append(value)
                 elif source == "semantic_dirscan":
                     assets = semantic_assets(path)
                 else:
@@ -719,12 +1320,207 @@ def main() -> int:
             except Exception as exc:
                 state[f"{source}_error"] = f"{type(exc).__name__}: {exc}"
                 continue
+            ingest_stats = dict(bus.last_ingest_stats)
+            pending_added = int(ingest_stats.get("pending") or 0)
+            rejected_added = int(ingest_stats.get("rejected") or 0)
+            state["pending_asset_count"] = bus.pending_count
             if added:
                 changed = True
                 last_new = time.monotonic()
+            if added or pending_added or rejected_added:
                 append_activity(
                     run_dir,
-                    f"资产汇总队列接收 {source} 新增资产 {added} 条，资产更新轮次为 {bus.generation}。",
+                    f"资产来源 {source}：直接加入 {added} 条、待用户确认 {pending_added} 条、"
+                    f"策略排除 {rejected_added} 条；资产更新轮次为 {bus.generation}。",
+                )
+
+        dirsearch_paths = semantic_dirsearch_output_files(semantic_state)
+        dirsearch_marker = semantic_dirsearch_marker(run_dir, dirsearch_paths)
+        dirsearch_active = semantic_dirsearch_output_active(dirsearch_paths)
+        state["semantic_dirsearch_active"] = dirsearch_active
+        dirsearch_source = "semantic_dirsearch_results"
+        consumed_dirsearch_marker = markers.get(dirsearch_source)
+        pending_dirsearch = state.get("semantic_dirsearch_pending")
+        if dirsearch_marker and consumed_dirsearch_marker != dirsearch_marker:
+            if (
+                not isinstance(pending_dirsearch, dict)
+                or pending_dirsearch.get("marker") != dirsearch_marker
+            ):
+                state["semantic_dirsearch_pending"] = {
+                    "marker": dirsearch_marker,
+                    "stable_after": time.time() + 30,
+                }
+            elif (
+                not dirsearch_active
+                and time.time() >= float(pending_dirsearch.get("stable_after") or 0)
+            ):
+                dirsearch_assets: list[tuple[str, str]] = []
+                parse_errors: list[str] = []
+                for path in dirsearch_paths:
+                    try:
+                        dirsearch_assets.extend(
+                            parse_dirsearch_output(
+                                path.read_text(encoding="utf-8", errors="replace")
+                            )
+                        )
+                    except OSError as exc:
+                        parse_errors.append(f"{path}: {type(exc).__name__}: {exc}")
+                unique_assets = list(dict.fromkeys(dirsearch_assets))
+                added = bus.ingest(unique_assets, dirsearch_source)
+                markers[dirsearch_source] = dirsearch_marker
+                state.pop("semantic_dirsearch_pending", None)
+                state["semantic_dirsearch_stats"] = {
+                    "files": len(dirsearch_paths),
+                    "accepted_assets": len(unique_assets),
+                    "assets_added": added,
+                    "updated_at": now_text(),
+                    "errors": parse_errors,
+                }
+                if added:
+                    changed = True
+                    last_new = time.monotonic()
+                append_activity(
+                    run_dir,
+                    "dirsearch 输出已稳定并完成软 200 去噪："
+                    f"保留 {len(unique_assets)} 条，"
+                    f"新增资产 {added} 条，资产更新轮次为 {bus.generation}。",
+                )
+        elif not dirsearch_marker:
+            state.pop("semantic_dirsearch_pending", None)
+
+        incremental_batches = state.get("incremental_fscan_batches")
+        if not isinstance(incremental_batches, list):
+            incremental_batches = []
+            state["incremental_fscan_batches"] = incremental_batches
+        active_incremental = state.get("active_incremental_fscan")
+        if not isinstance(active_incremental, dict):
+            active_incremental = {}
+            state["active_incremental_fscan"] = active_incremental
+        incremental_pid = int(active_incremental.get("pid") or 0)
+        incremental_token = int(active_incremental.get("creation_token") or 0)
+        incremental_alive = bool(
+            incremental_pid
+            and tracked_process_alive(incremental_pid, incremental_token, run_dir)
+        )
+        if incremental_pid and not incremental_alive:
+            output_file = Path(
+                str(active_incremental.get("output_file") or "")
+            )
+            added = 0
+            if output_file.is_file():
+                try:
+                    added = bus.ingest(
+                        parse_fscan_output(
+                            output_file.read_text(
+                                encoding="utf-8", errors="replace"
+                            )
+                        ),
+                        "fscan_incremental",
+                    )
+                except (OSError, ValueError) as exc:
+                    active_incremental["error"] = (
+                        f"{type(exc).__name__}: {exc}"
+                    )
+            active_incremental["status"] = (
+                "completed" if output_file.is_file() else "failed"
+            )
+            active_incremental["completed_at"] = now_text()
+            active_incremental["assets_added"] = added
+            for batch in reversed(incremental_batches):
+                if not isinstance(batch, dict):
+                    continue
+                if int(batch.get("batch") or 0) != int(
+                    active_incremental.get("batch") or 0
+                ):
+                    continue
+                batch.update(active_incremental)
+                break
+            if active_incremental["status"] == "failed":
+                attempted = state.get("incremental_fscan_attempted_ips")
+                if not isinstance(attempted, list):
+                    attempted = []
+                failed_targets = {
+                    str(value)
+                    for value in active_incremental.get("targets") or []
+                }
+                state["incremental_fscan_attempted_ips"] = [
+                    value for value in attempted if str(value) not in failed_targets
+                ]
+                state["incremental_fscan_retry_not_before"] = time.time() + 60
+            if added:
+                changed = True
+                last_new = time.monotonic()
+            append_activity(
+                run_dir,
+                "fscan 新增 IP 补探测第 "
+                f"{active_incremental.get('batch')} 轮已结束：处理 "
+                f"{len(active_incremental.get('targets') or [])} 个 IP，"
+                f"新增资产 {added} 条，结果位于 {output_file}。",
+            )
+            state["active_incremental_fscan"] = {}
+            active_incremental = {}
+            incremental_pid = 0
+
+        initial_fscan_ready = (
+            "fscan" not in tools
+            or (
+                fscan_path.is_file()
+                and not component_process_alive(run_dir, "fscan")
+            )
+        )
+        attempted = state.get("incremental_fscan_attempted_ips")
+        if not isinstance(attempted, list):
+            attempted = []
+            state["incremental_fscan_attempted_ips"] = attempted
+        candidates = incremental_fscan_candidates(bus, attempted)
+        state["incremental_fscan_pending_ips"] = candidates
+        retry_not_before = float(
+            state.get("incremental_fscan_retry_not_before") or 0
+        )
+        if (
+            not incremental_pid
+            and candidates
+            and initial_fscan_ready
+            and time.time() >= retry_not_before
+            and "fscan" in tools
+            and args.fscan_exe is not None
+            and args.fscan_exe.is_file()
+        ):
+            batch_number = len(incremental_batches) + 1
+            try:
+                batch = launch_incremental_fscan(
+                    executable=args.fscan_exe,
+                    run_dir=run_dir,
+                    batch_number=batch_number,
+                    targets=candidates,
+                    port_threads=args.fscan_port_threads,
+                )
+            except OSError as exc:
+                state["incremental_fscan_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                state["incremental_fscan_retry_not_before"] = time.time() + 60
+                append_activity(
+                    run_dir,
+                    "fscan 新增 IP 补探测启动失败："
+                    f"{type(exc).__name__}: {exc}；60 秒后重试。",
+                )
+            else:
+                incremental_batches.append(batch)
+                state["active_incremental_fscan"] = batch
+                attempted.extend(
+                    value for value in candidates if value not in attempted
+                )
+                state["incremental_fscan_pending_ips"] = []
+                state.pop("incremental_fscan_error", None)
+                state.pop("incremental_fscan_retry_not_before", None)
+                incremental_pid = int(batch["pid"])
+                atomic_json_write(state_path, state)
+                append_activity(
+                    run_dir,
+                    f"后台启动 fscan 新增 IP 补探测第 {batch_number} 轮，"
+                    f"本轮 {len(candidates)} 个 IP；仅识别端口和服务，"
+                    "不执行 POC 或口令检测。",
                 )
         if changed:
             state["asset_generation"] = bus.generation
@@ -767,6 +1563,8 @@ def main() -> int:
             active_pid
             and tracked_process_alive(active_pid, active_creation_token, run_dir)
         )
+        if active_alive and active_batch:
+            remember_agent_process_tree(active_batch, active_pid)
         if active_pid and terminal_state and active_alive:
             terminate_agent_process_tree(active_pid)
             active_alive = tracked_process_alive(
@@ -774,6 +1572,7 @@ def main() -> int:
             )
         if active_pid and not active_alive:
             finished_pid = active_pid
+            terminate_remembered_agent_processes(active_batch, run_dir)
             finished = mark_agent_batch_finished(run_dir, batches, finished_pid)
             state["active_agent_pid"] = 0
             state["active_agent_creation_token"] = 0
@@ -791,6 +1590,22 @@ def main() -> int:
                     int(state.get("agent_consumed_generation") or 0), generation_to
                 )
                 clear_agent_retry(state)
+                integrity = (finished or {}).get("report_integrity") if finished else None
+                if isinstance(integrity, dict):
+                    restored = integrity.get("restored") or []
+                    normalized = integrity.get("normalized") or []
+                    if restored:
+                        append_activity(
+                            run_dir,
+                            "\u0041I \u8f93\u51fa\u62a5\u544a\u5b58\u5728\u7f16\u7801/\u4e71\u7801\u635f\u574f\uff0c\u5df2\u9694\u79bb\u635f\u574f\u526f\u672c\u5e76\u6062\u590d\u6279\u6b21\u524d\u7248\u672c\uff1a"
+                            + ", ".join(str(item) for item in restored),
+                        )
+                    elif normalized:
+                        append_activity(
+                            run_dir,
+                            "\u0041I \u8f93\u51fa\u62a5\u544a\u5df2\u81ea\u52a8\u6e05\u7406 ANSI \u63a7\u5236\u7801\u6216\u5e38\u89c1\u4e71\u7801\uff1a"
+                            + ", ".join(str(item) for item in normalized),
+                        )
                 append_activity(
                     run_dir,
                     f"AI 执行记录 PID {finished_pid} 已结束并记录完成，等待新资产。",
@@ -799,13 +1614,50 @@ def main() -> int:
         active_pid = int(state.get("active_agent_pid") or 0)
         if active_pid:
             batch_dir = Path(str(active_batch.get("run_dir") or "")) if active_batch else Path()
+            warn_minutes = max(int(args.agent_stall_warn_minutes), 0)
             stall_status, elapsed_minutes, activity_text = agent_batch_health(
-                batch_dir, max(int(args.agent_stall_warn_minutes), 0)
+                batch_dir, warn_minutes
             )
+            if (
+                stall_status == "suspected_stalled"
+                and args.provider in {"codex", "codexx"}
+            ):
+                session_activity = codex_session_last_activity(run_dir, batch_dir)
+                if session_activity is not None:
+                    session_modified_at, session_path = session_activity
+                    session_elapsed = max(time.time() - session_modified_at, 0) / 60
+                    if session_elapsed < warn_minutes:
+                        stall_status = "active"
+                        elapsed_minutes = session_elapsed
+                        activity_text = datetime.fromtimestamp(
+                            session_modified_at
+                        ).astimezone().isoformat(timespec="seconds")
+                        state["agent_session_path"] = str(session_path)
+                        state.pop("agent_stall_warning_at", None)
             state["agent_stall_status"] = stall_status
             if activity_text:
                 state["agent_last_activity_at"] = activity_text
             if stall_status == "suspected_stalled":
+                recovered_terminal = (
+                    codex_session_terminal_state(run_dir, batch_dir)
+                    if args.provider in {"codex", "codexx"}
+                    else None
+                )
+                if recovered_terminal is not None:
+                    atomic_json_write(
+                        batch_dir / "batch_status.json", recovered_terminal
+                    )
+                    append_activity(
+                        run_dir,
+                        f"AI 执行记录 {active_pid} 的 Codex 会话已明确结束，"
+                        "但 CLI 外壳未退出；正在回收该批次并按结果继续调度。",
+                    )
+                    terminate_agent_process_tree(active_pid)
+                    terminate_remembered_agent_processes(active_batch, run_dir)
+                    state["agent_stall_status"] = "recovering"
+                    atomic_json_write(state_path, state)
+                    time.sleep(max(args.poll_seconds, 1))
+                    continue
                 previous_warning = str(state.get("agent_stall_warning_at") or "")
                 warning_due = not previous_warning
                 if previous_warning:
@@ -828,17 +1680,27 @@ def main() -> int:
             state.pop("agent_last_activity_at", None)
             state.pop("agent_stall_warning_at", None)
 
-        tools = selected_tools(run_dir)
         asset_ready = (
             not args.wait_asset_commander
             or "asset_commander" not in tools
             or asset_commander_ready(run_dir)
         )
-        fscan_ready = (
+        initial_fscan_gate_ready = (
             not args.wait_fscan
             or "fscan" not in tools
-            or (fscan_path.is_file() and not component_process_alive(run_dir, "fscan"))
+            or (
+                fscan_path.is_file()
+                and not component_process_alive(run_dir, "fscan")
+            )
         )
+        incremental_fscan_ready = (
+            "fscan" not in tools
+            or (
+                not state.get("active_incremental_fscan")
+                and not state.get("incremental_fscan_pending_ips")
+            )
+        )
+        fscan_ready = initial_fscan_gate_ready and incremental_fscan_ready
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
         consumed = int(state.get("agent_consumed_generation") or 0)
         retry_not_before = float(state.get("agent_retry_not_before") or 0)
@@ -856,6 +1718,20 @@ def main() -> int:
             auto_agent=args.auto_agent,
             retry_ready=retry_ready,
         )
+        workload_gate_status = "not_needed"
+        if should_launch:
+            workload_gate_status = agent_workload_gate(
+                run_dir,
+                state,
+                bus,
+                consumed_generation=consumed,
+                mode=args.workload_approval_mode,
+                countdown_seconds=max(args.workload_countdown_seconds, 3),
+                threshold=max(args.workload_agent_threshold, 1),
+                project_name=args.project,
+                run_id=run_dir.name,
+            )
+            should_launch = workload_gate_status == "accepted"
         if should_launch:
             summary = write_project_reports(
                 run_dir=run_dir,
@@ -1027,11 +1903,15 @@ def main() -> int:
             retry_ready=retry_ready,
             retry_seconds=retry_seconds,
         )
+        if workload_gate_status == "pending":
+            stage = "awaiting_workload_approval"
+            stage_detail = "\u7b49\u5f85\u7528\u6237\u786e\u8ba4\u5927\u6279\u91cf Agent \u51c6\u5165\uff1b\u540e\u53f0\u8d44\u4ea7\u53d1\u73b0\u4e0e\u5de5\u5177\u4efb\u52a1\u7ee7\u7eed\u8fd0\u884c\u3002"
         state.update(
             status="running",
             stage=stage,
             asset_generation=bus.generation,
             asset_counts={key: len(value) for key, value in bus.bundle().items()},
+            pending_asset_count=bus.pending_count,
             readiness={
                 "asset_commander": asset_ready,
                 "fscan": fscan_ready,
@@ -1039,12 +1919,22 @@ def main() -> int:
                 "auto_agent": args.auto_agent,
                 "wait_for_asset_commander": args.wait_asset_commander,
                 "wait_for_fscan": args.wait_fscan,
+                "incremental_fscan_running": bool(
+                    state.get("active_incremental_fscan")
+                ),
+                "incremental_fscan_pending": len(
+                    state.get("incremental_fscan_pending_ips") or []
+                ),
+                "initial_fscan_gate": initial_fscan_gate_ready,
             },
             detail=(
                 f"{stage_detail}；资产更新轮次 {bus.generation}；"
                 f"AI 已处理到第 {state.get('agent_consumed_generation', 0)} 轮；"
                 f"当前 AI 进程 PID {state.get('active_agent_pid', 0) or '无'}；"
-                f"AI 运行状态 {state.get('agent_stall_status', 'disabled')}"
+                f"AI 运行状态 {state.get('agent_stall_status', 'disabled')}；"
+                f"待确认新资产 {bus.pending_count} 条；"
+                "fscan 新增 IP 补探测 "
+                f"{'运行中' if state.get('active_incremental_fscan') else '空闲'}"
             ),
             updated_at=now_text(),
         )

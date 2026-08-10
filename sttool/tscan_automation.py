@@ -36,6 +36,17 @@ FINGERPRINT_IDENTIFICATION = "\u6307\u7eb9\u8bc6\u522b"
 ONLY_ONE_ACCOUNT = "\u4ec5\u7834\u89e3\u4e00\u4e2a\u8d26\u6237"
 ASSET_WAIT_SECONDS = 1.0
 CDP_START_TIMEOUT_SECONDS = 90.0
+DISCOVERY_STALL_RECOVERY_SECONDS = 600.0
+STAGE_RETRY_DELAY_SECONDS = 60.0
+STAGE_RETRY_LIMIT = 3
+RETRYABLE_STAGE_STATUSES = {"failed", "not_started"}
+DISCOVERY_STOP_METHODS = {
+    "ipscan": "IpScanStop",
+    "urlscan": "UrlScanStop",
+    "subdomain": "SubDomainStop",
+    "dirscan": "DirScanStop",
+    "jsfinder": "JsFinderStop",
+}
 
 
 _TSCAN_RUNTIME_TABLES = {
@@ -271,6 +282,7 @@ def target_asset_bundle(target: str) -> dict[str, list[str]]:
     ips: list[str] = []
     domains: list[str] = []
     urls: list[str] = []
+    endpoints: list[str] = []
     if host:
         try:
             ipaddress.ip_address(host)
@@ -279,14 +291,26 @@ def target_asset_bundle(target: str) -> dict[str, list[str]]:
             domains.append(host)
     if target.strip().lower().startswith(("http://", "https://")):
         urls.append(target.strip())
-    return {"ips": ips, "domains": domains, "urls": urls}
+    parsed = urlsplit(target if "://" in target else f"//{target}")
+    try:
+        port = parsed.port
+    except ValueError:
+        port = None
+    if host and port is not None:
+        endpoints.append(f"{host}:{port}")
+    return {
+        "ips": ips,
+        "domains": domains,
+        "endpoints": endpoints,
+        "urls": urls,
+    }
 
 
 def read_asset_bundle(path: Path, target: str = "") -> dict[str, list[str]]:
     value = read_json(path)
     fallback = target_asset_bundle(target)
     bundle: dict[str, list[str]] = {}
-    for key in ("ips", "domains", "urls"):
+    for key in ("ips", "domains", "endpoints", "urls"):
         raw_values = value.get(key, [])
         values = raw_values if isinstance(raw_values, list) else []
         bundle[key] = _unique([*fallback[key], *(str(item) for item in values)])
@@ -305,10 +329,16 @@ def read_asset_bus_bundle(
     fallback = target_asset_bundle(target) if after_generation <= 0 else {
         "ips": [],
         "domains": [],
+        "endpoints": [],
         "urls": [],
     }
     result = {key: list(values) for key, values in fallback.items()}
-    mapping = {"ip": "ips", "domain": "domains", "url": "urls"}
+    mapping = {
+        "ip": "ips",
+        "domain": "domains",
+        "endpoint": "endpoints",
+        "url": "urls",
+    }
     assets = value.get("assets", [])
     if isinstance(assets, list):
         for item in assets:
@@ -323,19 +353,46 @@ def read_asset_bus_bundle(
     return generation, {key: _unique(values) for key, values in result.items()}
 
 
+def read_asset_bus_generation_range(
+    path: Path, generation_from: int, generation_to: int
+) -> dict[str, list[str]]:
+    value = read_json(path)
+    result = {"ips": [], "domains": [], "endpoints": [], "urls": []}
+    mapping = {
+        "ip": "ips",
+        "domain": "domains",
+        "endpoint": "endpoints",
+        "url": "urls",
+    }
+    assets = value.get("assets", [])
+    if not isinstance(assets, list):
+        return result
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        generation = int(item.get("first_generation") or 0)
+        if not generation_from <= generation <= generation_to:
+            continue
+        key = mapping.get(str(item.get("type") or ""))
+        asset_value = str(item.get("value") or "")
+        if key and asset_value:
+            result[key].append(asset_value)
+    return {key: _unique(values) for key, values in result.items()}
+
+
 def merge_asset_bundles(*bundles: dict[str, list[str]]) -> dict[str, list[str]]:
     return {
         key: _unique(
             [value for bundle in bundles for value in bundle.get(key, [])]
         )
-        for key in ("ips", "domains", "urls")
+        for key in ("ips", "domains", "endpoints", "urls")
     }
 
 
 def filter_assets_by_scope(
     bundle: dict[str, list[str]], scope: str
 ) -> dict[str, list[str]]:
-    result = {"ips": [], "domains": [], "urls": []}
+    result = {"ips": [], "domains": [], "endpoints": [], "urls": []}
     for value in bundle.get("ips", []):
         host = _host_from_value(value)
         try:
@@ -355,6 +412,15 @@ def filter_assets_by_scope(
             pass
         if _host_allowed(host, scope):
             result["domains"].append(host)
+    for value in bundle.get("endpoints", []):
+        host = _host_from_value(value)
+        parsed = urlsplit(f"//{value.strip()}")
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if host and port is not None and _host_allowed(host, scope):
+            result["endpoints"].append(f"{host}:{port}")
     for value in bundle.get("urls", []):
         host = _host_from_value(value)
         if host and _host_allowed(host, scope):
@@ -401,16 +467,293 @@ def web_fingerprint_targets(urls: list[str], domains: list[str], target: str) ->
     return _unique(values)
 
 
-def password_targets(ips: list[str]) -> list[str]:
+PASSWORD_SERVICE_PORTS = {
+    21, 22, 23, 25, 110, 143, 445, 1433, 1521, 3306, 3389, 5432,
+    5900, 6379, 9200, 11211, 27017,
+}
+UNAUTHORIZED_SERVICE_PORTS = PASSWORD_SERVICE_PORTS | {
+    53, 111, 135, 139, 161, 389, 873, 1080, 2049, 2375, 2181,
+    5000, 5601, 7001, 8080, 8081, 8443, 9000, 9090, 15672,
+}
+
+
+def service_targets(endpoints: list[str], allowed_ports: set[int]) -> list[str]:
     targets: list[str] = []
-    for value in ips:
+    for value in endpoints:
         host = _host_from_value(value)
+        parsed = urlsplit(f"//{value.strip()}")
         try:
-            ipaddress.ip_address(host)
+            port = parsed.port
         except ValueError:
+            port = None
+        if not host or port not in allowed_ports:
             continue
         targets.append(host)
     return _unique(targets)
+
+
+def password_targets(endpoints: list[str]) -> list[str]:
+    return service_targets(endpoints, PASSWORD_SERVICE_PORTS)
+
+
+def unauthorized_targets(endpoints: list[str]) -> list[str]:
+    return service_targets(endpoints, UNAUTHORIZED_SERVICE_PORTS)
+
+
+def endpoints_without_web_evidence(
+    endpoints: list[str], urls: list[str]
+) -> list[str]:
+    web_endpoints: set[tuple[str, int]] = set()
+    for value in urls:
+        parsed = urlsplit(value if "://" in value else f"//{value}")
+        host = (parsed.hostname or "").lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if host and port is None and parsed.scheme in {"http", "https"}:
+            port = 443 if parsed.scheme == "https" else 80
+        if host and port is not None:
+            web_endpoints.add((host, port))
+
+    result: list[str] = []
+    for value in endpoints:
+        parsed = urlsplit(f"//{value.strip()}")
+        host = (parsed.hostname or "").lower()
+        try:
+            port = parsed.port
+        except ValueError:
+            port = None
+        if host and port is not None and (host, port) not in web_endpoints:
+            result.append(value)
+    return _unique(result)
+
+
+def build_stage_plan(
+    target: str, assets: dict[str, list[str]]
+) -> dict[str, list[str]]:
+    ips = assets.get("ips", [])
+    domains = assets.get("domains", [])
+    endpoints = assets.get("endpoints", [])
+    urls = assets.get("urls", [])
+    service_endpoints = endpoints_without_web_evidence(endpoints, urls)
+    explicit_web_targets = normalize_poc_urls(urls, [], target)
+    endpoint_hosts = {_host_from_value(value) for value in endpoints}
+    identification_only = [
+        value for value in ips if _host_from_value(value) not in endpoint_hosts
+    ]
+    return {
+        "asset_targets": _unique(
+            [target_for_asset_scan(target), *domains, *ips]
+        ),
+        "web_targets": explicit_web_targets,
+        "fingerprint_targets": web_fingerprint_targets(urls, [], target),
+        "subdomain_targets": root_domains(domains),
+        "unauthorized_targets": unauthorized_targets(service_endpoints),
+        "password_targets": password_targets(service_endpoints),
+        # Nessus is intentionally deferred until it has an explicit configured
+        # second-stage policy. Basic asset identification must not fan out into
+        # a costly scan of every newly discovered host.
+        "nessus_targets": [],
+        "deferred_nessus_targets": _unique([*domains, *ips]),
+        "identification_only": _unique(identification_only),
+    }
+
+
+def retryable_stage_names(result: dict[str, object]) -> list[str]:
+    stages = result.get("stages")
+    if not isinstance(stages, dict):
+        return []
+    return [
+        str(name)
+        for name, value in stages.items()
+        if isinstance(value, dict)
+        and str(value.get("status") or "") in RETRYABLE_STAGE_STATUSES
+    ]
+
+
+def stage_batch_record(
+    *,
+    batch_id: str,
+    generation_from: int,
+    generation_to: int,
+    assets: dict[str, list[str]],
+    result: dict[str, object],
+    now: float | None = None,
+) -> dict[str, object]:
+    pending = retryable_stage_names(result)
+    return {
+        "batch_id": batch_id,
+        "generation_from": generation_from,
+        "generation_to": generation_to,
+        "dispatched_at": now_text(),
+        "assets": {key: list(values) for key, values in assets.items()},
+        "result": result,
+        "pending_stages": pending,
+        "retry_count": 0,
+        "next_retry_at": (now if now is not None else time.time())
+        + STAGE_RETRY_DELAY_SECONDS
+        if pending
+        else 0.0,
+        "retry_attempts": [],
+    }
+
+
+def retry_batch_due(
+    batches: list[object], now: float | None = None
+) -> dict[str, object] | None:
+    current = time.time() if now is None else now
+    for value in batches:
+        if not isinstance(value, dict):
+            continue
+        pending = value.get("pending_stages")
+        if not isinstance(pending, list) or not pending:
+            continue
+        if int(value.get("retry_count") or 0) >= STAGE_RETRY_LIMIT:
+            continue
+        if float(value.get("next_retry_at") or 0.0) <= current:
+            return value
+    return None
+
+
+def record_stage_retry(
+    batch: dict[str, object],
+    result: dict[str, object],
+    now: float | None = None,
+) -> None:
+    current = time.time() if now is None else now
+    retry_count = int(batch.get("retry_count") or 0) + 1
+    pending = retryable_stage_names(result)
+    attempts = batch.get("retry_attempts")
+    if not isinstance(attempts, list):
+        attempts = []
+        batch["retry_attempts"] = attempts
+    attempts.append(
+        {
+            "attempt": retry_count,
+            "attempted_at": now_text(),
+            "stages": list(result.get("stages", {})),
+            "result": result,
+        }
+    )
+    batch["retry_count"] = retry_count
+    batch["pending_stages"] = pending
+    batch["next_retry_at"] = (
+        current + STAGE_RETRY_DELAY_SECONDS
+        if pending and retry_count < STAGE_RETRY_LIMIT
+        else 0.0
+    )
+    if pending and retry_count >= STAGE_RETRY_LIMIT:
+        batch["retry_exhausted_at"] = now_text()
+
+
+def restore_dispatched_automation(
+    previous: dict[str, object],
+) -> tuple[bool, object, object]:
+    automation = previous.get("automation")
+    stages = previous.get("stages", {})
+    batches = previous.get("stage_batches")
+    dispatched = bool(previous.get("automation_dispatched", False))
+    if not isinstance(batches, list) or not batches:
+        return dispatched, automation, stages
+    dispatched = True
+    if isinstance(automation, dict) and isinstance(stages, dict) and stages:
+        return dispatched, automation, stages
+    for value in reversed(batches):
+        if not isinstance(value, dict):
+            continue
+        result = value.get("result")
+        if not isinstance(result, dict):
+            continue
+        automation = result
+        result_stages = result.get("stages")
+        if isinstance(result_stages, dict):
+            stages = result_stages
+        break
+    return dispatched, automation, stages
+
+
+def reconcile_interrupted_stage_retry(state: dict[str, object]) -> bool:
+    active_batch_id = str(state.get("active_batch_id") or "")
+    match = re.fullmatch(r"(.+)-retry-(\d+)", active_batch_id)
+    if match is None:
+        return False
+    batch_id, attempt_text = match.groups()
+    attempt = int(attempt_text)
+    batches = state.get("stage_batches")
+    stages = state.get("stages")
+    if not isinstance(batches, list) or not isinstance(stages, dict):
+        return False
+    for value in batches:
+        if not isinstance(value, dict) or str(value.get("batch_id") or "") != batch_id:
+            continue
+        retry_count = int(value.get("retry_count") or 0)
+        if attempt <= retry_count:
+            return False
+        pending = value.get("pending_stages")
+        if not isinstance(pending, list) or not pending:
+            return False
+        recovered_stages: dict[str, object] = {}
+        for name in (str(item) for item in pending):
+            stage = stages.get(name)
+            recovered_stages[name] = (
+                stage
+                if isinstance(stage, dict)
+                else {
+                    "status": "failed",
+                    "error": "Tscan 窗口在该阶段完成前关闭",
+                }
+            )
+        result: dict[str, object] = {
+            "batch_id": active_batch_id,
+            "requested_stages": list(pending),
+            "stages": recovered_stages,
+            "interrupted": True,
+        }
+        record_stage_retry(value, result)
+        state["automation"] = result
+        state["stages"] = recovered_stages
+        state["active_batch_id"] = ""
+        return True
+    return False
+
+
+def migrate_stage_batch_retries(
+    batches: list[object],
+    asset_bus: Path,
+    scope: str,
+    now: float | None = None,
+) -> bool:
+    current = time.time() if now is None else now
+    changed = False
+    for value in batches:
+        if not isinstance(value, dict) or isinstance(value.get("assets"), dict):
+            continue
+        result = value.get("result")
+        if not isinstance(result, dict):
+            continue
+        try:
+            generation_from = int(value.get("generation_from") or 0)
+            generation_to = int(value.get("generation_to") or 0)
+        except (TypeError, ValueError):
+            continue
+        assets = filter_assets_by_scope(
+            read_asset_bus_generation_range(
+                asset_bus, generation_from, generation_to
+            ),
+            scope,
+        )
+        pending = retryable_stage_names(result)
+        value.update(
+            assets=assets,
+            pending_stages=pending,
+            retry_count=0,
+            next_retry_at=(current + STAGE_RETRY_DELAY_SECONDS if pending else 0.0),
+            retry_attempts=[],
+            retry_state_migrated_at=now_text(),
+        )
+        changed = True
+    return changed
 
 
 def root_domains(domains: list[str]) -> list[str]:
@@ -1579,10 +1922,13 @@ def dispatch_stages_on_page(
     state_path: Path,
     state: dict[str, object],
     batch_id: str,
+    only_stages: set[str] | None = None,
 ) -> dict[str, object]:
     stages: dict[str, dict[str, object]] = {}
 
     def run_stage(name: str, detail: str, callback) -> None:
+        if only_stages is not None and name not in only_stages:
+            return
         update_stage(state_path, state, name, detail)
         try:
             result = callback()
@@ -1601,16 +1947,33 @@ def dispatch_stages_on_page(
         state["active_batch_id"] = batch_id
         atomic_json_write(state_path, state)
 
-    asset_targets = _unique(
-        [target_for_asset_scan(target), *assets["domains"], *assets["ips"]]
-    )
-    poc_targets = normalize_poc_urls(assets["urls"], assets["domains"], target)
-    fingerprint_targets = web_fingerprint_targets(
-        assets["urls"], assets["domains"], target
-    )
-    crack_targets = password_targets(assets["ips"])
-    nessus_targets = _unique([*assets["domains"], *assets["ips"]])
-    subdomain_targets = root_domains(assets["domains"])
+    def run_routed_stage(
+        name: str, detail: str, targets: list[str], callback
+    ) -> None:
+        if only_stages is not None and name not in only_stages:
+            return
+        if targets:
+            run_stage(name, detail, callback)
+            return
+        reason = "本轮没有匹配该模块的资产，已跳过"
+        stages[name] = {
+            "status": "skipped",
+            "result": {"target_count": 0, "reason": reason},
+        }
+        append_activity(state_path, f"{detail}：{reason}")
+        state["stages"] = stages
+        state["active_batch_id"] = batch_id
+        atomic_json_write(state_path, state)
+
+    plan = build_stage_plan(target, assets)
+    asset_targets = plan["asset_targets"]
+    poc_targets = plan["web_targets"]
+    fingerprint_targets = plan["fingerprint_targets"]
+    unauthorized_check_targets = plan["unauthorized_targets"]
+    crack_targets = plan["password_targets"]
+    nessus_targets = plan["nessus_targets"]
+    subdomain_targets = plan["subdomain_targets"]
+    state["asset_routing_plan"] = plan
     run_stage(
         "information_collection",
         "正在配置 TscanPlus 信息收集",
@@ -1621,9 +1984,10 @@ def dispatch_stages_on_page(
         f"已导入 {len(asset_targets)} 个目标，正在启动资产探测",
         lambda: configure_asset_discovery(page, asset_targets, start_scan),
     )
-    run_stage(
+    run_routed_stage(
         "web_fingerprint",
         f"已导入 {len(fingerprint_targets)} 个端点，正在启动 Web 指纹",
+        fingerprint_targets,
         lambda: configure_textarea_scan(
             page,
             "AssetDetect",
@@ -1635,9 +1999,10 @@ def dispatch_stages_on_page(
             "GetUrlScanProgressSnapshot",
         ),
     )
-    run_stage(
+    run_routed_stage(
         "subdomain_enumeration",
         f"已导入 {len(subdomain_targets)} 个根域名，正在启动域名枚举",
+        subdomain_targets,
         lambda: configure_textarea_scan(
             page,
             "AssetDetect",
@@ -1649,9 +2014,10 @@ def dispatch_stages_on_page(
             "GetSubDomainProgressSnapshot",
         ),
     )
-    run_stage(
+    run_routed_stage(
         "directory_enumeration",
         f"已导入 {len(poc_targets)} 个 URL，正在启动目录枚举",
+        poc_targets,
         lambda: configure_textarea_scan(
             page,
             "AssetDetect",
@@ -1663,9 +2029,10 @@ def dispatch_stages_on_page(
             "GetDirScanProgressSnapshot",
         ),
     )
-    run_stage(
+    run_routed_stage(
         "jsfinder",
         f"已导入 {len(poc_targets)} 个 URL，正在启动 JsFinder",
+        poc_targets,
         lambda: configure_textarea_scan(
             page,
             "AssetDetect",
@@ -1677,9 +2044,10 @@ def dispatch_stages_on_page(
             "GetJsFinderProgressSnapshot",
         ),
     )
-    run_stage(
+    run_routed_stage(
         "swagger",
         f"已导入 {len(poc_targets)} 个 URL，正在启动 Swagger 检测",
+        poc_targets,
         lambda: configure_textarea_scan(
             page,
             "AssetDetect",
@@ -1690,9 +2058,10 @@ def dispatch_stages_on_page(
             start_scan,
         ),
     )
-    run_stage(
+    run_routed_stage(
         "waf_detection",
         f"已导入 {len(poc_targets)} 个 URL，正在启动 WAF 识别",
+        poc_targets,
         lambda: configure_textarea_scan(
             page,
             "AssetDetect",
@@ -1703,24 +2072,30 @@ def dispatch_stages_on_page(
             start_scan,
         ),
     )
-    run_stage(
+    run_routed_stage(
         "poc_check",
         f"已导入 {len(poc_targets)} 个 URL，正在启动 POC 检测",
+        poc_targets,
         lambda: configure_poc_check(page, poc_targets, start_scan),
     )
-    run_stage(
+    run_routed_stage(
         "unauthorized_check",
-        f"已导入 {len(nessus_targets)} 个域名/IP，正在启动未授权检测",
-        lambda: configure_unauthorized_check(page, nessus_targets, start_scan),
+        f"已导入 {len(unauthorized_check_targets)} 个已识别服务主机，正在启动未授权检测",
+        unauthorized_check_targets,
+        lambda: configure_unauthorized_check(
+            page, unauthorized_check_targets, start_scan
+        ),
     )
-    run_stage(
+    run_routed_stage(
         "password_crack",
-        f"已导入 {len(crack_targets)} 个 IP，正在启动密码检测",
+        f"已导入 {len(crack_targets)} 个已识别登录服务主机，正在启动密码检测",
+        crack_targets,
         lambda: configure_password_crack(page, crack_targets, start_scan),
     )
-    run_stage(
+    run_routed_stage(
         "dump_all",
         f"已导入 {len(poc_targets)} 个 URL，正在启动 DumpAll 检测",
+        poc_targets,
         lambda: configure_textarea_scan(
             page,
             "VulCheck",
@@ -1731,23 +2106,33 @@ def dispatch_stages_on_page(
             start_scan,
         ),
     )
-    run_stage(
+    run_routed_stage(
         "awvs_scan",
         f"已导入 {len(poc_targets)} 个 URL，正在测试连接并启动 AWVS",
+        poc_targets,
         lambda: configure_awvs_scan(page, poc_targets, start_scan),
     )
-    run_stage(
+    run_routed_stage(
         "nessus_scan",
         f"已导入 {len(nessus_targets)} 个域名/IP，正在测试连接并启动 Nessus",
+        nessus_targets,
         lambda: configure_nessus_scan(page, nessus_targets, start_scan),
     )
-    click_tab(page, "AssetDetect")
+    try:
+        click_tab(page, "AssetDetect")
+    except Exception as exc:
+        append_activity(
+            state_path,
+            f"批次阶段结果已保存，但返回资产页失败：{exc}",
+        )
     status_counts: dict[str, int] = {}
     for value in stages.values():
         status = str(value.get("status") or "unknown")
         status_counts[status] = status_counts.get(status, 0) + 1
     return {
         "batch_id": batch_id,
+        "requested_stages": sorted(only_stages) if only_stages is not None else [],
+        "routing_plan": plan,
         "stages": stages,
         "stage_status_counts": status_counts,
         "asset_counts": {key: len(values) for key, values in assets.items()},
@@ -1958,10 +2343,72 @@ def progress_has_active_tasks(progress: dict[str, object]) -> bool:
     )
 
 
-def monitoring_state(progress: dict[str, object]) -> tuple[str, str, str]:
+def stalled_discovery_modules(
+    progress: dict[str, object],
+    last_changed: dict[str, float],
+    now: float,
+    threshold: float = DISCOVERY_STALL_RECOVERY_SECONDS,
+) -> list[str]:
+    return [
+        name
+        for name in DISCOVERY_STOP_METHODS
+        if isinstance(progress.get(name), dict)
+        and str(progress[name].get("status") or "").lower() == "running"
+        and now - last_changed.get(name, now) >= threshold
+    ]
+
+
+def stop_discovery_modules(page: Page, modules: list[str]) -> list[str]:
+    methods = [DISCOVERY_STOP_METHODS[name] for name in modules]
+    result = page.evaluate(
+        """async (methods) => {
+          const app = window.go?.main?.App;
+          const stopped = [];
+          for (const method of methods) {
+            try { await app[method](); stopped.push(method); } catch (_) {}
+          }
+          return stopped;
+        }""",
+        methods,
+    )
+    stopped_methods = result if isinstance(result, list) else []
+    return [
+        name
+        for name, method in DISCOVERY_STOP_METHODS.items()
+        if method in stopped_methods
+    ]
+
+
+def exhausted_stage_retries(batches: list[object]) -> list[str]:
+    stages: list[str] = []
+    for value in batches:
+        if not isinstance(value, dict) or not value.get("retry_exhausted_at"):
+            continue
+        pending = value.get("pending_stages")
+        if not isinstance(pending, list):
+            continue
+        for name in pending:
+            stage = str(name)
+            if stage and stage not in stages:
+                stages.append(stage)
+    return stages
+
+
+def monitoring_state(
+    progress: dict[str, object], batches: list[object] | None = None
+) -> tuple[str, str, str]:
     summary = progress_summary(progress)
     if progress_has_active_tasks(progress):
         return "running", "monitoring", f"TscanPlus 任务监控：{summary}"
+    exhausted = exhausted_stage_retries(batches or [])
+    if exhausted:
+        return (
+            "manual_required",
+            "retry_exhausted",
+            "TscanPlus 以下阶段自动重试 3 次后仍未确认启动："
+            + "、".join(exhausted)
+            + "；已停止自动重试，窗口保持待机并继续接收新增资产",
+        )
     return (
         "waiting_assets",
         "standby",
@@ -1992,6 +2439,15 @@ def monitor_tscan_process(
                 f"http://127.0.0.1:{port}"
             )
             page = browser.contexts[0].pages[0]
+            existing_batches = state.get("stage_batches")
+            if isinstance(existing_batches, list) and migrate_stage_batch_retries(
+                existing_batches, asset_bus, scope
+            ):
+                append_activity(
+                    state_path,
+                    "已为旧版 TscanPlus 批次恢复资产快照和阶段重试状态",
+                )
+                atomic_json_write(state_path, state)
             while tscan_process_alive(
                 pid,
                 int(state.get("process_creation_token") or 0),
@@ -2037,9 +2493,88 @@ def monitor_tscan_process(
                     after_generation=consumed_generation,
                 )
                 delta = filter_assets_by_scope(delta, scope)
+                pending_assets = generation > consumed_generation and any(delta.values())
+                stalled_modules = stalled_discovery_modules(
+                    progress, last_changed, now
+                )
+                if pending_assets and stalled_modules:
+                    stopped = stop_discovery_modules(page, stalled_modules)
+                    if stopped:
+                        append_activity(
+                            state_path,
+                            "发现类子任务长时间无进度且有新增资产等待，已仅暂停："
+                            + "、".join(stopped)
+                            + "；TscanPlus 主程序与其他任务继续保留。",
+                        )
+                        progress = collect_module_progress(page)
+                batches = state.get("stage_batches")
+                if not isinstance(batches, list):
+                    batches = []
+                    state["stage_batches"] = batches
+                retry_dispatched = False
+                retry_batch = retry_batch_due(batches)
+                if retry_batch is not None and not progress_has_active_tasks(progress):
+                    pending_stages = {
+                        str(value)
+                        for value in retry_batch.get("pending_stages", [])
+                    }
+                    retry_assets = retry_batch.get("assets")
+                    if pending_stages and isinstance(retry_assets, dict):
+                        retry_id = (
+                            f"{retry_batch.get('batch_id', 'asset-batch')}-retry-"
+                            f"{int(retry_batch.get('retry_count') or 0) + 1}"
+                        )
+                        append_activity(
+                            state_path,
+                            "TscanPlus 仅重试上次失败或未确认启动的阶段："
+                            + "、".join(sorted(pending_stages)),
+                        )
+                        try:
+                            retry_result = dispatch_stages_on_page(
+                                page,
+                                target,
+                                retry_assets,
+                                start_scan,
+                                state_path,
+                                state,
+                                retry_id,
+                                pending_stages,
+                            )
+                        except Exception:
+                            partial_stages = state.get("stages")
+                            recovered = {
+                                name: (
+                                    partial_stages[name]
+                                    if isinstance(partial_stages, dict)
+                                    and isinstance(partial_stages.get(name), dict)
+                                    else {
+                                        "status": "failed",
+                                        "error": "Tscan 窗口在该阶段完成前关闭",
+                                    }
+                                )
+                                for name in pending_stages
+                            }
+                            retry_result = {
+                                "batch_id": retry_id,
+                                "requested_stages": sorted(pending_stages),
+                                "stages": recovered,
+                                "interrupted": True,
+                            }
+                            record_stage_retry(retry_batch, retry_result)
+                            state["automation"] = retry_result
+                            state["active_batch_id"] = ""
+                            atomic_json_write(state_path, state)
+                            raise
+                        else:
+                            record_stage_retry(retry_batch, retry_result)
+                            state["automation"] = retry_result
+                            state["active_batch_id"] = ""
+                            atomic_json_write(state_path, state)
+                        progress = collect_module_progress(page)
+                        retry_dispatched = True
                 if (
-                    generation > consumed_generation
-                    and any(delta.values())
+                    pending_assets
+                    and not retry_dispatched
                     and not progress_has_active_tasks(progress)
                 ):
                     batch_id = f"asset-generation-{generation}"
@@ -2047,7 +2582,7 @@ def monitor_tscan_process(
                         state_path,
                         "TscanPlus 检测到新增资产，准备执行增量批次："
                         f"{len(delta['ips'])} IP / {len(delta['domains'])} 域名 / "
-                        f"{len(delta['urls'])} URL。",
+                        f"{len(delta['endpoints'])} 端点 / {len(delta['urls'])} URL。",
                     )
                     batch_result = dispatch_stages_on_page(
                         page,
@@ -2058,18 +2593,14 @@ def monitor_tscan_process(
                         state,
                         batch_id,
                     )
-                    batches = state.get("stage_batches")
-                    if not isinstance(batches, list):
-                        batches = []
-                        state["stage_batches"] = batches
                     batches.append(
-                        {
-                            "batch_id": batch_id,
-                            "generation_from": consumed_generation + 1,
-                            "generation_to": generation,
-                            "dispatched_at": now_text(),
-                            "result": batch_result,
-                        }
+                        stage_batch_record(
+                            batch_id=batch_id,
+                            generation_from=consumed_generation + 1,
+                            generation_to=generation,
+                            assets=delta,
+                            result=batch_result,
+                        )
                     )
                     state["asset_bus_generation"] = generation
                     state["automation"] = batch_result
@@ -2077,12 +2608,17 @@ def monitor_tscan_process(
                     progress = collect_module_progress(page)
 
                 summary = progress_summary(progress)
-                monitor_status, monitor_stage, monitor_detail = monitoring_state(progress)
+                monitor_status, monitor_stage, monitor_detail = monitoring_state(
+                    progress, batches
+                )
                 rendered = json.dumps(
                     {
                         "progress": progress,
                         "health": health,
                         "asset_bus_generation": state.get("asset_bus_generation", 0),
+                        "monitor_status": monitor_status,
+                        "monitor_stage": monitor_stage,
+                        "monitor_detail": monitor_detail,
                     },
                     ensure_ascii=False,
                     sort_keys=True,
@@ -2099,7 +2635,7 @@ def monitor_tscan_process(
                     atomic_json_write(state_path, state)
                     last_rendered = rendered
                 log_interval = 30 if progress_has_active_tasks(progress) else 300
-                if now - last_log_at >= log_interval or health:
+                if now - last_log_at >= log_interval:
                     message = f"任务进度：{summary}"
                     if health:
                         message += f"；健康提示：{health}"
@@ -2107,7 +2643,16 @@ def monitor_tscan_process(
                     last_log_at = now
                 time.sleep(2.0)
     except Exception as exc:
-        append_activity(state_path, f"进度监控降级为进程监控：{exc}")
+        state.update(
+            status="manual_required",
+            stage="connection_lost",
+            detail=f"TscanPlus 窗口或 WebView 连接中断，保留待重试阶段：{exc}",
+            updated_at=now_text(),
+            error=str(exc),
+        )
+        atomic_json_write(state_path, state)
+        append_activity(state_path, str(state["detail"]))
+        return 1
     return monitor_process(child, pid, state)
 
 def parse_args() -> argparse.Namespace:
@@ -2131,9 +2676,13 @@ def main() -> int:
     source_exe = args.exe.resolve()
     state_path = args.state.resolve()
     previous = read_json(state_path)
+    interrupted_retry_recovered = reconcile_interrupted_stage_retry(previous)
     previous_exe = Path(str(previous.get("exe") or ""))
     child_pid = int(previous.get("pid") or 0)
     child_creation_token = int(previous.get("process_creation_token") or 0)
+    automation_dispatched, restored_automation, restored_stages = (
+        restore_dispatched_automation(previous)
+    )
     if (
         previous_exe.is_file()
         and tscan_process_alive(child_pid, child_creation_token, previous_exe)
@@ -2157,15 +2706,20 @@ def main() -> int:
         "pid": None,
         "process_creation_token": child_creation_token,
         "cdp_port": None,
-        "automation": previous.get("automation"),
-        "automation_dispatched": bool(previous.get("automation_dispatched", False)),
-        "stages": previous.get("stages", {}),
+        "automation": restored_automation,
+        "automation_dispatched": automation_dispatched,
+        "stages": restored_stages,
         "asset_counts": previous.get("asset_counts", {}),
         "asset_bus_generation": int(previous.get("asset_bus_generation") or 0),
         "stage_batches": previous.get("stage_batches", []),
         "error": "",
     }
     atomic_json_write(state_path, state)
+    if interrupted_retry_recovered:
+        append_activity(
+            state_path,
+            "已恢复上次中断的阶段重试结果，仅保留仍失败或未确认启动的阶段",
+        )
     if not exe.is_file():
         state.update(status="failed", updated_at=now_text(), error=f"Tscan executable not found: {exe}")
         atomic_json_write(state_path, state)
@@ -2195,9 +2749,9 @@ def main() -> int:
                 )
 
         if not reattached:
-            state["automation"] = None
-            state["automation_dispatched"] = False
-            state["stages"] = {}
+            if not state["automation_dispatched"]:
+                state["automation"] = None
+                state["stages"] = {}
             port = free_local_port()
             state["cdp_port"] = port
             atomic_json_write(state_path, state)
@@ -2268,13 +2822,13 @@ def main() -> int:
             if not isinstance(stage_batches, list):
                 stage_batches = []
             stage_batches.append(
-                {
-                    "batch_id": "initial",
-                    "generation_from": 1 if bus_generation else 0,
-                    "generation_to": bus_generation,
-                    "dispatched_at": now_text(),
-                    "result": automation,
-                }
+                stage_batch_record(
+                    batch_id="initial",
+                    generation_from=1 if bus_generation else 0,
+                    generation_to=bus_generation,
+                    assets=assets,
+                    result=automation,
+                )
             )
             state.update(
                 automation=automation,
@@ -2322,7 +2876,14 @@ def main() -> int:
             args.asset_bus.resolve(),
             not args.prepare_only,
         )
-        state.update(status="completed", updated_at=now_text(), exit_code=exit_code)
+        if exit_code == 0:
+            state.update(status="completed", updated_at=now_text(), exit_code=0)
+        else:
+            state.update(
+                status="manual_required",
+                updated_at=now_text(),
+                exit_code=exit_code,
+            )
         atomic_json_write(state_path, state)
         return int(exit_code)
     except Exception as exc:

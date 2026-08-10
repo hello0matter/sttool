@@ -8,7 +8,8 @@ from pathlib import Path
 from tkinter import messagebox, scrolledtext, ttk
 
 from .activity import activity_log_path
-from .models import RunState
+from .models import ProcessRecord, RunState
+from .runtime import process_record_alive
 
 
 COORDINATOR_MANAGED_COMPONENTS = {
@@ -20,6 +21,21 @@ AI_BATCH_COMPONENT_NAME = "AI 执行记录"
 
 
 LOG_BOTTOM_THRESHOLD = 0.98
+_SENSITIVE_QUERY_RE = re.compile(
+    r"(?i)([?&](?:access_token|api[_-]?key|apikey|token|secret|client_secret|authorization)=)([^&\s'\"<>]+)"
+)
+_AUTHORIZATION_RE = re.compile(
+    r"(?i)(authorization\s*[:=]\s*(?:bearer|basic)?\s*)([^\s,;]+)"
+)
+_KNOWN_TOKEN_RE = re.compile(
+    r"(?<![A-Za-z0-9_])(?:gh[pousr]_[A-Za-z0-9_]{16,}|github_pat_[A-Za-z0-9_]{16,})(?![A-Za-z0-9_])"
+)
+
+
+def redact_sensitive_text(value: str) -> str:
+    text = _SENSITIVE_QUERY_RE.sub(r"\1[REDACTED]", value)
+    text = _AUTHORIZATION_RE.sub(r"\1[REDACTED]", text)
+    return _KNOWN_TOKEN_RE.sub("[REDACTED]", text)
 
 
 def log_refresh_scroll_policy(
@@ -47,7 +63,7 @@ def tail_text(path: Path, limit: int = 160_000) -> str:
             data = handle.read()
     except OSError as exc:
         return f"读取失败：{exc}"
-    return data.decode("utf-8", errors="replace")
+    return redact_sensitive_text(data.decode("utf-8", errors="replace"))
 
 
 def filter_component_activity(
@@ -638,6 +654,9 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         state = load_json(
             run_dir / "tool_data" / "semantic" / "sttool_bridge_state.json"
         )
+        status = str(state.get("status") or "")
+        state_stage = str(state.get("stage") or "")
+        state_detail = str(state.get("detail") or "")
         asset_status = str(state.get("asset_workflow_status") or "")
         queued = state.get("queued_asset_targets")
         queued_count = len(queued) if isinstance(queued, list) else 0
@@ -663,15 +682,26 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             asset_count = int(state.get("asset_candidate_count") or 0)
             fscan_count = int(state.get("fscan_candidate_count") or 0)
             rejected_count = int(state.get("rejected") or 0)
+            runtime_status = (
+                status
+                if status in {"completed", "failed", "stopped", "interrupted"}
+                else "running"
+            )
             return (
-                "running",
-                "directory_scan",
-                f"\u6700\u7ec8 Web \u626b\u63cf\u76ee\u6807 {accepted_count} \u4e2a\uff1b"
+                runtime_status,
+                state_stage or "directory_scan",
+                state_detail
+                or f"\u6700\u7ec8 Web \u626b\u63cf\u76ee\u6807 {accepted_count} \u4e2a\uff1b"
                 f"AssetCommander \u5019\u9009 {asset_count} \u4e2a\uff1b"
                 f"Fscan \u5019\u9009 {fscan_count} \u4e2a\uff1b"
                 f"\u8fc7\u6ee4 {rejected_count} \u4e2a",
             )
-        return "running", "directory_scan", f"\u5df2\u540c\u6b65 {target_count} \u4e2a\u626b\u63cf\u76ee\u6807"
+        return (
+            status or "running",
+            state_stage or "directory_scan",
+            state_detail
+            or f"\u5df2\u540c\u6b65 {target_count} \u4e2a\u626b\u63cf\u76ee\u6807",
+        )
     if component_id == "vulnx":
         state = load_json(run_dir / "tool_data" / "coordinator" / "state.json")
         status = str(state.get("vuln_intel_status") or "pending")
@@ -716,10 +746,22 @@ def component_display_runtime(
         if not isinstance(process, dict) or process.get("component_id") != component_id:
             continue
         process_status = str(process.get("status") or "")
+        if process_status == "running":
+            try:
+                record = ProcessRecord.from_dict(process)
+            except (TypeError, ValueError):
+                record = None
+            if record is not None and not process_record_alive(record, run_dir):
+                process_status = "exited"
         if process_status not in {"stopped", "exited"}:
             return tool_status, stage, detail
+        if process_status == "exited" and tool_status == "completed":
+            if component_id == "asset_commander":
+                detail = "资产工作流已完成；项目进程已退出，结果与资产队列已保留"
+            return tool_status, stage, detail
         last_state = tool_status or "unknown"
-        stopped_detail = f"组件进程已{process_status}；工作流最后状态：{last_state}"
+        process_label = "停止" if process_status == "stopped" else "退出"
+        stopped_detail = f"组件进程已{process_label}；工作流最后状态：{last_state}"
         if stage:
             stopped_detail += f"，最后步骤：{stage}"
         if detail:

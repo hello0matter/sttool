@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import json
+import os
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -13,11 +15,25 @@ from sttool.run_log_dialog import (
     component_runtime,
     component_summary_status,
     log_refresh_scroll_policy,
+    redact_sensitive_text,
     render_component_state,
 )
 
 
 class RunLogDialogTests(unittest.TestCase):
+    def test_log_text_redacts_credentials(self) -> None:
+        content = (
+            "https://api.example.test/?access_token=secret-value "
+            "Authorization: Bearer bearer-value ghp_1234567890abcdefghijkl"
+        )
+
+        redacted = redact_sensitive_text(content)
+
+        self.assertNotIn("secret-value", redacted)
+        self.assertNotIn("bearer-value", redacted)
+        self.assertNotIn("ghp_1234567890abcdefghijkl", redacted)
+        self.assertIn("access_token=[REDACTED]", redacted)
+
     def test_ai_batches_are_rendered_as_chinese_summary(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -287,6 +303,112 @@ class RunLogDialogTests(unittest.TestCase):
                 component_summary_status(run_dir, "asset_commander", "exited"),
                 "完成",
             )
+
+    def test_display_runtime_uses_live_process_state_for_finished_tool(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            results = run_dir / "results"
+            results.mkdir()
+            (results / "fscan.txt").write_text("done", encoding="utf-8")
+            (run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "processes": [
+                            {
+                                "component_id": "fscan",
+                                "name": "fscan",
+                                "pid": os.getpid(),
+                                "command": [],
+                                "cwd": str(run_dir),
+                                "started_at": "",
+                                "status": "running",
+                                "creation_token": 1,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch("sttool.run_log_dialog.process_record_alive", return_value=False):
+                self.assertEqual(
+                    component_display_runtime(run_dir, "fscan"),
+                    ("completed", "result_saved", "结果已保存：fscan.txt"),
+                )
+
+    def test_completed_semantic_scan_is_not_displayed_as_running(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = (
+                run_dir / "tool_data" / "semantic" / "sttool_bridge_state.json"
+            )
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "stage": "stopped",
+                        "detail": "项目已结束；路径结果已保留。",
+                        "accepted_count": 12,
+                        "asset_candidate_count": 10,
+                        "fscan_candidate_count": 2,
+                        "rejected": 3,
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                component_runtime(run_dir, "semantic_dirscan"),
+                ("completed", "stopped", "项目已结束；路径结果已保留。"),
+            )
+
+    def test_exited_asset_commander_does_not_claim_window_is_retained(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = (
+                run_dir / "tool_data" / "asset_commander" / "workflow_state.json"
+            )
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "completed",
+                        "current_step": "",
+                        "monitoring_asset_bus": True,
+                        "asset_bus_generation": 5,
+                        "steps": {},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "processes": [
+                            {
+                                "component_id": "asset_commander",
+                                "name": "AssetCommander",
+                                "pid": 123,
+                                "command": [],
+                                "cwd": str(run_dir),
+                                "started_at": "",
+                                "status": "exited",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            status, _stage, detail = component_display_runtime(
+                run_dir, "asset_commander"
+            )
+
+            self.assertEqual(status, "completed")
+            self.assertIn("项目进程已退出", detail)
+            self.assertNotIn("窗口仍保留", detail)
 
     def test_project_coordinator_exposes_incremental_state_and_batches(self) -> None:
         with TemporaryDirectory() as temporary:

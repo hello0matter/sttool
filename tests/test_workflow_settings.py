@@ -24,6 +24,11 @@ class WorkflowSettingsTests(unittest.TestCase):
         self.assertEqual(settings["semantic_max_depth"], 2)
         self.assertTrue(settings["semantic_run_dirsearch"])
         self.assertEqual(settings["agent_stall_warn_minutes"], 15)
+        self.assertFalse(settings["allow_cidr_expansion"])
+        self.assertEqual(settings["new_asset_approval_mode"], "countdown_accept")
+        self.assertEqual(settings["new_asset_countdown_seconds"], 10)
+        self.assertTrue(settings["new_asset_popup_enabled"])
+        self.assertTrue(settings["new_asset_popup_topmost"])
 
     def test_fast_preset_allows_early_incremental_agent(self) -> None:
         settings = work_mode_defaults("fast")
@@ -66,6 +71,23 @@ class WorkflowSettingsTests(unittest.TestCase):
         self.assertEqual(settings["semantic_max_depth"], 0)
         self.assertEqual(settings["semantic_max_rate"], 10000)
         self.assertFalse(settings["semantic_run_dirsearch"])
+
+    def test_asset_approval_policy_is_normalized_and_clamped(self) -> None:
+        settings = normalize_workflow_settings(
+            {
+                "work_mode": "balanced",
+                "allow_cidr_expansion": True,
+                "new_asset_approval_mode": "invalid",
+                "new_asset_countdown_seconds": 1,
+                "new_asset_popup_topmost": False,
+            }
+        )
+
+        self.assertEqual(settings["work_mode"], "custom")
+        self.assertTrue(settings["allow_cidr_expansion"])
+        self.assertEqual(settings["new_asset_approval_mode"], "countdown_accept")
+        self.assertEqual(settings["new_asset_countdown_seconds"], 3)
+        self.assertFalse(settings["new_asset_popup_topmost"])
 
     def test_invalid_reasoning_effort_uses_cli_default(self) -> None:
         self.assertEqual(normalized_reasoning_effort("HIGH"), "high")

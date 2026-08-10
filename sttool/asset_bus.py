@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import ipaddress
 import json
 import os
@@ -7,9 +8,10 @@ import re
 import sqlite3
 import tempfile
 import time
-from datetime import datetime
+from collections import Counter
+from datetime import datetime, timedelta
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlsplit, urlunsplit
 
 
@@ -21,6 +23,36 @@ _HOST_PORT_RE = re.compile(
 _DOMAIN_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)+[A-Za-z]{2,63}(?![A-Za-z0-9_-])"
 )
+_NON_WEB_SERVICE_PORTS = {
+    21,
+    22,
+    23,
+    25,
+    110,
+    143,
+    445,
+    1080,
+    1433,
+    1521,
+    3306,
+    3389,
+    5432,
+    5900,
+    6379,
+    11211,
+    27017,
+}
+_HTTP_EVIDENCE_RE = re.compile(
+    r"(?:\[[^]\r\n]+\]\s*)?(?:HTTP/\d(?:\.\d)?\s+)?[1-5]\d{2}(?:\s|$)",
+    re.IGNORECASE,
+)
+_DIRSEARCH_RESULT_RE = re.compile(
+    r"^\s*(?P<status>\d{3})\s+"
+    r"(?P<size>\d+(?:\.\d+)?(?:B|KB|MB|GB))\s+"
+    r"(?P<url>https?://\S+)",
+    re.IGNORECASE,
+)
+DIRSEARCH_REPEATED_SIGNATURE_LIMIT = 20
 
 
 def now_text() -> str:
@@ -53,7 +85,7 @@ def atomic_json_write(path: Path, value: object) -> None:
 
 def read_json(path: Path) -> dict[str, object]:
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(path.read_text(encoding="utf-8-sig"))
     except (OSError, ValueError, TypeError, json.JSONDecodeError):
         return {}
     return value if isinstance(value, dict) else {}
@@ -86,12 +118,23 @@ def _scope_rules(scope: str) -> tuple[list[ipaddress._BaseNetwork], list[str]]:
     return networks, list(dict.fromkeys(domains))
 
 
-def asset_allowed(value: str, scope: str) -> bool:
-    if scope.strip() == "*":
-        return True
+def asset_allowed(value: str, scope: str, target: str = "") -> bool:
+    normalized_scope = scope.strip()
     host = _host(value)
     if not host:
         return False
+    if normalized_scope == "*":
+        target_host = _host(target)
+        if not target_host:
+            return True
+        try:
+            target_address = ipaddress.ip_address(target_host)
+        except ValueError:
+            return host == target_host or host.endswith(f".{target_host}")
+        try:
+            return ipaddress.ip_address(host) == target_address
+        except ValueError:
+            return False
     networks, domains = _scope_rules(scope)
     try:
         address = ipaddress.ip_address(host)
@@ -158,10 +201,18 @@ def target_assets(target: str) -> list[tuple[str, str]]:
 
 def parse_fscan_output(content: str) -> list[tuple[str, str]]:
     found: list[tuple[str, str]] = []
-    for match in _FSCAN_URL_RE.finditer(content):
-        normalized = normalize_asset(match.group(0))
-        if normalized is not None:
-            found.append(normalized)
+    for line in content.splitlines():
+        for match in _FSCAN_URL_RE.finditer(line):
+            normalized = normalize_asset(match.group(0))
+            if normalized is None:
+                continue
+            parsed = urlsplit(normalized[0])
+            port = parsed.port or (443 if parsed.scheme == "https" else 80)
+            evidence = line[match.end() :]
+            if port not in _NON_WEB_SERVICE_PORTS or _HTTP_EVIDENCE_RE.search(
+                evidence
+            ):
+                found.append(normalized)
     for match in _HOST_PORT_RE.finditer(content):
         normalized = normalize_asset(match.group(0), "endpoint")
         if normalized is not None:
@@ -173,6 +224,30 @@ def parse_fscan_output(content: str) -> list[tuple[str, str]]:
                     found.append((host, "ip"))
                 except ValueError:
                     found.append((host, "domain"))
+    return list(dict.fromkeys(found))
+
+
+def parse_dirsearch_output(
+    content: str,
+    repeated_signature_limit: int = DIRSEARCH_REPEATED_SIGNATURE_LIMIT,
+) -> list[tuple[str, str]]:
+    """Return uncommon dirsearch hits while suppressing soft-200 response walls."""
+    rows: list[tuple[tuple[str, str], str]] = []
+    for line in content.splitlines():
+        match = _DIRSEARCH_RESULT_RE.match(line)
+        if match is None:
+            continue
+        signature = (match.group("status"), match.group("size").upper())
+        rows.append((signature, match.group("url")))
+    signature_counts = Counter(signature for signature, _url in rows)
+    limit = max(int(repeated_signature_limit), 1)
+    found: list[tuple[str, str]] = []
+    for signature, url in rows:
+        if signature_counts[signature] >= limit:
+            continue
+        normalized = normalize_asset(url, "url")
+        if normalized is not None:
+            found.append(normalized)
     return list(dict.fromkeys(found))
 
 
@@ -270,47 +345,227 @@ def extract_tscan_assets(path: Path) -> list[tuple[str, str]]:
 
 
 class AssetBus:
-    def __init__(self, path: Path, scope: str) -> None:
+    def __init__(
+        self,
+        path: Path,
+        scope: str,
+        target: str = "",
+        *,
+        approval_mode: str = "automatic",
+        approval_seconds: int = 10,
+        allow_cidr_expansion: bool = True,
+    ) -> None:
         self.path = path
         self.scope = scope
+        self.target = target
+        self.approval_mode = (
+            approval_mode
+            if approval_mode
+            in {"automatic", "countdown_accept", "countdown_reject", "manual"}
+            else "countdown_accept"
+        )
+        self.approval_seconds = max(3, min(3600, int(approval_seconds)))
+        self.allow_cidr_expansion = bool(allow_cidr_expansion)
         self.value = read_json(path)
         if not self.value:
             self.value = {
-                "schema_version": 1,
+                "schema_version": 2,
                 "generation": 0,
                 "created_at": now_text(),
                 "updated_at": now_text(),
                 "assets": [],
+                "pending": [],
+                "rejected": [],
+                "decision_history": [],
             }
+        self.last_ingest_stats = {"added": 0, "pending": 0, "rejected": 0}
+        self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}
 
     @property
     def generation(self) -> int:
         return int(self.value.get("generation") or 0)
 
-    def ingest(self, assets: Iterable[tuple[str, str]], source: str) -> int:
-        records = self.value.get("assets")
+    @property
+    def pending_count(self) -> int:
+        pending = self.value.get("pending")
+        return len([item for item in pending if isinstance(item, dict)]) if isinstance(pending, list) else 0
+
+    def _reload(self) -> None:
+        latest = read_json(self.path)
+        if latest:
+            self.value = latest
+
+    @staticmethod
+    def _records(value: dict[str, object], key: str) -> list[dict[str, object]]:
+        records = value.get(key)
         if not isinstance(records, list):
             records = []
-            self.value["assets"] = records
+            value[key] = records
+        return [item for item in records if isinstance(item, dict)]
+
+    def _same_target_cidr(self, value: str) -> bool:
+        target_host = _host(self.target)
+        candidate_host = _host(value)
+        try:
+            target_address = ipaddress.ip_address(target_host)
+            candidate_address = ipaddress.ip_address(candidate_host)
+        except ValueError:
+            return False
+        if target_address.version != 4 or candidate_address.version != 4:
+            return False
+        if target_address == candidate_address:
+            return False
+        return candidate_address in ipaddress.ip_network(
+            f"{target_address}/24", strict=False
+        )
+
+    def _pending_record(
+        self,
+        value: str,
+        kind: str,
+        source: str,
+        reason: str,
+        timestamp: str,
+    ) -> dict[str, object]:
+        identity = hashlib.sha256(
+            f"{kind}\0{value}".encode("utf-8")
+        ).hexdigest()[:20]
+        host = _host(value) or value
+        record: dict[str, object] = {
+            "id": identity,
+            "group_key": host,
+            "value": value,
+            "type": kind,
+            "source": source,
+            "sources": [source],
+            "discovered_at": timestamp,
+            "last_seen_at": timestamp,
+            "reason": reason,
+            "scope_status": "pending_confirmation",
+            "decision": "pending",
+            "default_action": (
+                "reject" if self.approval_mode == "countdown_reject" else "accept"
+            ),
+        }
+        if self.approval_mode != "manual":
+            deadline = datetime.now().astimezone() + timedelta(
+                seconds=self.approval_seconds
+            )
+            record["decision_deadline_at"] = deadline.isoformat(timespec="seconds")
+        return record
+
+    @staticmethod
+    def _update_sources(record: dict[str, object], source: str, timestamp: str) -> None:
+        record["last_seen_at"] = timestamp
+        sources = record.get("sources")
+        if not isinstance(sources, list):
+            sources = []
+            record["sources"] = sources
+        if source not in sources:
+            sources.append(source)
+
+    def ingest(self, assets: Iterable[tuple[str, str]], source: str) -> int:
+        self._reload()
+        records = self._records(self.value, "assets")
+        self.value["assets"] = records
+        pending = self._records(self.value, "pending")
+        self.value["pending"] = pending
+        rejected_log = self._records(self.value, "rejected")
+        self.value["rejected"] = rejected_log
         by_key = {
             (str(item.get("type")), str(item.get("value"))): item
             for item in records
-            if isinstance(item, dict)
         }
+        pending_by_key = {
+            (str(item.get("type")), str(item.get("value"))): item
+            for item in pending
+        }
+        rejected_by_key = {
+            (str(item.get("type")), str(item.get("value")), str(item.get("source"))): item
+            for item in rejected_log
+        }
+        known_hosts = {
+            _host(str(item.get("value") or "")) for item in records
+        }
+        known_hosts.discard("")
         accepted: list[tuple[str, str]] = []
-        rejected: list[tuple[str, str]] = []
-        for raw_value, raw_type in assets:
+        queued = 0
+        rejected = 0
+        timestamp = now_text()
+        for raw_value, raw_type in dict.fromkeys(assets):
             normalized = normalize_asset(raw_value, raw_type)
             if normalized is None:
                 continue
-            (accepted if asset_allowed(normalized[0], self.scope) else rejected).append(normalized)
+            value, kind = normalized
+            key = (kind, value)
+            existing = by_key.get(key)
+            if existing is not None:
+                self._update_sources(existing, source, timestamp)
+                continue
+            host = _host(value)
+            same_known_host = bool(host and host in known_hosts)
+            in_scope = asset_allowed(value, self.scope, self.target)
+            same_cidr = self._same_target_cidr(value)
+            decision = "accept"
+            reason = "authorized_new_host"
+            if source == "project_target" or same_known_host:
+                decision = "accept"
+                reason = "project_target" if source == "project_target" else "known_host_detail"
+            elif same_cidr and not self.allow_cidr_expansion:
+                decision = "reject"
+                reason = "cidr_expansion_disabled"
+            elif not in_scope and self.scope.strip() != "*":
+                decision = "reject"
+                reason = "outside_explicit_scope"
+            elif self.approval_mode == "automatic":
+                decision = "accept"
+                reason = "automatic_policy"
+            else:
+                decision = "pending"
+                reason = "same_cidr" if same_cidr else "new_host"
+
+            if decision == "accept":
+                accepted.append(normalized)
+                if host:
+                    known_hosts.add(host)
+                continue
+            if decision == "pending":
+                pending_key = (kind, value)
+                record = pending_by_key.get(pending_key)
+                if record is None:
+                    record = self._pending_record(
+                        value, kind, source, reason, timestamp
+                    )
+                    pending.append(record)
+                    pending_by_key[pending_key] = record
+                    queued += 1
+                else:
+                    self._update_sources(record, source, timestamp)
+                continue
+            rejected_key = (kind, value, source)
+            record = rejected_by_key.get(rejected_key)
+            if record is None:
+                record = {
+                    "value": value,
+                    "type": kind,
+                    "source": source,
+                    "seen_at": timestamp,
+                    "scope_status": "rejected",
+                    "reason": reason,
+                }
+                rejected_log.append(record)
+                rejected_by_key[rejected_key] = record
+                rejected += 1
+            else:
+                record["seen_at"] = timestamp
+                record["reason"] = reason
+
         new_keys = [
             item
             for item in dict.fromkeys(accepted)
             if (item[1], item[0]) not in by_key
         ]
         next_generation = self.generation + 1 if new_keys else self.generation
-        timestamp = now_text()
         for value, kind in dict.fromkeys(accepted):
             key = (kind, value)
             record = by_key.get(key)
@@ -327,34 +582,176 @@ class AssetBus:
                 records.append(record)
                 by_key[key] = record
             else:
-                record["last_seen_at"] = timestamp
-                sources = record.get("sources")
-                if not isinstance(sources, list):
-                    sources = []
-                    record["sources"] = sources
-                if source not in sources:
-                    sources.append(source)
-        if rejected:
-            rejected_log = self.value.get("rejected")
-            if not isinstance(rejected_log, list):
-                rejected_log = []
-                self.value["rejected"] = rejected_log
-            for value, kind in dict.fromkeys(rejected):
+                self._update_sources(record, source, timestamp)
+        if new_keys:
+            self.value["generation"] = next_generation
+            self.value["last_new_asset_at"] = timestamp
+        self.value["schema_version"] = 2
+        self.value["updated_at"] = timestamp
+        self.value["approval_policy"] = {
+            "mode": self.approval_mode,
+            "countdown_seconds": self.approval_seconds,
+            "allow_cidr_expansion": self.allow_cidr_expansion,
+            "wildcard_scope_semantics": "target_auto_expansion_requires_policy",
+        }
+        atomic_json_write(self.path, self.value)
+        self.last_ingest_stats = {
+            "added": len(new_keys),
+            "pending": queued,
+            "rejected": rejected,
+        }
+        return len(new_keys)
+
+    def apply_decisions(self, decisions: Iterable[dict[str, object]]) -> int:
+        self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}
+        self._reload()
+        pending = self._records(self.value, "pending")
+        decision_by_id: dict[str, dict[str, object]] = {}
+        for item in decisions:
+            identity = str(item.get("id") or "")
+            action = str(item.get("action") or "").lower()
+            if identity and action in {"accept", "reject"}:
+                decision_by_id[identity] = item
+        pending_ids = {str(item.get("id") or "") for item in pending}
+        decision_by_id = {
+            identity: item
+            for identity, item in decision_by_id.items()
+            if identity in pending_ids
+        }
+        if not decision_by_id:
+            return 0
+        return self._resolve_pending(
+            pending,
+            lambda item: decision_by_id.get(str(item.get("id") or "")),
+            resolution_source="user",
+        )
+
+    def resolve_due_pending(self, grace_seconds: int = 0) -> int:
+        self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}
+        self._reload()
+        pending = self._records(self.value, "pending")
+        now = datetime.now().astimezone()
+        due_by_id: dict[str, dict[str, object]] = {}
+        for item in pending:
+            deadline_text = str(item.get("decision_deadline_at") or "")
+            if not deadline_text:
+                continue
+            try:
+                deadline = datetime.fromisoformat(deadline_text)
+            except ValueError:
+                continue
+            if deadline.tzinfo is None:
+                deadline = deadline.astimezone()
+            if deadline + timedelta(seconds=max(grace_seconds, 0)) > now:
+                continue
+            identity = str(item.get("id") or "")
+            if identity:
+                due_by_id[identity] = {
+                    "id": identity,
+                    "action": item.get("default_action") or "accept",
+                    "decided_at": now_text(),
+                }
+        if not due_by_id:
+            return 0
+        return self._resolve_pending(
+            pending,
+            lambda item: due_by_id.get(str(item.get("id") or "")),
+            resolution_source="countdown",
+        )
+
+    def _resolve_pending(
+        self,
+        pending: list[dict[str, object]],
+        resolver: Callable[[dict[str, object]], dict[str, object] | None],
+        *,
+        resolution_source: str,
+    ) -> int:
+        records = self._records(self.value, "assets")
+        rejected_log = self._records(self.value, "rejected")
+        history = self._records(self.value, "decision_history")
+        by_key = {
+            (str(item.get("type")), str(item.get("value"))): item
+            for item in records
+        }
+        retained: list[dict[str, object]] = []
+        accepted_rows: list[dict[str, object]] = []
+        rejected_count = 0
+        timestamp = now_text()
+        for item in pending:
+            decision = resolver(item)
+            if not isinstance(decision, dict):
+                retained.append(item)
+                continue
+            action = str(decision.get("action") or "").lower()
+            if action not in {"accept", "reject"}:
+                retained.append(item)
+                continue
+            history.append(
+                {
+                    "id": item.get("id"),
+                    "group_key": item.get("group_key"),
+                    "value": item.get("value"),
+                    "type": item.get("type"),
+                    "source": item.get("source"),
+                    "action": action,
+                    "decision_source": resolution_source,
+                    "decided_at": decision.get("decided_at") or timestamp,
+                    "reason": item.get("reason"),
+                }
+            )
+            if action == "accept":
+                accepted_rows.append(item)
+            else:
                 rejected_log.append(
                     {
-                        "value": value,
-                        "type": kind,
-                        "source": source,
+                        "value": item.get("value"),
+                        "type": item.get("type"),
+                        "source": item.get("source"),
                         "seen_at": timestamp,
-                        "scope_status": "rejected",
+                        "scope_status": "rejected_by_decision",
+                        "reason": "user_or_policy_rejected",
                     }
                 )
-        if new_keys:
+                rejected_count += 1
+        new_rows = [
+            item
+            for item in accepted_rows
+            if (str(item.get("type")), str(item.get("value"))) not in by_key
+        ]
+        next_generation = self.generation + 1 if new_rows else self.generation
+        for item in accepted_rows:
+            key = (str(item.get("type")), str(item.get("value")))
+            record = by_key.get(key)
+            source = str(item.get("source") or "asset_approval")
+            if record is None:
+                record = {
+                    "value": item.get("value"),
+                    "type": item.get("type"),
+                    "first_seen_at": item.get("discovered_at") or timestamp,
+                    "last_seen_at": timestamp,
+                    "first_generation": next_generation,
+                    "sources": list(item.get("sources") or [source]),
+                    "scope_status": "allowed_by_decision",
+                }
+                records.append(record)
+                by_key[key] = record
+            else:
+                self._update_sources(record, source, timestamp)
+        self.value["pending"] = retained
+        self.value["assets"] = records
+        self.value["rejected"] = rejected_log[-2000:]
+        self.value["decision_history"] = history[-1000:]
+        if new_rows:
             self.value["generation"] = next_generation
             self.value["last_new_asset_at"] = timestamp
         self.value["updated_at"] = timestamp
         atomic_json_write(self.path, self.value)
-        return len(new_keys)
+        self.last_resolution_stats = {
+            "added": len(new_rows),
+            "accepted": len(accepted_rows),
+            "rejected": rejected_count,
+        }
+        return len(new_rows)
 
     def bundle(self, after_generation: int = 0) -> dict[str, list[str]]:
         result = {"ips": [], "domains": [], "endpoints": [], "urls": []}

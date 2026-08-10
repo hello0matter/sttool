@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import MagicMock, patch
 
 from sttool.agent_launcher import write_agent_batch_script
 from sttool.asset_bus import AssetBus, parse_fscan_output
@@ -14,22 +15,276 @@ from sttool.runtime import now_text, process_creation_token
 from sttool.project_coordinator import (
     agent_launch_ready,
     agent_batch_health,
+    codex_session_last_activity,
+    codex_session_terminal_state,
     asset_commander_ready,
+    build_incremental_fscan_command,
     build_batch_prompt,
     compact_ai_summary_input,
+    completed_batch_orphan_processes,
     component_process_alive,
     coordinator_wait_stage,
+    incremental_fscan_candidates,
     agent_batch_terminal_state,
+    asset_commander_collision_paths,
     mark_agent_batch_finished,
     schedule_agent_retry,
+    semantic_dirsearch_marker,
+    semantic_dirsearch_output_active,
+    semantic_dirsearch_output_files,
     render_risk_summary,
+    remember_agent_process_tree,
+    recover_completed_batch_orphans,
     response_text,
+    terminate_remembered_agent_processes,
     tracked_process_alive,
     tscan_source_ready,
 )
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_semantic_dirsearch_output_files_and_markers_are_stable(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            semantic_state = run_dir / "tool_data" / "semantic" / "state.json"
+            output = (
+                semantic_state.parent
+                / "projects"
+                / "demo"
+                / "runs"
+                / "run-1"
+                / "dirsearch.txt"
+            )
+            output.parent.mkdir(parents=True)
+            output.write_text(
+                "200    15B   https://app.example.test/health\n",
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                semantic_dirsearch_output_files(semantic_state), [output]
+            )
+            marker = semantic_dirsearch_marker(run_dir, [output])
+            self.assertEqual(marker[0][0], output.relative_to(run_dir).as_posix())
+            self.assertEqual(marker[0][1], output.stat().st_size)
+            self.assertEqual(marker[0][2], output.stat().st_mtime_ns)
+
+    def test_semantic_dirsearch_output_active_matches_exact_output_path(self) -> None:
+        output = Path("run") / "dirsearch.txt"
+        matching = MagicMock()
+        matching.info = {
+            "name": "python.exe",
+            "cmdline": ["python", "dirsearch", "-o", str(output)],
+        }
+        unrelated = MagicMock()
+        unrelated.info = {
+            "name": "python.exe",
+            "cmdline": ["python", "dirsearch", "-o", "other.txt"],
+        }
+
+        with patch(
+            "sttool.project_coordinator.psutil.process_iter",
+            return_value=[unrelated, matching],
+        ):
+            self.assertTrue(semantic_dirsearch_output_active([output]))
+            self.assertFalse(
+                semantic_dirsearch_output_active([Path("missing") / "result.txt"])
+            )
+
+    def test_completed_batch_orphan_requires_provider_prompt_and_cwd(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            batch_dir = run_dir / "agent_batches" / "0001"
+            batch_dir.mkdir(parents=True)
+            prompt = batch_dir / "prompt.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            (batch_dir / "batch.json").write_text(
+                json.dumps(
+                    {
+                        "provider": "codexx",
+                        "started_at": "1970-01-01T00:00:10+00:00",
+                        "completed_at": "1970-01-01T00:00:20+00:00",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            matching = MagicMock()
+            matching.info = {
+                "pid": 123,
+                "name": "codexx.exe",
+                "cmdline": ["codexx.exe", "--yolo", str(prompt)],
+                "create_time": 10.5,
+            }
+            matching.cwd.return_value = str(run_dir)
+            unrelated = MagicMock()
+            unrelated.info = {
+                "pid": 456,
+                "name": "codexx.exe",
+                "cmdline": ["codexx.exe", "--yolo", "manual prompt"],
+                "create_time": 11.5,
+            }
+            unrelated.cwd.return_value = str(run_dir)
+            reused_prompt = MagicMock()
+            reused_prompt.info = {
+                "pid": 789,
+                "name": "codexx.exe",
+                "cmdline": ["codexx.exe", "--yolo", str(prompt)],
+                "create_time": 3600.0,
+            }
+            reused_prompt.cwd.return_value = str(run_dir)
+            batch = {
+                "status": "completed",
+                "run_dir": str(batch_dir),
+            }
+
+            with patch(
+                "sttool.project_coordinator.psutil.process_iter",
+                return_value=[matching, unrelated, reused_prompt],
+            ):
+                matches = completed_batch_orphan_processes(batch, run_dir)
+
+            self.assertEqual(
+                matches, [{"pid": 123, "creation_token": 10_500_000}]
+            )
+
+    def test_recover_completed_batch_orphans_terminates_verified_match(self) -> None:
+        batch: dict[str, object] = {"status": "completed"}
+        match = {"pid": 123, "creation_token": 456}
+        with (
+            patch(
+                "sttool.project_coordinator.completed_batch_orphan_processes",
+                return_value=[match],
+            ),
+            patch(
+                "sttool.project_coordinator.tracked_process_alive",
+                return_value=True,
+            ),
+            patch(
+                "sttool.project_coordinator.terminate_agent_process_tree"
+            ) as terminate,
+        ):
+            recovered = recover_completed_batch_orphans([batch], Path.cwd())
+
+        self.assertEqual(recovered, [123])
+        self.assertEqual(batch["owned_processes"], [match])
+        terminate.assert_called_once_with(123)
+
+    def test_remembered_agent_processes_require_matching_creation_token(self) -> None:
+        batch: dict[str, object] = {}
+        remember_agent_process_tree(batch, os.getpid())
+        remembered = batch.get("owned_processes")
+        self.assertIsInstance(remembered, list)
+        self.assertTrue(
+            any(item.get("pid") == os.getpid() for item in remembered)
+        )
+
+        remembered[0]["creation_token"] = int(
+            remembered[0]["creation_token"]
+        ) + 1
+        with unittest.mock.patch(
+            "sttool.project_coordinator.terminate_agent_process_tree"
+        ) as terminate:
+            terminate_remembered_agent_processes(batch, Path.cwd())
+        terminate.assert_not_called()
+
+    def test_codex_completed_session_recovers_stuck_cli_wrapper(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            batch_dir = run_dir / "agent_batches" / "0001"
+            sessions = root / "sessions"
+            batch_dir.mkdir(parents=True)
+            sessions.mkdir()
+            (batch_dir / "prompt.txt").write_text("prompt", encoding="utf-8")
+            session = sessions / "turn.jsonl"
+            events = (
+                {
+                    "timestamp": "2026-08-07T13:37:51Z",
+                    "type": "session_meta",
+                    "payload": {"cwd": str(run_dir)},
+                },
+                {
+                    "timestamp": "2026-08-07T13:37:52Z",
+                    "payload": {"type": "agent_message", "message": str(run_dir)},
+                },
+                {
+                    "timestamp": "2026-08-07T13:37:53Z",
+                    "payload": {
+                        "type": "error",
+                        "message": "unexpected status 503 Service Unavailable, url: secret",
+                    },
+                },
+                {
+                    "timestamp": "2026-08-07T13:37:54Z",
+                    "payload": {"type": "task_complete"},
+                },
+            )
+            session.write_text(
+                "\n".join(json.dumps(item) for item in events),
+                encoding="utf-8",
+            )
+
+            self.assertEqual(
+                codex_session_terminal_state(run_dir, batch_dir, sessions),
+                {
+                    "status": "failed",
+                    "completed_at": "2026-08-07T13:37:54Z",
+                    "exit_code": 1,
+                    "source": "codex_session",
+                    "error": "Codex provider error: 503 Service Unavailable",
+                },
+            )
+
+    def test_collision_paths_find_results_and_evidence(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            project = (
+                run_dir
+                / "tool_data"
+                / "asset_commander"
+                / "workspace"
+                / "demo"
+            )
+            evidence = project / "evidence"
+            evidence.mkdir(parents=True)
+            results = project / "results.csv"
+            results.write_text("url,host,request_mode\n", encoding="utf-8")
+
+            self.assertEqual(
+                asset_commander_collision_paths(run_dir), ([results], [evidence])
+            )
+
+    def test_incremental_fscan_only_selects_unattempted_ips(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(Path(temporary) / "assets.json", "*")
+            bus.ingest(
+                [
+                    ("192.0.2.10", "ip"),
+                    ("192.0.2.11", "ip"),
+                    ("app.example.com", "domain"),
+                ],
+                "test",
+            )
+
+            self.assertEqual(
+                incremental_fscan_candidates(bus, ["192.0.2.10"]),
+                ["192.0.2.11"],
+            )
+
+    def test_incremental_fscan_command_is_bounded_service_detection(self) -> None:
+        command = build_incremental_fscan_command(
+            Path("fscan.exe"),
+            Path("targets.txt"),
+            Path("result.txt"),
+            321,
+        )
+
+        self.assertEqual(command[:3], ["fscan.exe", "-hf", "targets.txt"])
+        self.assertIn("-nobr", command)
+        self.assertIn("-nopoc", command)
+        self.assertEqual(command[command.index("-t") + 1], "321")
+        self.assertNotIn("-h", command)
+
     def test_agent_batch_health_reports_stall_without_killing_process(self) -> None:
         with TemporaryDirectory() as temporary:
             batch_dir = Path(temporary)
@@ -42,6 +297,34 @@ class ProjectCoordinatorTests(unittest.TestCase):
             self.assertEqual(status, "suspected_stalled")
             self.assertEqual(activity, datetime.fromtimestamp(marker.stat().st_mtime).astimezone().isoformat(timespec="seconds"))
             self.assertGreaterEqual(elapsed or 0, 6)
+
+    def test_codex_session_activity_tracks_progress_outside_batch_directory(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            run_dir = root / "run"
+            batch_dir = run_dir / "agent_batches" / "0001"
+            sessions = root / "sessions"
+            batch_dir.mkdir(parents=True)
+            sessions.mkdir()
+            prompt = batch_dir / "prompt.txt"
+            prompt.write_text("prompt", encoding="utf-8")
+            session = sessions / "rollout.jsonl"
+            session.write_text(
+                json.dumps(
+                    {
+                        "type": "session_meta",
+                        "payload": {"cwd": str(run_dir)},
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            modified_at = prompt.stat().st_mtime + 30
+            os.utime(session, (modified_at, modified_at))
+
+            activity = codex_session_last_activity(run_dir, batch_dir, sessions)
+
+            self.assertEqual(activity, (modified_at, session))
 
     def test_large_ai_summary_input_is_bounded_and_keeps_both_ends(self) -> None:
         summary = "A" * 120 + "MIDDLE" + "Z" * 120

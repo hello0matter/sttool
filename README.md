@@ -99,7 +99,7 @@ STTool 会向 AssetCommander 传入项目名、目标、授权范围和本次运
 
 - 授权范围默认是 `*`，含义仅为主目标及本项目已提供或已发现资产全部放行，不会生成 `0.0.0.0/0` 或扫描整个互联网。
 - `scope=*` 时 FScan 只从精确主目标开始；显式 IP/CIDR 范围仍按该范围执行。
-- C 段裂变在显式 CIDR 授权下按该网段执行；`scope=*` 时只会根据项目内已提供/已发现 IPv4 派生对应 `/24`，不代表扫描任意互联网地址。
+- C 段扩展开关默认关闭；关闭时 AssetCommander 不执行显式 CIDR 或 `scope=*` 派生 `/24` 的裂变。开启后只会执行已授权网段的资产发现，新主机仍须通过准入弹窗或倒计时默认决策，才会进入后续工具。
 - IP 反查得到的域名会过滤回当前项目域名范围。
 - 业务关键词可通过 OpenAI Responses 兼容接口生成；使用 `OPENAI_API_KEY`，并可通过 `OPENAI_BASE_URL`、`OPENAI_MODEL` 配置，未配置或请求失败时使用本地关键词。
 - 对撞默认保留原端口，并启用 80、443 和非标准端口；关闭绝对路径、WAF 绕过和强制 SNI，并发数为 150。
@@ -116,6 +116,8 @@ STTool 不读取或覆盖 Codexx、Codex、Claude CLI 的登录凭据；仅在�
 
 
 ## 增量资产总线与 Agent 批次
+
+新增主机确认弹窗不会暂停现有扫描和报告整理；待确认资产不会进入 fscan、Tscan、dirsearch 或 Agent。即使主界面关闭，协调器仍会在倒计时结束后按项目保存的默认动作处理，避免流程永久卡住。
 
 - `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
 - AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。

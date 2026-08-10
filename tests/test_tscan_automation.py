@@ -7,24 +7,36 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from unittest.mock import patch
 
 from sttool.tscan_automation import (
+    build_stage_plan,
     CDP_START_TIMEOUT_SECONDS,
     classify_connection_feedback,
     dismiss_blocking_modals,
+    dispatch_stages_on_page,
     filter_assets_by_scope,
     modal_requires_retry,
     monitoring_state,
+    migrate_stage_batch_retries,
     normalize_poc_urls,
     password_targets,
     prepare_tscan_workspace,
     process_creation_token,
     read_asset_bundle,
     read_asset_bus_bundle,
+    read_asset_bus_generation_range,
+    reconcile_interrupted_stage_retry,
+    record_stage_retry,
+    retry_batch_due,
+    retryable_stage_names,
+    restore_dispatched_automation,
     scope_allows_all,
     select_available_pocs,
     select_unauthorized_services,
+    stalled_discovery_modules,
     stage_status_from_result,
+    stage_batch_record,
     target_asset_bundle,
     tscan_process_alive,
     web_fingerprint_targets,
@@ -44,6 +56,257 @@ class ModalPage:
 
 
 class TscanAutomationTests(unittest.TestCase):
+    def test_interrupted_retry_preserves_successes_and_retries_only_failures(self) -> None:
+        state = {
+            "active_batch_id": "asset-generation-6-retry-1",
+            "stages": {
+                "waf_detection": {"status": "submitted"},
+                "poc_check": {"status": "not_started"},
+            },
+            "stage_batches": [
+                {
+                    "batch_id": "asset-generation-6",
+                    "pending_stages": ["waf_detection", "poc_check", "dump_all"],
+                    "retry_count": 0,
+                    "retry_attempts": [],
+                }
+            ],
+        }
+
+        self.assertTrue(reconcile_interrupted_stage_retry(state))
+        batch = state["stage_batches"][0]
+        self.assertEqual(batch["retry_count"], 1)
+        self.assertEqual(batch["pending_stages"], ["poc_check", "dump_all"])
+        self.assertEqual(
+            batch["retry_attempts"][0]["result"]["stages"]["dump_all"]["status"],
+            "failed",
+        )
+        self.assertEqual(state["active_batch_id"], "")
+        self.assertFalse(reconcile_interrupted_stage_retry(state))
+
+    def test_batch_history_prevents_full_redispatch_after_wrapper_restart(self) -> None:
+        old_result = {
+            "batch_id": "asset-generation-6",
+            "stages": {
+                "swagger": {"status": "submitted"},
+                "jsfinder": {"status": "not_started"},
+            },
+        }
+        dispatched, automation, stages = restore_dispatched_automation(
+            {
+                "automation_dispatched": False,
+                "automation": None,
+                "stages": {"partial_restart_stage": {"status": "submitted"}},
+                "stage_batches": [
+                    {"batch_id": "asset-generation-6", "result": old_result}
+                ],
+            }
+        )
+
+        self.assertTrue(dispatched)
+        self.assertIs(automation, old_result)
+        self.assertEqual(stages, old_result["stages"])
+
+    def test_new_tscan_run_still_requires_initial_dispatch(self) -> None:
+        self.assertEqual(
+            restore_dispatched_automation(
+                {
+                    "automation_dispatched": False,
+                    "automation": None,
+                    "stages": {},
+                    "stage_batches": [],
+                }
+            ),
+            (False, None, {}),
+        )
+
+    def test_dispatch_stage_filter_does_not_repeat_submitted_modules(self) -> None:
+        with TemporaryDirectory() as temporary:
+            state_path = Path(temporary) / "tool_data" / "tscan" / "state.json"
+            state: dict[str, object] = {}
+            assets = {
+                "ips": [],
+                "domains": ["app.example.com"],
+                "endpoints": [],
+                "urls": ["https://app.example.com/"],
+            }
+            with (
+                patch(
+                    "sttool.tscan_automation.configure_textarea_scan",
+                    return_value={"clicked": True, "acknowledged": True},
+                ) as configure_textarea,
+                patch("sttool.tscan_automation.configure_asset_discovery") as asset,
+                patch("sttool.tscan_automation.configure_poc_check") as poc,
+                patch("sttool.tscan_automation.click_tab"),
+            ):
+                result = dispatch_stages_on_page(
+                    object(),
+                    "https://app.example.com/",
+                    assets,
+                    True,
+                    state_path,
+                    state,
+                    "retry-1",
+                    {"jsfinder"},
+                )
+
+            self.assertEqual(result["requested_stages"], ["jsfinder"])
+            self.assertEqual(list(result["stages"]), ["jsfinder"])
+            self.assertEqual(configure_textarea.call_count, 1)
+            self.assertEqual(configure_textarea.call_args.args[2], "JsFinder")
+            asset.assert_not_called()
+            poc.assert_not_called()
+
+    def test_old_stage_batch_recovers_exact_generation_assets(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "generation": 7,
+                        "assets": [
+                            {
+                                "value": "old.example.com",
+                                "type": "domain",
+                                "first_generation": 4,
+                            },
+                            {
+                                "value": "api.example.com",
+                                "type": "domain",
+                                "first_generation": 5,
+                            },
+                            {
+                                "value": "https://api.example.com/",
+                                "type": "url",
+                                "first_generation": 6,
+                            },
+                            {
+                                "value": "later.example.com",
+                                "type": "domain",
+                                "first_generation": 7,
+                            },
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            batch = {
+                "batch_id": "asset-generation-6",
+                "generation_from": 5,
+                "generation_to": 6,
+                "result": {
+                    "stages": {
+                        "swagger": {"status": "submitted"},
+                        "jsfinder": {"status": "not_started"},
+                    }
+                },
+            }
+
+            self.assertEqual(
+                read_asset_bus_generation_range(path, 5, 6),
+                {
+                    "ips": [],
+                    "domains": ["api.example.com"],
+                    "endpoints": [],
+                    "urls": ["https://api.example.com/"],
+                },
+            )
+            self.assertTrue(
+                migrate_stage_batch_retries(
+                    [batch], path, "example.com", now=100.0
+                )
+            )
+            self.assertEqual(batch["pending_stages"], ["jsfinder"])
+            self.assertEqual(batch["next_retry_at"], 160.0)
+            self.assertNotIn("later.example.com", batch["assets"]["domains"])
+            self.assertFalse(
+                migrate_stage_batch_retries(
+                    [batch], path, "example.com", now=200.0
+                )
+            )
+
+    def test_stage_retry_tracks_only_failed_and_unconfirmed_stages(self) -> None:
+        result = {
+            "stages": {
+                "asset_discovery": {"status": "failed"},
+                "swagger": {"status": "submitted"},
+                "jsfinder": {"status": "not_started"},
+                "nessus_scan": {"status": "skipped"},
+            }
+        }
+        assets = {
+            "ips": [],
+            "domains": ["app.example.com"],
+            "endpoints": [],
+            "urls": ["https://app.example.com/"],
+        }
+
+        batch = stage_batch_record(
+            batch_id="asset-generation-2",
+            generation_from=2,
+            generation_to=2,
+            assets=assets,
+            result=result,
+            now=100.0,
+        )
+
+        self.assertEqual(
+            retryable_stage_names(result), ["asset_discovery", "jsfinder"]
+        )
+        self.assertEqual(batch["assets"], assets)
+        self.assertIsNone(retry_batch_due([batch], now=159.0))
+        self.assertIs(retry_batch_due([batch], now=160.0), batch)
+
+        record_stage_retry(
+            batch,
+            {
+                "stages": {
+                    "asset_discovery": {"status": "submitted"},
+                    "jsfinder": {"status": "not_started"},
+                }
+            },
+            now=160.0,
+        )
+        self.assertEqual(batch["pending_stages"], ["jsfinder"])
+        self.assertEqual(batch["retry_count"], 1)
+        self.assertNotIn("swagger", batch["retry_attempts"][0]["stages"])
+
+    def test_stage_retry_stops_after_limit(self) -> None:
+        batch = {
+            "pending_stages": ["poc_check"],
+            "retry_count": 2,
+            "next_retry_at": 0.0,
+            "retry_attempts": [],
+        }
+
+        record_stage_retry(
+            batch,
+            {"stages": {"poc_check": {"status": "failed"}}},
+            now=200.0,
+        )
+
+        self.assertEqual(batch["retry_count"], 3)
+        self.assertEqual(batch["pending_stages"], ["poc_check"])
+        self.assertEqual(batch["next_retry_at"], 0.0)
+        self.assertIn("retry_exhausted_at", batch)
+        self.assertIsNone(retry_batch_due([batch], now=999.0))
+
+    def test_only_stalled_discovery_modules_are_recoverable(self) -> None:
+        progress = {
+            "jsfinder": {"status": "running"},
+            "dirscan": {"status": "running"},
+            "poccheck": {"status": "running"},
+        }
+
+        self.assertEqual(
+            stalled_discovery_modules(
+                progress,
+                {"jsfinder": 0.0, "dirscan": 500.0, "poccheck": 0.0},
+                700.0,
+            ),
+            ["jsfinder"],
+        )
+
     def test_tscan_process_identity_rejects_reused_pid(self) -> None:
         token = process_creation_token(os.getpid())
         executable = Path(sys.executable)
@@ -79,6 +342,22 @@ class TscanAutomationTests(unittest.TestCase):
         )
         self.assertEqual((status, stage), ("running", "monitoring"))
         self.assertIn("pwdcrack=33.93%", detail)
+
+    def test_monitoring_state_reports_exhausted_stage_retries(self) -> None:
+        status, stage, detail = monitoring_state(
+            {"ipscan": {"status": "idle"}, "ipscanRunning": False},
+            [
+                {
+                    "pending_stages": ["poc_check", "dump_all"],
+                    "retry_count": 3,
+                    "retry_exhausted_at": "2026-08-08T13:54:18+08:00",
+                }
+            ],
+        )
+
+        self.assertEqual((status, stage), ("manual_required", "retry_exhausted"))
+        self.assertIn("poc_check、dump_all", detail)
+        self.assertIn("已停止自动重试", detail)
 
     def test_support_modal_prefers_decline_and_never_opens_external_page(self) -> None:
         page = ModalPage(["\u5c0f\u5c0f\u652f\u6301\u4e00\u4e0b\uff1a\u6682\u65f6\u4e0d\u7528"])
@@ -284,6 +563,7 @@ class TscanAutomationTests(unittest.TestCase):
         bundle = {
             "ips": ["192.0.2.10", "198.51.100.7"],
             "domains": ["app.example.com", "outside.test"],
+            "endpoints": [],
             "urls": ["https://app.example.com/login", "https://outside.test"],
         }
 
@@ -294,6 +574,7 @@ class TscanAutomationTests(unittest.TestCase):
         bundle = {
             "ips": ["192.0.2.10", "198.51.100.7"],
             "domains": ["app.example.com", "outside.test"],
+            "endpoints": ["192.0.2.10:22", "198.51.100.7:6379"],
             "urls": ["https://app.example.com/login", "https://outside.test"],
         }
 
@@ -302,6 +583,7 @@ class TscanAutomationTests(unittest.TestCase):
             {
                 "ips": ["192.0.2.10"],
                 "domains": ["app.example.com"],
+                "endpoints": ["192.0.2.10:22"],
                 "urls": ["https://app.example.com/login"],
             },
         )
@@ -325,6 +607,7 @@ class TscanAutomationTests(unittest.TestCase):
                 {
                     "ips": ["192.0.2.10"],
                     "domains": ["app.example.com", "api.example.com"],
+                    "endpoints": [],
                     "urls": ["https://app.example.com/login"],
                 },
             )
@@ -343,9 +626,52 @@ class TscanAutomationTests(unittest.TestCase):
             ],
         )
         self.assertEqual(
-            password_targets(["192.0.2.10", "bad", "192.0.2.10"]),
+            password_targets(
+                ["192.0.2.10:22", "192.0.2.11:80", "192.0.2.10:6379"]
+            ),
             ["192.0.2.10"],
         )
+
+    def test_stage_plan_routes_unknown_ips_to_identification_only(self) -> None:
+        plan = build_stage_plan(
+            "192.0.2.10",
+            {
+                "ips": ["192.0.2.10", "192.0.2.11"],
+                "domains": [],
+                "endpoints": ["192.0.2.11:6379"],
+                "urls": [],
+            },
+        )
+
+        self.assertEqual(plan["identification_only"], ["192.0.2.10"])
+        self.assertEqual(plan["password_targets"], ["192.0.2.11"])
+        self.assertEqual(plan["web_targets"], [])
+        self.assertEqual(plan["fingerprint_targets"], [])
+        self.assertEqual(plan["nessus_targets"], [])
+        self.assertEqual(
+            plan["deferred_nessus_targets"], ["192.0.2.10", "192.0.2.11"]
+        )
+
+    def test_stage_plan_does_not_route_confirmed_web_ports_to_service_checks(self) -> None:
+        plan = build_stage_plan(
+            "https://app.example.com/",
+            {
+                "ips": [],
+                "domains": ["app.example.com"],
+                "endpoints": [
+                    "app.example.com:8080",
+                    "app.example.com:8443",
+                    "app.example.com:6379",
+                ],
+                "urls": [
+                    "http://app.example.com:8080/",
+                    "https://app.example.com:8443/",
+                ],
+            },
+        )
+
+        self.assertEqual(plan["unauthorized_targets"], ["app.example.com"])
+        self.assertEqual(plan["password_targets"], ["app.example.com"])
 
     def test_workflow_helpers_handle_target_and_completion(self) -> None:
         self.assertEqual(
@@ -353,6 +679,7 @@ class TscanAutomationTests(unittest.TestCase):
             {
                 "ips": ["192.0.2.10"],
                 "domains": [],
+                "endpoints": ["192.0.2.10:8080"],
                 "urls": ["http://192.0.2.10:8080/path"],
             },
         )
