@@ -19,12 +19,17 @@ def apply_global_settings_to_runs(
     agent_profiles: dict[str, dict[str, str]] | None = None,
 ) -> list[RunState]:
     workflow = normalize_workflow_settings(settings)
+    global_workflow = {
+        key: value
+        for key, value in workflow.items()
+        if key != "asset_processing_scope"
+    }
     profiles = agent_profiles or {}
     updated_projects: set[Path] = set()
     for state in states:
         run_dir = Path(state.run_dir).resolve()
         changed_fields: list[str] = []
-        for field, value in workflow.items():
+        for field, value in global_workflow.items():
             if field not in RunState.__dataclass_fields__:
                 continue
             if getattr(state, field) != value:
@@ -48,21 +53,21 @@ def apply_global_settings_to_runs(
                 "已热更新全局设置：" + "、".join(changed_fields) + "。",
             )
 
-        _write_hot_settings(run_dir, state, workflow)
+        _write_hot_settings(run_dir, state, global_workflow)
         asset_path = run_dir / "tool_data" / "asset_bus" / "assets.json"
         if asset_path.is_file():
             AssetBus(asset_path, state.scope, state.target).update_approval_policy(
                 approval_mode=str(workflow["new_asset_approval_mode"]),
                 approval_seconds=int(workflow["new_asset_countdown_seconds"]),
                 allow_cidr_expansion=bool(workflow["allow_cidr_expansion"]),
-                processing_scope=str(workflow["asset_processing_scope"]),
+                processing_scope=state.asset_processing_scope,
             )
         update_pending_request_policy(
             run_dir,
             mode=str(workflow["workload_approval_mode"]),
             countdown_seconds=int(workflow["workload_countdown_seconds"]),
         )
-        _update_json(run_dir / "project.json", {**workflow, **global_values})
+        _update_json(run_dir / "project.json", {**global_workflow, **global_values})
         updated_projects.add(run_dir.parent.parent)
 
     updated_projects.update(path.parent for path in projects_dir.glob("*/project.json"))
@@ -71,7 +76,7 @@ def apply_global_settings_to_runs(
         project = read_json(project_path)
         if not project:
             continue
-        updates = dict(workflow)
+        updates = dict(global_workflow)
         if api_base_url.strip():
             updates["api_base_url"] = api_base_url.strip().rstrip("/")
         if model.strip():
@@ -127,15 +132,20 @@ def _write_hot_settings(
         "reasoning_effort": state.reasoning_effort,
         "agent_base_url": state.agent_base_url,
     }
+    hot_workflow = {
+        **workflow,
+        "scope": state.scope,
+        "asset_processing_scope": state.asset_processing_scope,
+    }
     previous = read_json(path)
-    if previous.get("workflow") == workflow and previous.get("agent") == agent:
+    if previous.get("workflow") == hot_workflow and previous.get("agent") == agent:
         return
     atomic_json_write(
         path,
         {
             "schema_version": 1,
             "updated_at": now_text(),
-            "workflow": workflow,
+            "workflow": hot_workflow,
             "agent": agent,
         },
     )

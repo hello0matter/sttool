@@ -20,6 +20,7 @@ from typing import Iterable
 from urllib.parse import urlsplit
 
 from .activity import append_activity
+from .asset_bus import AssetBus
 from .agent_runtime import (
     agent_shell_pids_for_run,
     agent_terminal_window_name,
@@ -1967,6 +1968,71 @@ class RuntimeManager:
             model=model,
             agent_profiles=agent_profiles,
         )
+
+    def update_project_scopes(
+        self,
+        state: RunState,
+        *,
+        scope: str,
+        processing_scope: str,
+    ) -> RunState:
+        normalized_scope = scope.strip()
+        normalized_processing_scope = processing_scope.strip()
+        if not normalized_scope:
+            raise ValueError("授权范围不能为空")
+        run_dir = Path(state.run_dir).resolve()
+        project_dir = run_dir.parent.parent
+        if project_dir.parent != self.projects_dir.resolve():
+            raise ValueError("运行目录不在当前项目目录内")
+
+        state.scope = normalized_scope
+        state.asset_processing_scope = normalized_processing_scope
+        state.updated_at = now_text()
+        atomic_json_write(run_dir / "run.json", state.to_dict())
+        for path in (run_dir / "project.json", project_dir / "project.json"):
+            value = read_json_file(path)
+            if value:
+                value["scope"] = normalized_scope
+                value["asset_processing_scope"] = normalized_processing_scope
+                value["updated_at"] = now_text()
+                atomic_json_write(path, value)
+        (run_dir / "scope.txt").write_text(
+            normalized_scope + "\n", encoding="utf-8"
+        )
+
+        asset_path = run_dir / "tool_data" / "asset_bus" / "assets.json"
+        if asset_path.is_file():
+            AssetBus(
+                asset_path,
+                normalized_scope,
+                state.target,
+                approval_mode=state.new_asset_approval_mode,
+                approval_seconds=state.new_asset_countdown_seconds,
+                allow_cidr_expansion=state.allow_cidr_expansion,
+                processing_scope=normalized_processing_scope,
+            ).update_scopes(
+                scope=normalized_scope,
+                processing_scope=normalized_processing_scope,
+            )
+
+        hot_path = run_dir / "tool_data" / "coordinator" / "hot_settings.json"
+        hot = read_json_file(hot_path)
+        workflow = hot.get("workflow")
+        if not isinstance(workflow, dict):
+            workflow = {}
+        hot["schema_version"] = 1
+        hot["updated_at"] = now_text()
+        hot["workflow"] = {
+            **workflow,
+            "scope": normalized_scope,
+            "asset_processing_scope": normalized_processing_scope,
+        }
+        atomic_json_write(hot_path, hot)
+        append_activity(
+            run_dir,
+            "项目范围已热更新；后续资产和 AI 批次使用新范围，已发出的请求不会撤回。",
+        )
+        return state
 
     @staticmethod
     def coordinator_supports_hot_settings(state: RunState) -> bool:

@@ -27,6 +27,7 @@ from .models import (
 from .registry import availability
 from .project_results_dialog import ProjectResultsDialog
 from .project_access_dialog import ProjectAccessDialog
+from .project_scope_dialog import ProjectScopeDialog
 from .run_log_dialog import RunLogDialog, component_summary_status
 from .runtime import LaunchError, RuntimeManager, project_name_is_url, safe_project_name
 from .secret_store import (
@@ -250,6 +251,9 @@ class LauncherApp(tk.Tk):
         self.target_var = tk.StringVar()
         self.provider_var = tk.StringVar(value="codexx")
         self.auth_var = tk.BooleanVar(value=False)
+        self.launch_scope = ""
+        self.launch_processing_scope = ""
+        self.scope_summary_var = tk.StringVar(value="尚未设置授权范围")
 
         ttk.Label(
             left,
@@ -266,43 +270,27 @@ class LauncherApp(tk.Tk):
         self.project_box.grid(row=2, column=0, sticky="ew", pady=(0, 14))
         self.project_box.bind("<<ComboboxSelected>>", lambda _event: self._load_project())
         self._field(left, 3, "主要目标（URL、域名或 IP）", self.target_var)
-        ttk.Label(
-            left,
-            text="授权范围（每行一个域名、IP、CIDR 或 URL；必须是已获授权范围）",
-            style="Panel.TLabel",
-        ).grid(row=5, column=0, sticky="w", pady=(0, 5))
-        scope_row = ttk.Frame(left)
-        scope_row.grid(row=6, column=0, sticky="ew", pady=(0, 14))
+        scope_row = ttk.LabelFrame(left, text="项目范围", padding=10)
+        scope_row.grid(row=5, column=0, sticky="ew", pady=(0, 14))
         scope_row.columnconfigure(0, weight=1)
-        self.scope_text = tk.Text(
+        ttk.Label(
             scope_row,
-            width=1,
-            height=4,
-            wrap="word",
-            relief="solid",
-            borderwidth=1,
-            font=("Microsoft YaHei UI", 10),
-        )
-        self.scope_text.grid(row=0, column=0, sticky="ew")
-        scope_scroll = ttk.Scrollbar(
-            scope_row, orient="vertical", command=self.scope_text.yview
-        )
-        scope_scroll.grid(row=0, column=1, sticky="ns")
-        self.scope_text.configure(yscrollcommand=scope_scroll.set)
-        ttk.Button(
-            scope_row, text="使用主要目标", command=self._use_target_as_scope
-        ).grid(row=1, column=0, sticky="w", pady=(6, 0))
+            textvariable=self.scope_summary_var,
+            wraplength=360,
+        ).grid(row=0, column=0, sticky="w")
         ttk.Label(
             scope_row,
             text=(
-                "说明：* 只表示目标本身自动准入；新主机、其他 IP 和 C 段资产仍按全局准入策略确认，"
-                "不会自动全网段渗透。"
+                "授权范围决定能否测试；自动处理范围进一步限制哪些授权资产进入扫描。"
             ),
-            wraplength=470,
-        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+            wraplength=360,
+        ).grid(row=1, column=0, sticky="w", pady=(5, 0))
+        ttk.Button(
+            scope_row, text="编辑项目范围", command=self._edit_launch_scope
+        ).grid(row=0, column=1, rowspan=2, sticky="e", padx=(12, 0))
 
         ttk.Label(left, text="补充任务", style="Panel.TLabel").grid(
-            row=8, column=0, sticky="w", pady=(0, 5)
+            row=6, column=0, sticky="w", pady=(0, 5)
         )
         self.prompt_text = tk.Text(
             left,
@@ -313,13 +301,13 @@ class LauncherApp(tk.Tk):
             borderwidth=1,
             font=("Microsoft YaHei UI", 10),
         )
-        self.prompt_text.grid(row=9, column=0, sticky="nsew", pady=(0, 12))
-        left.rowconfigure(9, weight=1)
+        self.prompt_text.grid(row=7, column=0, sticky="nsew", pady=(0, 12))
+        left.rowconfigure(7, weight=1)
         ttk.Checkbutton(
             left,
             text="我确认已获得上述范围的安全测试授权",
             variable=self.auth_var,
-        ).grid(row=9, column=0, sticky="w")
+        ).grid(row=8, column=0, sticky="w")
 
         ttk.Label(
             right,
@@ -419,6 +407,9 @@ class LauncherApp(tk.Tk):
             side="left", padx=(8, 0)
         )
         ttk.Button(actions, text="准入与任务", command=self._open_project_access).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="项目范围", command=self._edit_selected_scope).pack(
             side="left", padx=(8, 0)
         )
         self.recover_button = ttk.Button(
@@ -760,7 +751,7 @@ class LauncherApp(tk.Tk):
         return LaunchRequest(
             project_name=self.project_var.get(),
             target=self.target_var.get(),
-            scope=self.scope_text.get("1.0", "end").strip(),
+            scope=self.launch_scope,
             provider=provider,
             model=self.default_model,
             selected_tools=selected,
@@ -822,9 +813,7 @@ class LauncherApp(tk.Tk):
             workload_popup_topmost=bool(
                 self.workflow_settings["workload_popup_topmost"]
             ),
-            asset_processing_scope=str(
-                self.workflow_settings["asset_processing_scope"]
-            ),
+            asset_processing_scope=self.launch_processing_scope,
             credential_audit_enabled=bool(
                 self.workflow_settings["credential_audit_enabled"]
             ),
@@ -1309,6 +1298,38 @@ class LauncherApp(tk.Tk):
             return
         ProjectAccessDialog(self, state)
 
+    def _edit_selected_scope(self) -> None:
+        state = self._selected_state()
+        if state is None:
+            messagebox.showinfo("项目范围", "请先选择一个运行实例")
+            return
+        dialog = ProjectScopeDialog(
+            self,
+            target=state.target,
+            scope=state.scope,
+            processing_scope=state.asset_processing_scope,
+            require_confirmation=True,
+        )
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        try:
+            self.manager.update_project_scopes(
+                state,
+                scope=dialog.result["scope"],
+                processing_scope=dialog.result["asset_processing_scope"],
+            )
+        except (OSError, ValueError) as exc:
+            messagebox.showerror("项目范围", str(exc), parent=self)
+            return
+        self.run_states[self._state_key(state)] = state
+        self._refresh_runs()
+        messagebox.showinfo(
+            "项目范围已更新",
+            "新范围已用于后续资产准入、增量扫描和 AI 执行。已发出的请求无法撤回。",
+            parent=self,
+        )
+
     def _open_project_dir(self) -> None:
         name = self.project_var.get().strip()
         if not name:
@@ -1327,8 +1348,11 @@ class LauncherApp(tk.Tk):
     def _apply_project_value(self, value: dict[str, object]) -> None:
         self.project_var.set(str(value.get("name", self.project_var.get())))
         self.target_var.set(str(value.get("target", "")))
-        self.scope_text.delete("1.0", "end")
-        self.scope_text.insert("1.0", str(value.get("scope") or ""))
+        self.launch_scope = str(value.get("scope") or "").strip()
+        self.launch_processing_scope = str(
+            value.get("asset_processing_scope") or ""
+        ).strip()
+        self._refresh_scope_summary()
         try:
             schema_version = int(value.get("schema_version", 1))
         except (TypeError, ValueError):
@@ -1344,11 +1368,41 @@ class LauncherApp(tk.Tk):
         self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
         self.auth_var.set(False)
 
-    def _use_target_as_scope(self) -> None:
-        target = self.target_var.get().strip()
-        self.scope_text.delete("1.0", "end")
-        if target:
-            self.scope_text.insert("1.0", target)
+    def _edit_launch_scope(self) -> None:
+        dialog = ProjectScopeDialog(
+            self,
+            target=self.target_var.get(),
+            scope=self.launch_scope,
+            processing_scope=self.launch_processing_scope,
+        )
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        self.launch_scope = dialog.result["scope"]
+        self.launch_processing_scope = dialog.result["asset_processing_scope"]
+        self._refresh_scope_summary()
+
+    def _refresh_scope_summary(self) -> None:
+        scope_count = len(
+            [line for line in self.launch_scope.splitlines() if line.strip()]
+        )
+        processing_count = len(
+            [
+                line
+                for line in self.launch_processing_scope.splitlines()
+                if line.strip()
+            ]
+        )
+        processing_text = (
+            f"自动处理 {processing_count} 条规则"
+            if processing_count
+            else "自动处理范围不额外限制"
+        )
+        self.scope_summary_var.set(
+            f"授权 {scope_count} 条规则；{processing_text}"
+            if scope_count
+            else "尚未设置授权范围"
+        )
 
     def _load_project(self) -> None:
         value = self.manager.load_project(self.project_var.get())

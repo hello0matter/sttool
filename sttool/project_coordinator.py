@@ -1057,6 +1057,10 @@ def build_batch_prompt(
         base_prompt.rstrip()
         + "\n\n"
         + f"## STTool AI 执行记录 {batch_number}：{label}\n\n"
+        + f"当前有效授权范围（以此处和 scope.txt 为准）：\n{bus.scope}\n"
+        + "当前自动处理范围：\n"
+        + (bus.processing_scope or "未额外限制")
+        + "\n\n"
         + f"资产汇总队列文件：{run_dir / 'tool_data' / 'asset_bus' / 'assets.json'}\n"
         + f"fscan 完整输出：{run_dir / 'results' / 'fscan.txt'}\n"
         + f"项目风险摘要：{run_dir / 'risk_summary.md'}\n"
@@ -1188,7 +1192,16 @@ def apply_hot_workflow_settings(
     bus: AssetBus,
     value: dict[str, object],
 ) -> dict[str, object]:
-    workflow = normalize_workflow_settings(value.get("workflow"))
+    raw_workflow = value.get("workflow")
+    workflow = normalize_workflow_settings(raw_workflow)
+    if isinstance(raw_workflow, dict):
+        hot_scope = str(raw_workflow.get("scope") or "").strip()
+        if hot_scope:
+            args.scope = hot_scope
+            bus.scope = hot_scope
+        workflow["asset_processing_scope"] = str(
+            raw_workflow.get("asset_processing_scope") or ""
+        ).strip()
     for field, argument in _HOT_WORKFLOW_ARGUMENTS.items():
         setattr(args, argument, workflow[field])
     bus.update_approval_policy(

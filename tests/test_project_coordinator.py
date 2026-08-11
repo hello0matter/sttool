@@ -97,6 +97,8 @@ class ProjectCoordinatorTests(unittest.TestCase):
                         "workload_countdown_seconds": 25,
                         "coordinator_poll_seconds": 7,
                         "max_agent_batches": 12,
+                        "scope": "allowed.example",
+                        "asset_processing_scope": "api.allowed.example",
                     },
                     "agent": {
                         "provider": "codexx",
@@ -116,6 +118,9 @@ class ProjectCoordinatorTests(unittest.TestCase):
             self.assertEqual(args.reasoning_effort, "high")
             self.assertEqual(args.agent_base_url, "https://agent.example/v1")
             self.assertEqual(bus.approval_seconds, 20)
+            self.assertEqual(args.scope, "allowed.example")
+            self.assertEqual(bus.scope, "allowed.example")
+            self.assertEqual(bus.processing_scope, "api.allowed.example")
 
     def test_semantic_dirsearch_output_files_and_markers_are_stable(self) -> None:
         with TemporaryDirectory() as temporary:

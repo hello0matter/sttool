@@ -477,9 +477,31 @@ class AssetBus:
             return True
         return asset_allowed(value, self.processing_scope, self.target)
 
+    def _authorization_allowed(self, value: str) -> bool:
+        normalized_target = {item for item, _kind in target_assets(self.target)}
+        normalized = normalize_asset(value)
+        if normalized is not None and normalized[0] in normalized_target:
+            return True
+        if self.scope.strip() == "*":
+            return True
+        return asset_allowed(value, self.scope, self.target)
+
+    def update_scopes(self, *, scope: str, processing_scope: str) -> None:
+        normalized_scope = str(scope or "").strip()
+        if not normalized_scope:
+            raise ValueError("授权范围不能为空")
+        self._reload()
+        self.scope = normalized_scope
+        self.processing_scope = str(processing_scope or "").strip()
+        self._apply_processing_scope()
+        self.value["approval_policy"] = {
+            **dict(self.value.get("approval_policy") or {}),
+            "processing_scope": self.processing_scope,
+        }
+        self.value["updated_at"] = now_text()
+        atomic_json_write(self.path, self.value)
+
     def _apply_processing_scope(self) -> None:
-        if not self.processing_scope:
-            return
         timestamp = now_text()
         filtered = self._records(self.value, "filtered_assets")
         filtered_keys = {
@@ -489,17 +511,24 @@ class AssetBus:
             retained: list[dict[str, object]] = []
             for item in self._records(self.value, container):
                 value = str(item.get("value") or "")
-                if self._processing_allowed(value):
+                authorization_allowed = self._authorization_allowed(value)
+                processing_allowed = self._processing_allowed(value)
+                if authorization_allowed and processing_allowed:
                     retained.append(item)
                     continue
+                reason = (
+                    "outside_authorization_scope"
+                    if not authorization_allowed
+                    else "outside_processing_scope"
+                )
                 key = (str(item.get("type") or ""), value)
                 if key not in filtered_keys:
                     filtered.append(
                         {
                             **item,
                             "filtered_at": timestamp,
-                            "scope_status": "outside_processing_scope",
-                            "reason": "outside_processing_scope",
+                            "scope_status": reason,
+                            "reason": reason,
                         }
                     )
                     filtered_keys.add(key)

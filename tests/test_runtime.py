@@ -24,6 +24,7 @@ from sttool.runtime import (
     pid_alive,
     process_creation_token,
     process_record_alive,
+    read_json_file,
     reconcile_component_state,
     safe_project_name,
     target_values,
@@ -422,6 +423,7 @@ class RuntimeTests(unittest.TestCase):
                 status="running",
                 processes=[],
                 new_asset_countdown_seconds=5,
+                asset_processing_scope="example.com",
             )
             atomic_json_write(run_dir / "run.json", state.to_dict())
             atomic_json_write(run_dir / "project.json", {"name": "demo"})
@@ -441,7 +443,7 @@ class RuntimeTests(unittest.TestCase):
                     "work_mode": "custom",
                     "new_asset_countdown_seconds": 20,
                     "coordinator_poll_seconds": 7,
-                    "asset_processing_scope": "example.com",
+                    "asset_processing_scope": "other.example",
                 },
                 api_base_url="https://summary.example/v1/",
                 model="summary-model",
@@ -476,6 +478,7 @@ class RuntimeTests(unittest.TestCase):
                 (project_dir / "project.json").read_text(encoding="utf-8")
             )
             self.assertEqual(project["coordinator_poll_seconds"], 7)
+            self.assertNotIn("asset_processing_scope", project)
             asset_bus = json.loads(
                 (
                     run_dir
@@ -490,6 +493,85 @@ class RuntimeTests(unittest.TestCase):
             )
             self.assertEqual(
                 asset_bus["approval_policy"]["processing_scope"], "example.com"
+            )
+
+    def test_project_scope_update_is_instance_specific_and_hot(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = RuntimeManager(root, [], st_root=root)
+            project_dir = manager.projects_dir / "demo"
+            run_dir = project_dir / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            state = RunState(
+                run_id="run-1",
+                project_name="demo",
+                target="primary.example",
+                scope="*",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+            )
+            atomic_json_write(run_dir / "run.json", state.to_dict())
+            atomic_json_write(
+                run_dir / "project.json",
+                {"name": "demo", "scope": "*", "asset_processing_scope": ""},
+            )
+            atomic_json_write(
+                project_dir / "project.json",
+                {"name": "demo", "scope": "*", "asset_processing_scope": ""},
+            )
+            bus = AssetBus(
+                run_dir / "tool_data" / "asset_bus" / "assets.json",
+                "*",
+                "primary.example",
+                approval_mode="automatic",
+            )
+            bus.ingest([("primary.example", "domain")], "project_target")
+            bus.ingest(
+                [
+                    ("api.allowed.example", "domain"),
+                    ("outside.example.net", "domain"),
+                ],
+                "asset_commander",
+            )
+
+            manager.update_project_scopes(
+                state,
+                scope="allowed.example",
+                processing_scope="allowed.example",
+            )
+
+            self.assertEqual(state.scope, "allowed.example")
+            self.assertEqual(state.asset_processing_scope, "allowed.example")
+            persisted = read_json_file(run_dir / "run.json")
+            self.assertEqual(persisted["scope"], "allowed.example")
+            self.assertEqual(
+                persisted["asset_processing_scope"], "allowed.example"
+            )
+            self.assertEqual(
+                (run_dir / "scope.txt").read_text(encoding="utf-8"),
+                "allowed.example\n",
+            )
+            hot = read_json_file(
+                run_dir / "tool_data" / "coordinator" / "hot_settings.json"
+            )
+            self.assertEqual(hot["workflow"]["scope"], "allowed.example")
+            self.assertEqual(
+                hot["workflow"]["asset_processing_scope"], "allowed.example"
+            )
+            bundle = AssetBus(
+                run_dir / "tool_data" / "asset_bus" / "assets.json",
+                "allowed.example",
+                "primary.example",
+                processing_scope="allowed.example",
+            ).bundle()
+            self.assertEqual(
+                bundle["domains"],
+                ["primary.example", "api.allowed.example"],
             )
 
     def test_legacy_coordinator_rolls_forward_without_stopping_other_tools(self) -> None:

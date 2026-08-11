@@ -207,6 +207,32 @@ class AssetBusTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "自动处理范围"):
                 bus.add_manual_asset("unrelated.example.net")
 
+    def test_hot_scope_update_removes_assets_outside_new_authorization(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(path, "*", "primary.example", approval_mode="automatic")
+            bus.ingest([("primary.example", "domain")], "project_target")
+            bus.ingest(
+                [
+                    ("api.allowed.example", "domain"),
+                    ("old-scope.example.net", "domain"),
+                ],
+                "asset_commander",
+            )
+
+            bus.update_scopes(
+                scope="allowed.example",
+                processing_scope="allowed.example",
+            )
+
+            self.assertEqual(
+                bus.bundle()["domains"],
+                ["primary.example", "api.allowed.example"],
+            )
+            filtered = read_json(path)["filtered_assets"]
+            self.assertEqual(filtered[0]["value"], "old-scope.example.net")
+            self.assertEqual(filtered[0]["reason"], "outside_authorization_scope")
+
     def test_dirsearch_parser_suppresses_repeated_soft_200_wall(self) -> None:
         repeated = "\n".join(
             f"200    32KB  https://app.example.test/fake-{index}"

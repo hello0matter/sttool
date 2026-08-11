@@ -116,7 +116,6 @@ class AISettingsDialog(tk.Toplevel):
         self.allow_cidr_expansion_var = tk.BooleanVar(
             value=bool(workflow["allow_cidr_expansion"])
         )
-        self.asset_processing_scope_value = str(workflow["asset_processing_scope"])
         self.new_asset_approval_var = tk.StringVar(
             value=ASSET_APPROVAL_LABELS[str(workflow["new_asset_approval_mode"])]
         )
@@ -611,25 +610,6 @@ class AISettingsDialog(tk.Toplevel):
             ),
             wraplength=680,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
-        ttk.Label(
-            approval,
-            text="自动处理范围（每行一个域名、IP、CIDR 或 URL；留空不额外限制）",
-        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 4))
-        self.asset_processing_scope_text = tk.Text(
-            approval, height=4, wrap="word", relief="solid", borderwidth=1
-        )
-        self.asset_processing_scope_text.grid(
-            row=7, column=0, columnspan=2, sticky="ew"
-        )
-        self.asset_processing_scope_text.insert("1.0", self.asset_processing_scope_value)
-        ttk.Label(
-            approval,
-            text=(
-                "例如填写 example.com，只让该根域及其子域进入后续扫描和 Agent。"
-                "它不会扩大授权范围，主要目标始终保留；修改后会热更新运行中的项目。"
-            ),
-            wraplength=680,
-        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
         workload = ttk.LabelFrame(
             tab, text="下一批 AI 执行确认（待处理资产较多时）", padding=12
         )
@@ -821,10 +801,6 @@ class AISettingsDialog(tk.Toplevel):
         self.semantic_run_dirsearch_var.set(bool(preset["semantic_run_dirsearch"]))
         self.semantic_max_rate_var.set(int(preset["semantic_max_rate"]))
         self.allow_cidr_expansion_var.set(bool(preset["allow_cidr_expansion"]))
-        self.asset_processing_scope_text.delete("1.0", "end")
-        self.asset_processing_scope_text.insert(
-            "1.0", str(preset["asset_processing_scope"])
-        )
         self.new_asset_approval_var.set(
             ASSET_APPROVAL_LABELS[str(preset["new_asset_approval_mode"])]
         )
@@ -934,9 +910,6 @@ class AISettingsDialog(tk.Toplevel):
                 "semantic_run_dirsearch": self.semantic_run_dirsearch_var.get(),
                 "semantic_max_rate": self.semantic_max_rate_var.get(),
                 "allow_cidr_expansion": self.allow_cidr_expansion_var.get(),
-                "asset_processing_scope": self.asset_processing_scope_text.get(
-                    "1.0", "end"
-                ).strip(),
                 "new_asset_approval_mode": {
                     label: mode for mode, label in ASSET_APPROVAL_LABELS.items()
                 }.get(self.new_asset_approval_var.get(), "countdown_accept"),
