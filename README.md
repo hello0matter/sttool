@@ -87,7 +87,8 @@ projects/<稳定项目名>/runs/<时间戳-编号>/
 
 - **恢复实例**：复用原运行目录，保留已有配置、进度和结果，只重启 AssetCommander、路径发现器、TscanPlus 等常驻工具以及 Agent。Codexx 使用 `codexx --yolo resume --last` 恢复当前目录最近一次会话，不会重复提交初始提示词；也不会自动重跑一次性的 fscan/nuclei。
 - **新实例重跑**：读取该历史实例的项目配置，在重新确认授权后创建一个全新的运行目录。
-- **停止实例**：结束当前实例记录的全部进程并保留运行目录和断点。Agent 会按当前运行目录识别其 PowerShell 根进程并结束 Codex/Codexx/Node 子进程，不会按进程名全局终止其他项目或用户手工启动的会话。
+- **暂停工程**：结束该工程所有运行中实例的进程并保留运行目录和断点，之后可在原目录恢复。Agent 会按各运行目录识别其 PowerShell 根进程并结束 Codex/Codexx/Node 子进程，不会按进程名全局终止其他项目或用户手工启动的会话。
+- **删除工程**：先暂停该工程的全部运行实例，再永久删除工程配置、运行状态、扫描结果、证据、日志、工具工作区及整个本地工程目录。删除前需要两次确认，删除后无法恢复。
 
 “恢复实例”和“新实例重跑”都要求本次重新勾选授权确认，避免历史授权被静默沿用。
 
@@ -122,7 +123,7 @@ STTool 不读取或覆盖 Codexx、Codex、Claude CLI 的登录凭据；仅在�
 - `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
 - AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。
 - 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
-- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID、真实退出状态和完成时间；启动脚本只向 CLI 传递读取 `prompt.txt` 的短引导，避免 Windows 命令行长度限制。每个 Agent 启动脚本只能消费一次启动令牌；停止项目时会禁用已有启动脚本并保留备份，防止 Windows Terminal 在重启或恢复旧标签页后重新执行已停止批次。失败批次按 60 秒、5 分钟、15 分钟退避重试；项目日志可双击“项目增量调度/Agent”查看。
+- 每批保存在 `agent_batches/<批次>/`，包含提示词、启动脚本、PID、真实退出状态和完成时间；启动脚本只向 CLI 传递读取 `prompt.txt` 的短引导，避免 Windows 命令行长度限制。每个 Agent 启动脚本只能消费一次启动令牌；暂停项目时会禁用已有启动脚本并保留备份，防止 Windows Terminal 在重启或恢复旧标签页后重新执行已暂停批次。失败批次按 60 秒、5 分钟、15 分钟退避重试；项目日志可双击“项目增量调度/Agent”查看。
 - `risk_summary.md` 随资产代次刷新；配置工具协作 AI 时优先尝试 Responses API，不兼容时回退 Chat Completions。超大资产摘要只向 AI 发送有界的头尾证据片段，完整本地摘要始终保留；单个协议尝试使用 20 秒超时，避免阻塞 Agent 启动数分钟。
 - `vulnerability_intel.md`、`results/vulnerability_intel.json` 和 `results/find_gh_poc.json` 在资产稳定、Agent 启动前按所选工具生成，记录产品/版本证据、CVE、KEV、模板和 GitHub PoC 候选。它们会按输入指纹和资产代次缓存，恢复工程时不重复联网查询；运行实例中可双击对应虚拟组件打开可读状态和结果文件。
 - PoC URL 始终按不可信元数据处理，不自动 clone 或执行。写文件、创建账号、反弹 Shell、抓凭据、持久化和横向移动不属于自动情报阶段，后续若实现 Post-Exploitation 必须独立默认关闭并要求人工审批。

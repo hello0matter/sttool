@@ -255,11 +255,11 @@ class LauncherApp(tk.Tk):
         ttk.Label(left, text="项目名称（稳定名称，不要填写 URL）", style="Panel.TLabel").grid(
             row=1, column=0, sticky="w", pady=(0, 5)
         )
-        project_box = ttk.Combobox(
+        self.project_box = ttk.Combobox(
             left, textvariable=self.project_var, values=self.manager.list_projects()
         )
-        project_box.grid(row=2, column=0, sticky="ew", pady=(0, 14))
-        project_box.bind("<<ComboboxSelected>>", lambda _event: self._load_project())
+        self.project_box.grid(row=2, column=0, sticky="ew", pady=(0, 14))
+        self.project_box.bind("<<ComboboxSelected>>", lambda _event: self._load_project())
         self._field(left, 3, "主要目标（URL、域名或 IP）", self.target_var)
         ttk.Label(
             left,
@@ -422,9 +422,14 @@ class LauncherApp(tk.Tk):
         )
         ttk.Button(
             actions,
-            text="停止实例",
-            style="Danger.TButton",
+            text="暂停工程",
             command=self._stop_selected_run,
+        ).pack(side="right", padx=(8, 0))
+        ttk.Button(
+            actions,
+            text="删除工程",
+            style="Danger.TButton",
+            command=self._delete_selected_project,
         ).pack(side="right")
 
         columns = ("project", "run_id", "provider", "status", "components", "created")
@@ -984,7 +989,7 @@ class LauncherApp(tk.Tk):
             "running": "运行中",
             "completed": "已结束",
             "failed": "失败",
-            "stopped": "已停止",
+            "stopped": "已暂停",
         }.get(state.status, state.status)
         if state.recovery_count:
             return f"{value}(恢复{state.recovery_count})"
@@ -1090,14 +1095,95 @@ class LauncherApp(tk.Tk):
     def _stop_selected_run(self) -> None:
         state = self._selected_state()
         if state is None:
-            messagebox.showinfo("停止实例", "请先选择一个运行实例")
+            messagebox.showinfo("暂停工程", "请先选择一个运行实例")
+            return
+        project_key = safe_project_name(state.project_name)
+        active_states = [
+            item
+            for item in self.run_states.values()
+            if safe_project_name(item.project_name) == project_key
+            and item.status in {"starting", "running"}
+        ]
+        if not active_states:
+            messagebox.showinfo("暂停工程", "该工程当前没有正在运行的实例")
             return
         if not messagebox.askyesno(
-            "停止实例", f"确定停止 {state.project_name} / {state.run_id} 的全部进程吗？"
+            "暂停工程",
+            (
+                f"确定暂停工程“{state.project_name}”当前运行的 "
+                f"{len(active_states)} 个实例吗？\n\n"
+                "扫描状态、结果、日志和本地文件都会保留，之后可以恢复。"
+            ),
         ):
             return
-        self.manager.stop(state)
+        for active_state in active_states:
+            self.manager.stop(active_state)
         self._refresh_runs()
+
+    def _delete_selected_project(self) -> None:
+        if self._busy:
+            return
+        state = self._selected_state()
+        if state is None:
+            messagebox.showinfo("删除工程", "请先选择要删除的工程")
+            return
+        project_states = [
+            item
+            for item in self.run_states.values()
+            if safe_project_name(item.project_name) == safe_project_name(state.project_name)
+        ]
+        project_dir = self.manager.projects_dir / safe_project_name(state.project_name)
+        detail = (
+            f"工程：{state.project_name}\n"
+            f"运行实例：{len(project_states)} 个\n"
+            f"本地目录：{project_dir}\n\n"
+            "删除后，该工程的全部状态、扫描结果、证据、日志、工具数据和配置都无法恢复。"
+        )
+        if not messagebox.askyesno("删除工程", detail + "\n\n确定继续吗？"):
+            return
+        if not messagebox.askyesno(
+            "再次确认删除",
+            f"这是最后一次确认。是否永久删除工程“{state.project_name}”？",
+        ):
+            return
+        try:
+            self.manager.delete_project(state.project_name)
+        except OSError as exc:
+            messagebox.showerror("删除失败", f"无法完整删除工程目录：{exc}")
+            return
+        project_key = safe_project_name(state.project_name)
+        for dialogs in (
+            self._asset_approval_dialogs,
+            self._workload_approval_dialogs,
+        ):
+            for key, dialog in list(dialogs.items()):
+                if not key.startswith(f"{project_key}::"):
+                    continue
+                dialogs.pop(key, None)
+                try:
+                    dialog.destroy()
+                except tk.TclError:
+                    pass
+        self._asset_approval_snooze_until = {
+            key: value
+            for key, value in self._asset_approval_snooze_until.items()
+            if not key.startswith(f"{project_key}::")
+        }
+        self._workload_approval_snooze_until = {
+            key: value
+            for key, value in self._workload_approval_snooze_until.items()
+            if not key.startswith(f"{project_key}::")
+        }
+        self.run_states = {
+            key: item
+            for key, item in self.run_states.items()
+            if safe_project_name(item.project_name) != project_key
+        }
+        self.project_box.configure(values=self.manager.list_projects())
+        if safe_project_name(self.project_var.get()) == project_key:
+            self.project_var.set("")
+        self._refresh_runs()
+        messagebox.showinfo("删除完成", f"工程“{state.project_name}”及其本地文件已删除。")
 
     def _open_selected_run(self) -> None:
         state = self._selected_state()

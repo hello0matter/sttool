@@ -386,6 +386,17 @@ class TscanAutomationTests(unittest.TestCase):
         self.assertIn("\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192", page.script)
         self.assertIn("\u6211\u77e5\u9053\u4e86", page.script)
 
+    def test_existing_scan_data_modal_keeps_results(self) -> None:
+        page = ModalPage(["\u5df2\u6709\u626b\u63cf\u6570\u636e\uff1a\u4fdd\u7559"])
+
+        dismissed = dismiss_blocking_modals(page)
+
+        self.assertEqual(dismissed, ("\u5df2\u6709\u626b\u63cf\u6570\u636e\uff1a\u4fdd\u7559",))
+        self.assertIn("\u662f\u5426\u6e05\u9664\u5df2\u6709\u6570\u636e", page.script)
+        self.assertIn("\u4fdd\u7559", page.script)
+        self.assertNotIn("normalizedText(button) === '\u6e05\u9664'", page.script)
+        self.assertFalse(modal_requires_retry(dismissed))
+
     def test_support_modal_does_not_retry_original_action(self) -> None:
         self.assertFalse(
             modal_requires_retry(

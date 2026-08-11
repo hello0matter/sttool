@@ -363,6 +363,43 @@ class RuntimeTests(unittest.TestCase):
                 {"name": "demo", "target": "example.com"},
             )
 
+    def test_delete_project_stops_its_runs_and_removes_only_its_directory(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = RuntimeManager(root, [], st_root=root)
+            project_dir = manager.projects_dir / "demo"
+            run_dir = project_dir / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            atomic_json_write(project_dir / "project.json", {"name": "demo"})
+            (run_dir / "evidence.txt").write_text("evidence", encoding="utf-8")
+            state = RunState(
+                run_id="run-1",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[],
+            )
+            atomic_json_write(run_dir / "run.json", state.to_dict())
+            other_dir = manager.projects_dir / "other"
+            other_dir.mkdir()
+            atomic_json_write(other_dir / "project.json", {"name": "other"})
+
+            with patch.object(manager, "stop", wraps=manager.stop) as stop:
+                deleted = manager.delete_project("demo")
+
+            self.assertEqual(deleted, project_dir.resolve())
+            stop.assert_called_once()
+            self.assertFalse(project_dir.exists())
+            self.assertTrue(other_dir.is_dir())
+            self.assertEqual(manager.list_projects(), ["other"])
+
     def test_legacy_codex_provider_migrates_to_codexx(self) -> None:
         base = {
             "run_id": "run",

@@ -1766,13 +1766,13 @@ class RuntimeManager:
         return state
 
     def stop(self, state: RunState) -> RunState:
-        append_activity(state.run_dir, "收到停止实例请求。")
+        append_activity(state.run_dir, "收到暂停实例请求。")
         run_dir = Path(state.run_dir)
         invalidated_scripts = invalidate_agent_launch_scripts(run_dir)
         if invalidated_scripts:
             append_activity(
                 state.run_dir,
-                f"已作废 {invalidated_scripts} 个 AI 启动脚本，防止停止后被延迟执行。",
+                f"已作废 {invalidated_scripts} 个 AI 启动脚本，防止暂停后被延迟执行。",
             )
         coordinator = read_json_file(
             run_dir / "tool_data" / "coordinator" / "state.json"
@@ -1813,13 +1813,38 @@ class RuntimeManager:
                 state.run_dir,
                 process.component_id,
                 "stopped",
-                "实例已由 STTool 停止，保留断点供恢复",
+                "实例已由 STTool 暂停，保留断点供恢复",
             )
         state.status = "stopped"
         state.updated_at = now_text()
         atomic_json_write(Path(state.run_dir) / "run.json", state.to_dict())
-        append_activity(state.run_dir, "实例已停止。")
+        append_activity(state.run_dir, "实例已暂停，状态和本地文件均已保留。")
         return state
+
+    def delete_project(self, project_name: str) -> Path:
+        project_dir = (self.projects_dir / safe_project_name(project_name)).resolve()
+        if project_dir.parent != self.projects_dir.resolve():
+            raise ValueError("工程目录不在 projects 目录内，拒绝删除")
+        if not project_dir.is_dir():
+            raise FileNotFoundError(f"工程目录不存在：{project_dir}")
+
+        for state in self.list_runs():
+            if Path(state.run_dir).resolve().is_relative_to(project_dir):
+                self.stop(state)
+
+        last_error: OSError | None = None
+        for attempt in range(3):
+            try:
+                shutil.rmtree(project_dir)
+                return project_dir
+            except FileNotFoundError:
+                return project_dir
+            except OSError as exc:
+                last_error = exc
+                if attempt < 2:
+                    time.sleep(0.5 * (attempt + 1))
+        assert last_error is not None
+        raise last_error
 
     def list_runs(self) -> list[RunState]:
         states: list[RunState] = []

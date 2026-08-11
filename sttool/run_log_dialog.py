@@ -339,7 +339,7 @@ def human_status(value: object) -> str:
         "finished": "\u5df2\u5b8c\u6210",
         "done": "\u5df2\u5b8c\u6210",
         "failed": "\u5931\u8d25",
-        "stopped": "\u5df2\u505c\u6b62",
+        "stopped": "\u5df2\u6682\u505c",
         "exited": "\u5df2\u9000\u51fa",
         "pending": "\u5f85\u8fd0\u884c",
         "not_selected": "未选择",
@@ -760,7 +760,7 @@ def component_display_runtime(
                 detail = "资产工作流已完成；项目进程已退出，结果与资产队列已保留"
             return tool_status, stage, detail
         last_state = tool_status or "unknown"
-        process_label = "停止" if process_status == "stopped" else "退出"
+        process_label = "暂停" if process_status == "stopped" else "退出"
         stopped_detail = f"组件进程已{process_label}；工作流最后状态：{last_state}"
         if stage:
             stopped_detail += f"，最后步骤：{stage}"
@@ -780,7 +780,7 @@ def component_summary_status(
         "waiting_assets": "等待资产",
         "failed": "失败",
         "interrupted": "中断",
-        "stopped": "已停止",
+        "stopped": "已暂停",
         "exited": "已退出",
     }
     label = labels.get(status)
@@ -1093,7 +1093,7 @@ class RunLogDialog(tk.Toplevel):
             "manual_required": "需手动处理",
             "completed": "已完成",
             "failed": "失败",
-            "stopped": "已停止",
+            "stopped": "已暂停",
             "exited": "已退出",
         }.get(status, status)
 

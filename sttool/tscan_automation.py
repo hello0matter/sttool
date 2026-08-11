@@ -1866,6 +1866,17 @@ def dismiss_blocking_modals(page: Page) -> tuple[str, ...]:
           for (const dialog of dialogs) {
             if (!visible(dialog)) continue;
             const text = normalizedText(dialog);
+            if (text.includes('\u662f\u5426\u6e05\u9664\u5df2\u6709\u6570\u636e')) {
+              const keep = [...dialog.querySelectorAll('button')].find(
+                (button) => visible(button)
+                  && normalizedText(button) === '\u4fdd\u7559'
+              );
+              if (keep) {
+                keep.click();
+                dismissed.push('\u5df2\u6709\u626b\u63cf\u6570\u636e\uff1a\u4fdd\u7559');
+                continue;
+              }
+            }
             if (text.includes('\u6587\u4ef6\u5927\u5c0f\u9650\u5236\u63d0\u9192')) {
               const acknowledge = [...dialog.querySelectorAll('button')].find(
                 (button) => visible(button)
