@@ -110,6 +110,103 @@ class AssetBusTests(unittest.TestCase):
             self.assertEqual(bus.approval_seconds, 20)
             self.assertFalse(bus.allow_cidr_expansion)
 
+    def test_processing_scope_keeps_root_and_subdomains_only(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(
+                Path(temporary) / "assets.json",
+                "*",
+                "example.com",
+                approval_mode="automatic",
+                processing_scope="example.com",
+            )
+
+            bus.ingest([("example.com", "domain")], "project_target")
+            bus.ingest(
+                [
+                    ("api.example.com", "domain"),
+                    ("https://admin.example.com/login", "url"),
+                    ("unrelated.example.net", "domain"),
+                ],
+                "asset_commander",
+            )
+
+            bundle = bus.bundle()
+            self.assertEqual(bundle["domains"], ["example.com", "api.example.com"])
+            self.assertEqual(bundle["urls"], ["https://admin.example.com/login"])
+            self.assertEqual(
+                read_json(bus.path)["filtered_assets"][0]["value"],
+                "unrelated.example.net",
+            )
+
+    def test_processing_scope_supports_ip_and_cidr_rules(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(
+                Path(temporary) / "assets.json",
+                "*",
+                "192.0.2.10",
+                approval_mode="automatic",
+                processing_scope="192.0.2.10\n198.51.100.0/24",
+            )
+
+            bus.ingest([("192.0.2.10", "ip")], "project_target")
+            bus.ingest(
+                [
+                    ("198.51.100.8", "ip"),
+                    ("198.51.100.9:8443", "endpoint"),
+                    ("203.0.113.8", "ip"),
+                ],
+                "fscan",
+            )
+
+            self.assertEqual(
+                bus.bundle()["ips"], ["192.0.2.10", "198.51.100.8"]
+            )
+            self.assertEqual(bus.bundle()["endpoints"], ["198.51.100.9:8443"])
+            self.assertEqual(
+                read_json(bus.path)["filtered_assets"][0]["value"], "203.0.113.8"
+            )
+
+    def test_hot_processing_scope_filters_existing_assets_but_keeps_target(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(path, "*", "primary.example", approval_mode="automatic")
+            bus.ingest([("primary.example", "domain")], "project_target")
+            bus.ingest(
+                [
+                    ("api.primary.example", "domain"),
+                    ("unrelated.example.net", "domain"),
+                ],
+                "asset_commander",
+            )
+
+            bus.update_approval_policy(
+                approval_mode="automatic",
+                approval_seconds=20,
+                allow_cidr_expansion=False,
+                processing_scope="api.primary.example",
+            )
+
+            self.assertEqual(
+                bus.bundle()["domains"],
+                ["primary.example", "api.primary.example"],
+            )
+            filtered = read_json(path)["filtered_assets"]
+            self.assertEqual(filtered[0]["value"], "unrelated.example.net")
+            self.assertEqual(filtered[0]["reason"], "outside_processing_scope")
+
+    def test_manual_asset_must_match_processing_scope(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(
+                Path(temporary) / "assets.json",
+                "*",
+                "example.com",
+                processing_scope="example.com",
+            )
+            bus.ingest([("example.com", "domain")], "project_target")
+
+            with self.assertRaisesRegex(ValueError, "自动处理范围"):
+                bus.add_manual_asset("unrelated.example.net")
+
     def test_dirsearch_parser_suppresses_repeated_soft_200_wall(self) -> None:
         repeated = "\n".join(
             f"200    32KB  https://app.example.test/fake-{index}"

@@ -31,6 +31,14 @@ from .asset_bus import (
     target_assets,
 )
 from .models import ProcessRecord
+from .credential_audit import (
+    approved_agent_candidates,
+    discover_login_candidates,
+    finish_batch_candidates,
+    mark_candidates_running,
+    pending_candidates,
+    resolve_candidate_decisions,
+)
 from .incremental_nuclei import (
     initial_incremental_nuclei_urls,
     incremental_nuclei_candidates,
@@ -1005,6 +1013,29 @@ def build_batch_prompt(
     urls = delta["urls"] if after_generation else all_assets["urls"]
     endpoints = delta["endpoints"] if after_generation else all_assets["endpoints"]
     collision_results, collision_evidence = asset_commander_collision_paths(run_dir)
+    credential_rows = approved_agent_candidates(run_dir)
+    credential_value = read_json(
+        run_dir / "tool_data" / "credential_audit" / "credential_audit.json"
+    )
+    credential_policy = credential_value.get("policy")
+    if not isinstance(credential_policy, dict):
+        credential_policy = {}
+    credential_text = "- 本批次没有获准的登录入口口令安全检测待办"
+    if credential_rows:
+        sections: list[str] = []
+        for item in credential_rows:
+            usernames = ", ".join(map(str, item.get("username_candidates") or [])) or "未指定，由页面公开信息与基础字典生成"
+            sections.append(
+                "\n".join(
+                    (
+                        f"- 登录 URL：{item.get('url', '')}",
+                        f"  方式：{item.get('action', '')}",
+                        f"  用户名候选：{usernames}",
+                        f"  字典路径：{item.get('wordlist_path') or '未指定'}",
+                    )
+                )
+            )
+        credential_text = "\n".join(sections)
     pending_rows = [
         item for item in bus.value.get("pending", []) if isinstance(item, dict)
     ]
@@ -1045,6 +1076,17 @@ def build_batch_prompt(
         + "\u4e0d\u8981\u628a\u7ec8\u7aef\u989c\u8272\u63a7\u5236\u7801\u5199\u5165\u62a5\u544a\uff1b\u9519\u8bef\u4fe1\u606f\u9700\u5148\u53bb\u9664 ANSI \u63a7\u5236\u5e8f\u5217\u3002\n"
         + "下面的待确认资产尚未获得准入，不得测试，也不得自行扩大授权范围：\n"
         + pending_text
+        + "\n\n### 获准的登录入口口令安全检测待办\n"
+        + credential_text
+        + (
+            "\n\n仅处理本节明确列出的 URL。先用浏览器或 Burp 捕获并理解真实登录请求、CSRF、验证码和失败特征，"
+            "优先调用已安装的 browser-burp-pentest / burp Skill 或 Burp MCP。社工字典方式可复用 Tscan 的"
+            "社工字典生成功能，但 Web 登录请求不能直接交给 Tscan PwdCrack。每个账号最多尝试 "
+            f"{credential_policy.get('max_attempts', 10)} 次，"
+            f"总速率不超过每分钟 {credential_policy.get('requests_per_minute', 10)} 请求，"
+            f"并发不超过 {credential_policy.get('concurrency', 1)}。"
+            "遇到验证码、HTTP 429、账号锁定提示或首次成功立即停止。成功口令不得写入报告、日志或聊天输出，只记录脱敏结论。"
+        )
         + "\n\n### 本批次 Web URL\n"
         + ("\n".join(f"- {value}" for value in urls) or "- 本批次没有新增 Web URL")
         + "\n\n### 本批次非 Web 端点\n"
@@ -1129,6 +1171,15 @@ _HOT_WORKFLOW_ARGUMENTS = {
     "workload_agent_threshold": "workload_agent_threshold",
     "workload_popup_enabled": "workload_popup_enabled",
     "workload_popup_topmost": "workload_popup_topmost",
+    "asset_processing_scope": "asset_processing_scope",
+    "credential_audit_enabled": "credential_audit_enabled",
+    "credential_audit_default_action": "credential_audit_default_action",
+    "credential_audit_countdown_seconds": "credential_audit_countdown_seconds",
+    "credential_audit_wordlist_path": "credential_audit_wordlist_path",
+    "credential_audit_max_attempts": "credential_audit_max_attempts",
+    "credential_audit_requests_per_minute": "credential_audit_requests_per_minute",
+    "credential_audit_concurrency": "credential_audit_concurrency",
+    "credential_audit_stop_on_defense": "credential_audit_stop_on_defense",
 }
 
 
@@ -1144,6 +1195,7 @@ def apply_hot_workflow_settings(
         approval_mode=str(workflow["new_asset_approval_mode"]),
         approval_seconds=int(workflow["new_asset_countdown_seconds"]),
         allow_cidr_expansion=bool(workflow["allow_cidr_expansion"]),
+        processing_scope=str(workflow["asset_processing_scope"]),
         reset_pending_deadlines=False,
     )
     agent = value.get("agent")
@@ -1203,6 +1255,19 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workload-agent-threshold", type=int, default=50)
     parser.add_argument("--workload-popup-enabled", type=parse_bool, default=True)
     parser.add_argument("--workload-popup-topmost", type=parse_bool, default=True)
+    parser.add_argument("--asset-processing-scope", default="")
+    parser.add_argument("--credential-audit-enabled", type=parse_bool, default=True)
+    parser.add_argument(
+        "--credential-audit-default-action",
+        choices=("save_only", "agent_default_dictionary", "agent_social_dictionary"),
+        default="save_only",
+    )
+    parser.add_argument("--credential-audit-countdown-seconds", type=int, default=20)
+    parser.add_argument("--credential-audit-wordlist-path", default="")
+    parser.add_argument("--credential-audit-max-attempts", type=int, default=10)
+    parser.add_argument("--credential-audit-requests-per-minute", type=int, default=10)
+    parser.add_argument("--credential-audit-concurrency", type=int, default=1)
+    parser.add_argument("--credential-audit-stop-on-defense", type=parse_bool, default=True)
     parser.add_argument("--terminal-window", default="")
     return parser.parse_args()
 
@@ -1238,6 +1303,7 @@ def main() -> int:
         approval_mode=args.new_asset_approval_mode,
         approval_seconds=args.new_asset_countdown_seconds,
         allow_cidr_expansion=args.allow_cidr_expansion,
+        processing_scope=args.asset_processing_scope,
     )
     state = read_json(state_path)
     state.setdefault("schema_version", 1)
@@ -1322,6 +1388,15 @@ def main() -> int:
             "workload_agent_threshold": max(args.workload_agent_threshold, 1),
             "workload_popup_enabled": args.workload_popup_enabled,
             "workload_popup_topmost": args.workload_popup_topmost,
+            "asset_processing_scope": args.asset_processing_scope,
+            "credential_audit_enabled": args.credential_audit_enabled,
+            "credential_audit_default_action": args.credential_audit_default_action,
+            "credential_audit_countdown_seconds": max(args.credential_audit_countdown_seconds, 3),
+            "credential_audit_wordlist_path": args.credential_audit_wordlist_path,
+            "credential_audit_max_attempts": max(args.credential_audit_max_attempts, 1),
+            "credential_audit_requests_per_minute": max(args.credential_audit_requests_per_minute, 1),
+            "credential_audit_concurrency": max(args.credential_audit_concurrency, 1),
+            "credential_audit_stop_on_defense": args.credential_audit_stop_on_defense,
         },
         updated_at=now_text(),
     )
@@ -1812,6 +1887,9 @@ def main() -> int:
             state["active_agent_creation_token"] = 0
             active_pid = 0
             if finished and finished.get("status") == "failed":
+                finish_batch_candidates(
+                    run_dir, int(finished.get("batch") or 0), False
+                )
                 exit_code = int(finished.get("exit_code") or 1)
                 delay = schedule_agent_retry(state, f"AI 退出码 {exit_code}")
                 append_activity(
@@ -1819,6 +1897,9 @@ def main() -> int:
                     f"AI 执行记录 PID {finished_pid} 启动或运行失败（退出码 {exit_code}），{delay} 秒后重试当前资产。",
                 )
             else:
+                finish_batch_candidates(
+                    run_dir, int((finished or {}).get("batch") or 0), True
+                )
                 generation_to = int((finished or {}).get("generation_to") or 0)
                 state["agent_consumed_generation"] = max(
                     int(state.get("agent_consumed_generation") or 0), generation_to
@@ -1936,6 +2017,20 @@ def main() -> int:
         )
         fscan_ready = initial_fscan_gate_ready and incremental_fscan_ready
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
+        credential_workflow = {
+            "credential_audit_enabled": args.credential_audit_enabled,
+            "credential_audit_default_action": args.credential_audit_default_action,
+            "credential_audit_countdown_seconds": args.credential_audit_countdown_seconds,
+            "credential_audit_wordlist_path": args.credential_audit_wordlist_path,
+            "credential_audit_max_attempts": args.credential_audit_max_attempts,
+            "credential_audit_requests_per_minute": args.credential_audit_requests_per_minute,
+            "credential_audit_concurrency": args.credential_audit_concurrency,
+            "credential_audit_stop_on_defense": args.credential_audit_stop_on_defense,
+        }
+        discover_login_candidates(run_dir, bus, credential_workflow)
+        resolve_candidate_decisions(run_dir)
+        credential_pending = pending_candidates(run_dir)
+        credential_approved = approved_agent_candidates(run_dir)
         consumed = int(state.get("agent_consumed_generation") or 0)
         failure_count, retry_seconds, retry_ready = agent_retry_status(state)
         should_launch = agent_launch_ready(
@@ -1950,6 +2045,22 @@ def main() -> int:
             auto_agent=args.auto_agent,
             retry_ready=retry_ready,
         )
+        if credential_pending:
+            should_launch = False
+            state["credential_audit_status"] = "waiting_for_confirmation"
+        elif credential_approved:
+            state["credential_audit_status"] = "approved_for_agent"
+            should_launch = should_launch or (
+                args.auto_agent
+                and retry_ready
+                and active_pid <= 0
+                and asset_ready
+                and fscan_ready
+                and quiet
+                and successful_agent_batch_count(batches) < args.max_agent_batches
+            )
+        else:
+            state["credential_audit_status"] = "idle"
         workload_gate_status = "not_needed"
         if should_launch:
             workload_gate_status = agent_workload_gate(
@@ -2108,6 +2219,12 @@ def main() -> int:
                     )
                     atomic_json_write(batch_metadata_path, batch_metadata)
                 batches.append(batch)
+                credential_ids = [
+                    str(item.get("id") or "") for item in credential_approved
+                ]
+                if credential_ids:
+                    mark_candidates_running(run_dir, credential_ids, batch_number)
+                    batch["credential_candidate_ids"] = credential_ids
                 state["active_agent_pid"] = pid
                 state["active_agent_creation_token"] = process_creation_token(pid)
                 state["active_agent_generation"] = bus.generation

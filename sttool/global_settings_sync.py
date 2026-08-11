@@ -55,6 +55,7 @@ def apply_global_settings_to_runs(
                 approval_mode=str(workflow["new_asset_approval_mode"]),
                 approval_seconds=int(workflow["new_asset_countdown_seconds"]),
                 allow_cidr_expansion=bool(workflow["allow_cidr_expansion"]),
+                processing_scope=str(workflow["asset_processing_scope"]),
             )
         update_pending_request_policy(
             run_dir,

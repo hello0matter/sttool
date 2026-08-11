@@ -1185,6 +1185,24 @@ class RuntimeManager:
                 str(request.workload_popup_enabled).lower(),
                 "--workload-popup-topmost",
                 str(request.workload_popup_topmost).lower(),
+                "--asset-processing-scope",
+                request.asset_processing_scope,
+                "--credential-audit-enabled",
+                str(request.credential_audit_enabled).lower(),
+                "--credential-audit-default-action",
+                request.credential_audit_default_action,
+                "--credential-audit-countdown-seconds",
+                str(request.credential_audit_countdown_seconds),
+                "--credential-audit-max-attempts",
+                str(request.credential_audit_max_attempts),
+                "--credential-audit-requests-per-minute",
+                str(request.credential_audit_requests_per_minute),
+                "--credential-audit-concurrency",
+                str(request.credential_audit_concurrency),
+                "--credential-audit-stop-on-defense",
+                str(request.credential_audit_stop_on_defense).lower(),
+                "--credential-audit-wordlist-path",
+                request.credential_audit_wordlist_path,
                 "--terminal-window",
                 agent_terminal_window_name(self.app_dir),
             ],
@@ -1340,6 +1358,19 @@ class RuntimeManager:
                 workload_popup_topmost=bool(
                     value.get("workload_popup_topmost", state.workload_popup_topmost)
                 ),
+                asset_processing_scope=str(
+                    value.get("asset_processing_scope", state.asset_processing_scope)
+                ),
+                credential_audit_enabled=bool(value.get("credential_audit_enabled", state.credential_audit_enabled)),
+                credential_audit_default_action=str(value.get("credential_audit_default_action", state.credential_audit_default_action)),
+                credential_audit_countdown_seconds=int(value.get("credential_audit_countdown_seconds", state.credential_audit_countdown_seconds)),
+                credential_audit_popup_enabled=bool(value.get("credential_audit_popup_enabled", state.credential_audit_popup_enabled)),
+                credential_audit_popup_topmost=bool(value.get("credential_audit_popup_topmost", state.credential_audit_popup_topmost)),
+                credential_audit_wordlist_path=str(value.get("credential_audit_wordlist_path", state.credential_audit_wordlist_path)),
+                credential_audit_max_attempts=int(value.get("credential_audit_max_attempts", state.credential_audit_max_attempts)),
+                credential_audit_requests_per_minute=int(value.get("credential_audit_requests_per_minute", state.credential_audit_requests_per_minute)),
+                credential_audit_concurrency=int(value.get("credential_audit_concurrency", state.credential_audit_concurrency)),
+                credential_audit_stop_on_defense=bool(value.get("credential_audit_stop_on_defense", state.credential_audit_stop_on_defense)),
             ),
             skipped_tools,
         )
@@ -1392,6 +1423,22 @@ class RuntimeManager:
                 new_asset_countdown_seconds=request.new_asset_countdown_seconds,
                 new_asset_popup_enabled=request.new_asset_popup_enabled,
                 new_asset_popup_topmost=request.new_asset_popup_topmost,
+                workload_approval_mode=request.workload_approval_mode,
+                workload_countdown_seconds=request.workload_countdown_seconds,
+                workload_agent_threshold=request.workload_agent_threshold,
+                workload_popup_enabled=request.workload_popup_enabled,
+                workload_popup_topmost=request.workload_popup_topmost,
+                asset_processing_scope=request.asset_processing_scope,
+                credential_audit_enabled=request.credential_audit_enabled,
+                credential_audit_default_action=request.credential_audit_default_action,
+                credential_audit_countdown_seconds=request.credential_audit_countdown_seconds,
+                credential_audit_popup_enabled=request.credential_audit_popup_enabled,
+                credential_audit_popup_topmost=request.credential_audit_popup_topmost,
+                credential_audit_wordlist_path=request.credential_audit_wordlist_path,
+                credential_audit_max_attempts=request.credential_audit_max_attempts,
+                credential_audit_requests_per_minute=request.credential_audit_requests_per_minute,
+                credential_audit_concurrency=request.credential_audit_concurrency,
+                credential_audit_stop_on_defense=request.credential_audit_stop_on_defense,
             )
             state_path = run_dir / "run.json"
             atomic_json_write(state_path, state.to_dict())
@@ -1433,6 +1480,17 @@ class RuntimeManager:
                 "workload_agent_threshold": request.workload_agent_threshold,
                 "workload_popup_enabled": request.workload_popup_enabled,
                 "workload_popup_topmost": request.workload_popup_topmost,
+                "asset_processing_scope": request.asset_processing_scope,
+                "credential_audit_enabled": request.credential_audit_enabled,
+                "credential_audit_default_action": request.credential_audit_default_action,
+                "credential_audit_countdown_seconds": request.credential_audit_countdown_seconds,
+                "credential_audit_popup_enabled": request.credential_audit_popup_enabled,
+                "credential_audit_popup_topmost": request.credential_audit_popup_topmost,
+                "credential_audit_wordlist_path": request.credential_audit_wordlist_path,
+                "credential_audit_max_attempts": request.credential_audit_max_attempts,
+                "credential_audit_requests_per_minute": request.credential_audit_requests_per_minute,
+                "credential_audit_concurrency": request.credential_audit_concurrency,
+                "credential_audit_stop_on_defense": request.credential_audit_stop_on_defense,
                 "selected_tools": list(request.selected_tools),
                 "user_prompt": request.user_prompt,
                 "last_run_id": run_id,
@@ -1576,6 +1634,17 @@ class RuntimeManager:
                     workload_agent_threshold=request.workload_agent_threshold,
                     workload_popup_enabled=request.workload_popup_enabled,
                     workload_popup_topmost=request.workload_popup_topmost,
+                    asset_processing_scope=request.asset_processing_scope,
+                    credential_audit_enabled=request.credential_audit_enabled,
+                    credential_audit_default_action=request.credential_audit_default_action,
+                    credential_audit_countdown_seconds=request.credential_audit_countdown_seconds,
+                    credential_audit_popup_enabled=request.credential_audit_popup_enabled,
+                    credential_audit_popup_topmost=request.credential_audit_popup_topmost,
+                    credential_audit_wordlist_path=request.credential_audit_wordlist_path,
+                    credential_audit_max_attempts=request.credential_audit_max_attempts,
+                    credential_audit_requests_per_minute=request.credential_audit_requests_per_minute,
+                    credential_audit_concurrency=request.credential_audit_concurrency,
+                    credential_audit_stop_on_defense=request.credential_audit_stop_on_defense,
                 )
             recovery_request = LaunchRequest(
                 project_name=request.project_name,
@@ -1618,6 +1687,22 @@ class RuntimeManager:
                 new_asset_countdown_seconds=request.new_asset_countdown_seconds,
                 new_asset_popup_enabled=request.new_asset_popup_enabled,
                 new_asset_popup_topmost=request.new_asset_popup_topmost,
+                workload_approval_mode=request.workload_approval_mode,
+                workload_countdown_seconds=request.workload_countdown_seconds,
+                workload_agent_threshold=request.workload_agent_threshold,
+                workload_popup_enabled=request.workload_popup_enabled,
+                workload_popup_topmost=request.workload_popup_topmost,
+                asset_processing_scope=request.asset_processing_scope,
+                credential_audit_enabled=request.credential_audit_enabled,
+                credential_audit_default_action=request.credential_audit_default_action,
+                credential_audit_countdown_seconds=request.credential_audit_countdown_seconds,
+                credential_audit_popup_enabled=request.credential_audit_popup_enabled,
+                credential_audit_popup_topmost=request.credential_audit_popup_topmost,
+                credential_audit_wordlist_path=request.credential_audit_wordlist_path,
+                credential_audit_max_attempts=request.credential_audit_max_attempts,
+                credential_audit_requests_per_minute=request.credential_audit_requests_per_minute,
+                credential_audit_concurrency=request.credential_audit_concurrency,
+                credential_audit_stop_on_defense=request.credential_audit_stop_on_defense,
             )
             selected = self.preflight(
                 recovery_request, allow_legacy_url_project=True
@@ -1719,6 +1804,17 @@ class RuntimeManager:
             state.workload_agent_threshold = request.workload_agent_threshold
             state.workload_popup_enabled = request.workload_popup_enabled
             state.workload_popup_topmost = request.workload_popup_topmost
+            state.asset_processing_scope = request.asset_processing_scope
+            state.credential_audit_enabled = request.credential_audit_enabled
+            state.credential_audit_default_action = request.credential_audit_default_action
+            state.credential_audit_countdown_seconds = request.credential_audit_countdown_seconds
+            state.credential_audit_popup_enabled = request.credential_audit_popup_enabled
+            state.credential_audit_popup_topmost = request.credential_audit_popup_topmost
+            state.credential_audit_wordlist_path = request.credential_audit_wordlist_path
+            state.credential_audit_max_attempts = request.credential_audit_max_attempts
+            state.credential_audit_requests_per_minute = request.credential_audit_requests_per_minute
+            state.credential_audit_concurrency = request.credential_audit_concurrency
+            state.credential_audit_stop_on_defense = request.credential_audit_stop_on_defense
             state.selected_tools = list(request.selected_tools)
             state.recovery_count += 1
             state.recovery_history.append(

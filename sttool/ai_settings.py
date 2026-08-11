@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import threading
 import tkinter as tk
-from tkinter import messagebox, ttk
+from tkinter import filedialog, messagebox, ttk
 from urllib.parse import urlsplit
 
 from .agent_connection_test import test_agent_connection
@@ -27,6 +27,12 @@ ASSET_APPROVAL_LABELS = {
     "countdown_accept": "弹窗提醒，倒计时后自动加入",
     "countdown_reject": "弹窗提醒，倒计时后自动排除",
     "manual": "始终等待人工确认（不自动处理）",
+}
+
+CREDENTIAL_AUDIT_LABELS = {
+    "save_only": "仅保存待办，不自动验证",
+    "agent_default_dictionary": "交给 Agent：默认字典",
+    "agent_social_dictionary": "交给 Agent：社工字典",
 }
 
 
@@ -110,6 +116,7 @@ class AISettingsDialog(tk.Toplevel):
         self.allow_cidr_expansion_var = tk.BooleanVar(
             value=bool(workflow["allow_cidr_expansion"])
         )
+        self.asset_processing_scope_value = str(workflow["asset_processing_scope"])
         self.new_asset_approval_var = tk.StringVar(
             value=ASSET_APPROVAL_LABELS[str(workflow["new_asset_approval_mode"])]
         )
@@ -136,6 +143,38 @@ class AISettingsDialog(tk.Toplevel):
         )
         self.workload_popup_topmost_var = tk.BooleanVar(
             value=bool(workflow["workload_popup_topmost"])
+        )
+        self.credential_audit_enabled_var = tk.BooleanVar(
+            value=bool(workflow["credential_audit_enabled"])
+        )
+        self.credential_audit_default_action_var = tk.StringVar(
+            value=CREDENTIAL_AUDIT_LABELS[
+                str(workflow["credential_audit_default_action"])
+            ]
+        )
+        self.credential_audit_countdown_var = tk.IntVar(
+            value=int(workflow["credential_audit_countdown_seconds"])
+        )
+        self.credential_audit_popup_enabled_var = tk.BooleanVar(
+            value=bool(workflow["credential_audit_popup_enabled"])
+        )
+        self.credential_audit_popup_topmost_var = tk.BooleanVar(
+            value=bool(workflow["credential_audit_popup_topmost"])
+        )
+        self.credential_audit_wordlist_var = tk.StringVar(
+            value=str(workflow["credential_audit_wordlist_path"])
+        )
+        self.credential_audit_max_attempts_var = tk.IntVar(
+            value=int(workflow["credential_audit_max_attempts"])
+        )
+        self.credential_audit_requests_per_minute_var = tk.IntVar(
+            value=int(workflow["credential_audit_requests_per_minute"])
+        )
+        self.credential_audit_concurrency_var = tk.IntVar(
+            value=int(workflow["credential_audit_concurrency"])
+        )
+        self.credential_audit_stop_on_defense_var = tk.BooleanVar(
+            value=bool(workflow["credential_audit_stop_on_defense"])
         )
 
         content = ttk.Frame(self, padding=16)
@@ -572,6 +611,25 @@ class AISettingsDialog(tk.Toplevel):
             ),
             wraplength=680,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Label(
+            approval,
+            text="自动处理范围（每行一个域名、IP、CIDR 或 URL；留空不额外限制）",
+        ).grid(row=6, column=0, columnspan=2, sticky="w", pady=(12, 4))
+        self.asset_processing_scope_text = tk.Text(
+            approval, height=4, wrap="word", relief="solid", borderwidth=1
+        )
+        self.asset_processing_scope_text.grid(
+            row=7, column=0, columnspan=2, sticky="ew"
+        )
+        self.asset_processing_scope_text.insert("1.0", self.asset_processing_scope_value)
+        ttk.Label(
+            approval,
+            text=(
+                "例如填写 example.com，只让该根域及其子域进入后续扫描和 Agent。"
+                "它不会扩大授权范围，主要目标始终保留；修改后会热更新运行中的项目。"
+            ),
+            wraplength=680,
+        ).grid(row=8, column=0, columnspan=2, sticky="w", pady=(6, 0))
         workload = ttk.LabelFrame(
             tab, text="下一批 AI 执行确认（待处理资产较多时）", padding=12
         )
@@ -605,6 +663,70 @@ class AISettingsDialog(tk.Toplevel):
             text="该确认只控制是否启动下一批 Codex/Claude；资产发现、扫描器和报告整理继续运行。",
             wraplength=680,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        credential = ttk.LabelFrame(
+            tab, text="登录入口口令安全检测", padding=12
+        )
+        credential.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        credential.columnconfigure(1, weight=1)
+        ttk.Checkbutton(
+            credential,
+            text="发现获准 URL 中的登录入口时创建安全检测待办",
+            variable=self.credential_audit_enabled_var,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Label(credential, text="倒计时后的默认处理").grid(
+            row=1, column=0, sticky="w", pady=4
+        )
+        ttk.Combobox(
+            credential,
+            textvariable=self.credential_audit_default_action_var,
+            values=tuple(CREDENTIAL_AUDIT_LABELS.values()),
+            state="readonly",
+        ).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(16, 0), pady=4)
+        self._spin_field(
+            credential, 2, "确认弹窗倒计时（秒）", self.credential_audit_countdown_var, 3, 3600
+        )
+        ttk.Checkbutton(
+            credential,
+            text="发现登录入口时显示醒目弹窗",
+            variable=self.credential_audit_popup_enabled_var,
+        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Checkbutton(
+            credential,
+            text="登录入口确认弹窗置顶并响铃提醒",
+            variable=self.credential_audit_popup_topmost_var,
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Label(credential, text="基础字典路径（可选）").grid(
+            row=5, column=0, sticky="w", pady=4
+        )
+        ttk.Entry(credential, textvariable=self.credential_audit_wordlist_var).grid(
+            row=5, column=1, sticky="ew", padx=(16, 8), pady=4
+        )
+        ttk.Button(
+            credential, text="浏览...", command=self._browse_credential_wordlist
+        ).grid(row=5, column=2, pady=4)
+        self._spin_field(
+            credential, 6, "每账号最大尝试数", self.credential_audit_max_attempts_var, 1, 1000
+        )
+        self._spin_field(
+            credential, 7, "每分钟最大请求数", self.credential_audit_requests_per_minute_var, 1, 600
+        )
+        self._spin_field(
+            credential, 8, "并发数", self.credential_audit_concurrency_var, 1, 20
+        )
+        ttk.Checkbutton(
+            credential,
+            text="遇到验证码、HTTP 429 或账号锁定提示立即停止",
+            variable=self.credential_audit_stop_on_defense_var,
+        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Label(
+            credential,
+            text=(
+                "Web 登录不会直接交给 Tscan 服务口令模块。Agent 会先识别真实请求，再优先调用 Burp MCP/Skill；"
+                "全新安装默认仅保存待办，避免无人值守时触发账号锁定。"
+            ),
+            wraplength=680,
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         scan = ttk.LabelFrame(tab, text="扫描工具参数（按工作模式预设）", padding=12)
         scan.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -699,6 +821,10 @@ class AISettingsDialog(tk.Toplevel):
         self.semantic_run_dirsearch_var.set(bool(preset["semantic_run_dirsearch"]))
         self.semantic_max_rate_var.set(int(preset["semantic_max_rate"]))
         self.allow_cidr_expansion_var.set(bool(preset["allow_cidr_expansion"]))
+        self.asset_processing_scope_text.delete("1.0", "end")
+        self.asset_processing_scope_text.insert(
+            "1.0", str(preset["asset_processing_scope"])
+        )
         self.new_asset_approval_var.set(
             ASSET_APPROVAL_LABELS[str(preset["new_asset_approval_mode"])]
         )
@@ -718,6 +844,39 @@ class AISettingsDialog(tk.Toplevel):
         self.workload_agent_threshold_var.set(int(preset["workload_agent_threshold"]))
         self.workload_popup_enabled_var.set(bool(preset["workload_popup_enabled"]))
         self.workload_popup_topmost_var.set(bool(preset["workload_popup_topmost"]))
+        self.credential_audit_enabled_var.set(bool(preset["credential_audit_enabled"]))
+        self.credential_audit_default_action_var.set(
+            CREDENTIAL_AUDIT_LABELS[str(preset["credential_audit_default_action"])]
+        )
+        self.credential_audit_countdown_var.set(
+            int(preset["credential_audit_countdown_seconds"])
+        )
+        self.credential_audit_popup_enabled_var.set(
+            bool(preset["credential_audit_popup_enabled"])
+        )
+        self.credential_audit_popup_topmost_var.set(
+            bool(preset["credential_audit_popup_topmost"])
+        )
+        self.credential_audit_wordlist_var.set(
+            str(preset["credential_audit_wordlist_path"])
+        )
+        self.credential_audit_max_attempts_var.set(
+            int(preset["credential_audit_max_attempts"])
+        )
+        self.credential_audit_requests_per_minute_var.set(
+            int(preset["credential_audit_requests_per_minute"])
+        )
+        self.credential_audit_concurrency_var.set(
+            int(preset["credential_audit_concurrency"])
+        )
+        self.credential_audit_stop_on_defense_var.set(
+            bool(preset["credential_audit_stop_on_defense"])
+        )
+
+    def _browse_credential_wordlist(self) -> None:
+        value = filedialog.askopenfilename(parent=self, title="选择基础口令字典")
+        if value:
+            self.credential_audit_wordlist_var.set(value)
 
     @staticmethod
     def _valid_optional_url(value: str) -> bool:
@@ -775,6 +934,9 @@ class AISettingsDialog(tk.Toplevel):
                 "semantic_run_dirsearch": self.semantic_run_dirsearch_var.get(),
                 "semantic_max_rate": self.semantic_max_rate_var.get(),
                 "allow_cidr_expansion": self.allow_cidr_expansion_var.get(),
+                "asset_processing_scope": self.asset_processing_scope_text.get(
+                    "1.0", "end"
+                ).strip(),
                 "new_asset_approval_mode": {
                     label: mode for mode, label in ASSET_APPROVAL_LABELS.items()
                 }.get(self.new_asset_approval_var.get(), "countdown_accept"),
@@ -788,6 +950,18 @@ class AISettingsDialog(tk.Toplevel):
                 "workload_agent_threshold": self.workload_agent_threshold_var.get(),
                 "workload_popup_enabled": self.workload_popup_enabled_var.get(),
                 "workload_popup_topmost": self.workload_popup_topmost_var.get(),
+                "credential_audit_enabled": self.credential_audit_enabled_var.get(),
+                "credential_audit_default_action": {
+                    label: action for action, label in CREDENTIAL_AUDIT_LABELS.items()
+                }.get(self.credential_audit_default_action_var.get(), "save_only"),
+                "credential_audit_countdown_seconds": self.credential_audit_countdown_var.get(),
+                "credential_audit_popup_enabled": self.credential_audit_popup_enabled_var.get(),
+                "credential_audit_popup_topmost": self.credential_audit_popup_topmost_var.get(),
+                "credential_audit_wordlist_path": self.credential_audit_wordlist_var.get(),
+                "credential_audit_max_attempts": self.credential_audit_max_attempts_var.get(),
+                "credential_audit_requests_per_minute": self.credential_audit_requests_per_minute_var.get(),
+                "credential_audit_concurrency": self.credential_audit_concurrency_var.get(),
+                "credential_audit_stop_on_defense": self.credential_audit_stop_on_defense_var.get(),
             }
         )
         codex_effort = self.codex_reasoning_effort_var.get()

@@ -10,6 +10,8 @@ from tkinter import filedialog, messagebox, ttk
 
 from .ai_settings import AISettingsDialog
 from .asset_approval_dialog import AssetApprovalDialog, pending_asset_groups
+from .credential_audit import pending_candidates
+from .credential_audit_dialog import CredentialAuditDialog
 from .workload_approval import read_request
 from .workload_approval_dialog import WorkloadApprovalDialog
 from .asset_bus import read_json
@@ -68,6 +70,8 @@ class LauncherApp(tk.Tk):
         self._asset_approval_snooze_until: dict[str, float] = {}
         self._workload_approval_dialogs: dict[str, WorkloadApprovalDialog] = {}
         self._workload_approval_snooze_until: dict[str, float] = {}
+        self._credential_audit_dialogs: dict[str, CredentialAuditDialog] = {}
+        self._credential_audit_snooze_until: dict[str, float] = {}
         self.launcher_settings_path = self.manager.app_dir / "launcher_settings.json"
         self.launcher_secrets_path = self.manager.app_dir / "launcher_secrets.dat"
         launcher_settings = self._load_launcher_settings()
@@ -818,6 +822,39 @@ class LauncherApp(tk.Tk):
             workload_popup_topmost=bool(
                 self.workflow_settings["workload_popup_topmost"]
             ),
+            asset_processing_scope=str(
+                self.workflow_settings["asset_processing_scope"]
+            ),
+            credential_audit_enabled=bool(
+                self.workflow_settings["credential_audit_enabled"]
+            ),
+            credential_audit_default_action=str(
+                self.workflow_settings["credential_audit_default_action"]
+            ),
+            credential_audit_countdown_seconds=int(
+                self.workflow_settings["credential_audit_countdown_seconds"]
+            ),
+            credential_audit_popup_enabled=bool(
+                self.workflow_settings["credential_audit_popup_enabled"]
+            ),
+            credential_audit_popup_topmost=bool(
+                self.workflow_settings["credential_audit_popup_topmost"]
+            ),
+            credential_audit_wordlist_path=str(
+                self.workflow_settings["credential_audit_wordlist_path"]
+            ),
+            credential_audit_max_attempts=int(
+                self.workflow_settings["credential_audit_max_attempts"]
+            ),
+            credential_audit_requests_per_minute=int(
+                self.workflow_settings["credential_audit_requests_per_minute"]
+            ),
+            credential_audit_concurrency=int(
+                self.workflow_settings["credential_audit_concurrency"]
+            ),
+            credential_audit_stop_on_defense=bool(
+                self.workflow_settings["credential_audit_stop_on_defense"]
+            ),
         )
 
     def _start(self) -> None:
@@ -998,6 +1035,42 @@ class LauncherApp(tk.Tk):
             )
             self._workload_approval_dialogs[key] = dialog
 
+    def _refresh_credential_audit_dialogs(self) -> None:
+        for key, dialog in list(self._credential_audit_dialogs.items()):
+            try:
+                exists = bool(dialog.winfo_exists())
+            except tk.TclError:
+                exists = False
+            if not exists:
+                self._credential_audit_dialogs.pop(key, None)
+        for state in self.run_states.values():
+            key = self._state_key(state)
+            if (
+                state.status != "running"
+                or not state.credential_audit_enabled
+                or not state.credential_audit_popup_enabled
+                or key in self._credential_audit_dialogs
+                or time.monotonic() < self._credential_audit_snooze_until.get(key, 0)
+            ):
+                continue
+            candidates = pending_candidates(Path(state.run_dir))
+            if not candidates:
+                continue
+
+            def closed(state_key: str = key) -> None:
+                self._credential_audit_dialogs.pop(state_key, None)
+                self._credential_audit_snooze_until[state_key] = time.monotonic() + 30
+
+            dialog = CredentialAuditDialog(
+                self,
+                project_name=state.project_name,
+                run_dir=Path(state.run_dir),
+                candidates=candidates,
+                topmost=state.credential_audit_popup_topmost,
+                on_close=closed,
+            )
+            self._credential_audit_dialogs[key] = dialog
+
     @staticmethod
     def _provider_text(provider: str) -> str:
         return RuntimeManager.provider_display_name(provider)
@@ -1177,6 +1250,7 @@ class LauncherApp(tk.Tk):
         for dialogs in (
             self._asset_approval_dialogs,
             self._workload_approval_dialogs,
+            self._credential_audit_dialogs,
         ):
             for key, dialog in list(dialogs.items()):
                 if not key.startswith(f"{project_key}::"):
@@ -1391,6 +1465,7 @@ class LauncherApp(tk.Tk):
         for dialogs in (
             self._asset_approval_dialogs,
             self._workload_approval_dialogs,
+            self._credential_audit_dialogs,
         ):
             for key, dialog in list(dialogs.items()):
                 dialogs.pop(key, None)
@@ -1400,6 +1475,7 @@ class LauncherApp(tk.Tk):
                     pass
         self._asset_approval_snooze_until.clear()
         self._workload_approval_snooze_until.clear()
+        self._credential_audit_snooze_until.clear()
 
     def _apply_global_workflow_settings(self) -> int:
         states = self.manager.apply_workflow_settings(
@@ -1414,6 +1490,7 @@ class LauncherApp(tk.Tk):
         self._refresh_runs()
         self._refresh_asset_approval_dialogs()
         self._refresh_workload_approval_dialogs()
+        self._refresh_credential_audit_dialogs()
         return len(states)
 
     def _roll_forward_legacy_coordinators(self, states: list[RunState]) -> None:
@@ -1460,5 +1537,6 @@ class LauncherApp(tk.Tk):
             self._refresh_runs()
             self._refresh_asset_approval_dialogs()
             self._refresh_workload_approval_dialogs()
+            self._refresh_credential_audit_dialogs()
         finally:
             self.after(2000, self._tick)

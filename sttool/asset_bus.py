@@ -355,6 +355,7 @@ class AssetBus:
         approval_mode: str = "automatic",
         approval_seconds: int = 10,
         allow_cidr_expansion: bool = True,
+        processing_scope: str = "",
     ) -> None:
         self.path = path
         self.scope = scope
@@ -367,6 +368,7 @@ class AssetBus:
         )
         self.approval_seconds = max(3, min(3600, int(approval_seconds)))
         self.allow_cidr_expansion = bool(allow_cidr_expansion)
+        self.processing_scope = str(processing_scope or "").strip()
         self.value = read_json(path)
         if not self.value:
             self.value = {
@@ -379,6 +381,7 @@ class AssetBus:
                 "rejected": [],
                 "decision_history": [],
                 "blocked_assets": [],
+                "filtered_assets": [],
             }
         elif int(self.value.get("schema_version") or 0) == 2:
             # Version 2 only added optional records. Keep the wire version compatible
@@ -386,6 +389,7 @@ class AssetBus:
             self.value["schema_version"] = ASSET_BUS_SCHEMA_VERSION
             self.value.setdefault("blocked_assets", [])
             self.value.setdefault("decision_history", [])
+            self.value.setdefault("filtered_assets", [])
             atomic_json_write(self.path, self.value)
         self.last_ingest_stats = {"added": 0, "pending": 0, "rejected": 0}
         self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}
@@ -410,6 +414,7 @@ class AssetBus:
         approval_mode: str,
         approval_seconds: int,
         allow_cidr_expansion: bool,
+        processing_scope: str | None = None,
         reset_pending_deadlines: bool = True,
     ) -> bool:
         self._reload()
@@ -421,14 +426,22 @@ class AssetBus:
         )
         normalized_seconds = max(3, min(3600, int(approval_seconds)))
         normalized_cidr = bool(allow_cidr_expansion)
+        normalized_processing_scope = (
+            self.processing_scope
+            if processing_scope is None
+            else str(processing_scope or "").strip()
+        )
         changed = (
             self.approval_mode != normalized_mode
             or self.approval_seconds != normalized_seconds
             or self.allow_cidr_expansion != normalized_cidr
+            or self.processing_scope != normalized_processing_scope
         )
         self.approval_mode = normalized_mode
         self.approval_seconds = normalized_seconds
         self.allow_cidr_expansion = normalized_cidr
+        self.processing_scope = normalized_processing_scope
+        self._apply_processing_scope()
         if reset_pending_deadlines:
             deadline = (
                 datetime.now().astimezone()
@@ -449,10 +462,49 @@ class AssetBus:
             "countdown_seconds": self.approval_seconds,
             "allow_cidr_expansion": self.allow_cidr_expansion,
             "wildcard_scope_semantics": "target_auto_expansion_requires_policy",
+            "processing_scope": self.processing_scope,
         }
         self.value["updated_at"] = now_text()
         atomic_json_write(self.path, self.value)
         return changed
+
+    def _processing_allowed(self, value: str) -> bool:
+        if not self.processing_scope:
+            return True
+        normalized_target = {item for item, _kind in target_assets(self.target)}
+        normalized = normalize_asset(value)
+        if normalized is not None and normalized[0] in normalized_target:
+            return True
+        return asset_allowed(value, self.processing_scope, self.target)
+
+    def _apply_processing_scope(self) -> None:
+        if not self.processing_scope:
+            return
+        timestamp = now_text()
+        filtered = self._records(self.value, "filtered_assets")
+        filtered_keys = {
+            (str(item.get("type")), str(item.get("value"))) for item in filtered
+        }
+        for container in ("assets", "pending"):
+            retained: list[dict[str, object]] = []
+            for item in self._records(self.value, container):
+                value = str(item.get("value") or "")
+                if self._processing_allowed(value):
+                    retained.append(item)
+                    continue
+                key = (str(item.get("type") or ""), value)
+                if key not in filtered_keys:
+                    filtered.append(
+                        {
+                            **item,
+                            "filtered_at": timestamp,
+                            "scope_status": "outside_processing_scope",
+                            "reason": "outside_processing_scope",
+                        }
+                    )
+                    filtered_keys.add(key)
+            self.value[container] = retained
+        self.value["filtered_assets"] = filtered[-5000:]
 
     @staticmethod
     def _records(value: dict[str, object], key: str) -> list[dict[str, object]]:
@@ -577,6 +629,25 @@ class AssetBus:
                     rejected_by_key[rejected_key] = record
                     rejected += 1
                 continue
+            if source != "project_target" and not self._processing_allowed(value):
+                filtered = self._records(self.value, "filtered_assets")
+                if not any(
+                    (str(item.get("type")), str(item.get("value"))) == key
+                    for item in filtered
+                ):
+                    filtered.append(
+                        {
+                            "value": value,
+                            "type": kind,
+                            "source": source,
+                            "seen_at": timestamp,
+                            "scope_status": "outside_processing_scope",
+                            "reason": "outside_processing_scope",
+                        }
+                    )
+                    self.value["filtered_assets"] = filtered[-5000:]
+                    rejected += 1
+                continue
             existing = by_key.get(key)
             if existing is not None:
                 self._update_sources(existing, source, timestamp)
@@ -674,6 +745,7 @@ class AssetBus:
             "countdown_seconds": self.approval_seconds,
             "allow_cidr_expansion": self.allow_cidr_expansion,
             "wildcard_scope_semantics": "target_auto_expansion_requires_policy",
+            "processing_scope": self.processing_scope,
         }
         atomic_json_write(self.path, self.value)
         self.last_ingest_stats = {
@@ -690,6 +762,8 @@ class AssetBus:
         value, kind = normalized
         if self.scope.strip() != "*" and not asset_allowed(value, self.scope, self.target):
             raise ValueError("该资产不在当前明确授权范围内")
+        if not self._processing_allowed(value):
+            raise ValueError("该资产不在当前自动处理范围内")
         self._reload()
         records = self._records(self.value, "assets")
         key = (kind, value)

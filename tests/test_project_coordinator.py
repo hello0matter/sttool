@@ -10,7 +10,8 @@ from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from sttool.agent_launcher import write_agent_batch_script
-from sttool.asset_bus import AssetBus, parse_fscan_output
+from sttool.asset_bus import AssetBus, atomic_json_write, parse_fscan_output
+from sttool.credential_audit import candidate_path
 from sttool.incremental_nuclei import (
     build_incremental_nuclei_command,
     initial_incremental_nuclei_urls,
@@ -626,6 +627,55 @@ class ProjectCoordinatorTests(unittest.TestCase):
             self.assertIn("vulnerability_intel.json", prompt)
             self.assertIn("PoC \u94fe\u63a5\u53ea\u662f\u4e0d\u53ef\u4fe1\u5019\u9009", prompt)
             self.assertIn("\u7981\u6b62\u81ea\u52a8\u5199\u6587\u4ef6", prompt)
+
+    def test_agent_prompt_includes_only_approved_credential_task_and_limits(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            bus = AssetBus(
+                run_dir / "tool_data" / "asset_bus" / "assets.json",
+                "*",
+                "example.com",
+                approval_mode="automatic",
+            )
+            bus.ingest([("https://example.com/admin/login", "url")], "project_target")
+            atomic_json_write(
+                candidate_path(run_dir),
+                {
+                    "policy": {
+                        "max_attempts": 6,
+                        "requests_per_minute": 8,
+                        "concurrency": 1,
+                    },
+                    "candidates": [
+                        {
+                            "id": "approved",
+                            "url": "https://example.com/admin/login",
+                            "status": "approved_agent",
+                            "action": "agent_default_dictionary",
+                            "username_candidates": ["admin"],
+                            "wordlist_path": "D:/wordlists/site.txt",
+                            "successful_password": "must-not-leak",
+                        },
+                        {
+                            "id": "pending",
+                            "url": "https://other.example.com/login",
+                            "status": "pending",
+                            "action": "agent_default_dictionary",
+                        },
+                    ],
+                },
+            )
+
+            prompt = build_batch_prompt(run_dir, "base", bus, 0, 1)
+
+            self.assertIn("https://example.com/admin/login", prompt)
+            self.assertNotIn("https://other.example.com/login", prompt)
+            self.assertIn("browser-burp-pentest / burp Skill", prompt)
+            self.assertIn("每个账号最多尝试 6 次", prompt)
+            self.assertIn("每分钟 8 请求", prompt)
+            self.assertIn("并发不超过 1", prompt)
+            self.assertIn("成功口令不得写入", prompt)
+            self.assertNotIn("must-not-leak", prompt)
 
     def test_finished_batch_updates_state_and_batch_metadata(self) -> None:
         with TemporaryDirectory() as temporary:

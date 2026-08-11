@@ -29,6 +29,8 @@ class WorkflowSettingsTests(unittest.TestCase):
         self.assertEqual(settings["new_asset_countdown_seconds"], 10)
         self.assertTrue(settings["new_asset_popup_enabled"])
         self.assertTrue(settings["new_asset_popup_topmost"])
+        self.assertEqual(settings["asset_processing_scope"], "")
+        self.assertEqual(settings["credential_audit_default_action"], "save_only")
 
     def test_fast_preset_allows_early_incremental_agent(self) -> None:
         settings = work_mode_defaults("fast")
@@ -92,6 +94,32 @@ class WorkflowSettingsTests(unittest.TestCase):
     def test_invalid_reasoning_effort_uses_cli_default(self) -> None:
         self.assertEqual(normalized_reasoning_effort("HIGH"), "high")
         self.assertEqual(normalized_reasoning_effort("unsupported"), "")
+
+    def test_processing_scope_and_credential_limits_are_normalized(self) -> None:
+        settings = normalize_workflow_settings(
+            {
+                "work_mode": "balanced",
+                "asset_processing_scope": "example.com\n192.0.2.10",
+                "credential_audit_default_action": "agent_social_dictionary",
+                "credential_audit_countdown_seconds": 1,
+                "credential_audit_max_attempts": 0,
+                "credential_audit_requests_per_minute": 9999,
+                "credential_audit_concurrency": 99,
+            }
+        )
+
+        self.assertEqual(settings["work_mode"], "custom")
+        self.assertEqual(
+            settings["asset_processing_scope"], "example.com\n192.0.2.10"
+        )
+        self.assertEqual(
+            settings["credential_audit_default_action"],
+            "agent_social_dictionary",
+        )
+        self.assertEqual(settings["credential_audit_countdown_seconds"], 3)
+        self.assertEqual(settings["credential_audit_max_attempts"], 1)
+        self.assertEqual(settings["credential_audit_requests_per_minute"], 600)
+        self.assertEqual(settings["credential_audit_concurrency"], 20)
 
 
 if __name__ == "__main__":

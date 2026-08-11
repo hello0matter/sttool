@@ -441,6 +441,7 @@ class RuntimeTests(unittest.TestCase):
                     "work_mode": "custom",
                     "new_asset_countdown_seconds": 20,
                     "coordinator_poll_seconds": 7,
+                    "asset_processing_scope": "example.com",
                 },
                 api_base_url="https://summary.example/v1/",
                 model="summary-model",
@@ -455,6 +456,7 @@ class RuntimeTests(unittest.TestCase):
 
             self.assertEqual(states[0].new_asset_countdown_seconds, 20)
             self.assertEqual(states[0].coordinator_poll_seconds, 7)
+            self.assertEqual(states[0].asset_processing_scope, "example.com")
             self.assertEqual(states[0].api_base_url, "https://summary.example/v1")
             self.assertEqual(states[0].model, "summary-model")
             self.assertEqual(states[0].agent_model, "agent-model")
@@ -468,22 +470,26 @@ class RuntimeTests(unittest.TestCase):
                 )
             )
             self.assertEqual(hot["workflow"]["new_asset_countdown_seconds"], 20)
+            self.assertEqual(hot["workflow"]["asset_processing_scope"], "example.com")
             self.assertEqual(hot["agent"]["agent_model"], "agent-model")
             project = json.loads(
                 (project_dir / "project.json").read_text(encoding="utf-8")
             )
             self.assertEqual(project["coordinator_poll_seconds"], 7)
-            pending = json.loads(
+            asset_bus = json.loads(
                 (
                     run_dir
                     / "tool_data"
                     / "asset_bus"
                     / "assets.json"
                 ).read_text(encoding="utf-8")
-            )["pending"][0]
+            )
+            self.assertEqual(asset_bus["pending"], [])
             self.assertEqual(
-                pending["default_action"],
-                "accept",
+                asset_bus["filtered_assets"][0]["value"], "new.example.net"
+            )
+            self.assertEqual(
+                asset_bus["approval_policy"]["processing_scope"], "example.com"
             )
 
     def test_legacy_coordinator_rolls_forward_without_stopping_other_tools(self) -> None:

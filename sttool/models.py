@@ -87,6 +87,17 @@ class LaunchRequest:
     workload_agent_threshold: int = 50
     workload_popup_enabled: bool = True
     workload_popup_topmost: bool = True
+    asset_processing_scope: str = ""
+    credential_audit_enabled: bool = True
+    credential_audit_default_action: str = "save_only"
+    credential_audit_countdown_seconds: int = 20
+    credential_audit_popup_enabled: bool = True
+    credential_audit_popup_topmost: bool = True
+    credential_audit_wordlist_path: str = ""
+    credential_audit_max_attempts: int = 10
+    credential_audit_requests_per_minute: int = 10
+    credential_audit_concurrency: int = 1
+    credential_audit_stop_on_defense: bool = True
 
 
 @dataclass
@@ -174,6 +185,17 @@ class RunState:
     workload_agent_threshold: int = 50
     workload_popup_enabled: bool = True
     workload_popup_topmost: bool = True
+    asset_processing_scope: str = ""
+    credential_audit_enabled: bool = True
+    credential_audit_default_action: str = "save_only"
+    credential_audit_countdown_seconds: int = 20
+    credential_audit_popup_enabled: bool = True
+    credential_audit_popup_topmost: bool = True
+    credential_audit_wordlist_path: str = ""
+    credential_audit_max_attempts: int = 10
+    credential_audit_requests_per_minute: int = 10
+    credential_audit_concurrency: int = 1
+    credential_audit_stop_on_defense: bool = True
 
     def to_dict(self) -> dict[str, Any]:
         value = asdict(self)
