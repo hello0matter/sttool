@@ -6,6 +6,7 @@ import unittest
 from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 from sttool.agent_launcher import write_agent_batch_script
@@ -14,6 +15,7 @@ from sttool.models import ProcessRecord
 from sttool.runtime import now_text, process_creation_token
 from sttool.project_coordinator import (
     agent_launch_ready,
+    apply_hot_workflow_settings,
     agent_batch_health,
     codex_session_last_activity,
     codex_session_terminal_state,
@@ -43,6 +45,41 @@ from sttool.project_coordinator import (
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_hot_workflow_updates_live_coordinator_arguments(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(Path(temporary) / "assets.json", "*", "example.com")
+            args = SimpleNamespace(provider="codexx")
+
+            workflow = apply_hot_workflow_settings(
+                args,
+                bus,
+                {
+                    "workflow": {
+                        "work_mode": "custom",
+                        "new_asset_countdown_seconds": 20,
+                        "workload_countdown_seconds": 25,
+                        "coordinator_poll_seconds": 7,
+                        "max_agent_batches": 12,
+                    },
+                    "agent": {
+                        "provider": "codexx",
+                        "agent_model": "hot-model",
+                        "reasoning_effort": "high",
+                        "agent_base_url": "https://agent.example/v1",
+                    },
+                },
+            )
+
+            self.assertEqual(workflow["new_asset_countdown_seconds"], 20)
+            self.assertEqual(args.new_asset_countdown_seconds, 20)
+            self.assertEqual(args.workload_countdown_seconds, 25)
+            self.assertEqual(args.poll_seconds, 7)
+            self.assertEqual(args.max_agent_batches, 12)
+            self.assertEqual(args.agent_model, "hot-model")
+            self.assertEqual(args.reasoning_effort, "high")
+            self.assertEqual(args.agent_base_url, "https://agent.example/v1")
+            self.assertEqual(bus.approval_seconds, 20)
+
     def test_semantic_dirsearch_output_files_and_markers_are_stable(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)

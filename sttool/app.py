@@ -855,9 +855,25 @@ class LauncherApp(tk.Tk):
         self.notebook.select(self.runs_tab)
 
     def _load_runs(self) -> None:
-        self.run_states = {
-            self._state_key(state): state for state in self.manager.list_runs()
-        }
+        try:
+            states = self.manager.apply_workflow_settings(
+                self.workflow_settings,
+                api_base_url=self.api_base_url_var.get(),
+                model=self.default_model,
+                agent_profiles=self._global_agent_profiles(),
+            )
+        except OSError as exc:
+            states = self.manager.list_runs()
+            self.after(
+                0,
+                lambda error=str(exc): messagebox.showwarning(
+                    "全局设置同步未完成",
+                    f"启动时无法更新部分工程文件：{error}",
+                    parent=self,
+                ),
+            )
+        self._roll_forward_legacy_coordinators(states)
+        self.run_states = {self._state_key(state): state for state in states}
         self._refresh_runs()
 
     @staticmethod
@@ -1030,6 +1046,8 @@ class LauncherApp(tk.Tk):
                 recovered = self.manager.recover(
                     state,
                     authorization_confirmed=True,
+                    api_base_url=self.api_base_url_var.get(),
+                    model=self.default_model,
                     api_key=self.api_key,
                     agent_api_key=self._agent_settings_for_provider(state.provider)[3],
                     github_token=self.github_token,
@@ -1234,24 +1252,6 @@ class LauncherApp(tk.Tk):
         if provider not in {"codexx", "codex", "claude"}:
             provider = "codexx"
         self.provider_var.set(provider)
-        if value.get("api_base_url"):
-            self.api_base_url_var.set(str(value["api_base_url"]))
-        if value.get("model"):
-            self.default_model = str(value["model"])
-        if "agent_model" in value or "reasoning_effort" in value or "agent_base_url" in value:
-            model = str(value.get("agent_model") or "")
-            effort = normalized_reasoning_effort(value.get("reasoning_effort"))
-            base_url = str(value.get("agent_base_url") or "")
-            if provider == "claude":
-                self.claude_agent_model = model
-                self.claude_reasoning_effort = effort
-                self.claude_agent_base_url = base_url
-            else:
-                self.codex_agent_model = model
-                self.codex_reasoning_effort = effort
-                self.codex_agent_base_url = base_url
-        if "work_mode" in value:
-            self.workflow_settings = normalize_workflow_settings(value)
         selected = set(value.get("selected_tools", []))
         for tool_id, variable in self.tool_vars.items():
             variable.set(tool_id in selected)
@@ -1329,6 +1329,24 @@ class LauncherApp(tk.Tk):
         self.claude_agent_base_url = str(dialog.result["claude_agent_base_url"])
         self.workflow_settings = normalize_workflow_settings(dialog.result["workflow"])
         self._save_launcher_settings()
+        try:
+            updated = self._apply_global_workflow_settings()
+        except OSError as exc:
+            messagebox.showwarning(
+                "全局设置已保存",
+                f"全局设置已经保存，但无法热更新部分工程文件：{exc}",
+                parent=self,
+            )
+            return
+        messagebox.showinfo(
+            "全局设置已应用",
+            (
+                f"工作流设置已同步到 {updated} 个现有运行实例。\n\n"
+                "弹窗策略、倒计时和自动调度参数已热更新；"
+                "已经启动的外部扫描进程和 AI 会话不会被强制重启。"
+            ),
+            parent=self,
+        )
 
     def _open_help(self) -> None:
         path = ensure_help_document(self.manager.app_dir)
@@ -1357,6 +1375,74 @@ class LauncherApp(tk.Tk):
             temporary.replace(self.launcher_settings_path)
         except OSError:
             temporary.unlink(missing_ok=True)
+
+    def _close_approval_dialogs(self) -> None:
+        for dialogs in (
+            self._asset_approval_dialogs,
+            self._workload_approval_dialogs,
+        ):
+            for key, dialog in list(dialogs.items()):
+                dialogs.pop(key, None)
+                try:
+                    dialog.destroy()
+                except tk.TclError:
+                    pass
+        self._asset_approval_snooze_until.clear()
+        self._workload_approval_snooze_until.clear()
+
+    def _apply_global_workflow_settings(self) -> int:
+        states = self.manager.apply_workflow_settings(
+            self.workflow_settings,
+            api_base_url=self.api_base_url_var.get(),
+            model=self.default_model,
+            agent_profiles=self._global_agent_profiles(),
+        )
+        self._roll_forward_legacy_coordinators(states)
+        self.run_states = {self._state_key(state): state for state in states}
+        self._close_approval_dialogs()
+        self._refresh_runs()
+        self._refresh_asset_approval_dialogs()
+        self._refresh_workload_approval_dialogs()
+        return len(states)
+
+    def _roll_forward_legacy_coordinators(self, states: list[RunState]) -> None:
+        failures: list[str] = []
+        for state in states:
+            if state.status != "running":
+                continue
+            if not self.manager.coordinator_is_running(state):
+                continue
+            if self.manager.coordinator_supports_hot_settings(state):
+                continue
+            try:
+                self.manager.restart_coordinator_for_hot_settings(
+                    state,
+                    api_key=self.api_key,
+                    agent_api_key=self._agent_settings_for_provider(state.provider)[3],
+                    github_token=self.github_token,
+                )
+            except (LaunchError, OSError) as exc:
+                failures.append(f"{state.project_name}/{state.run_id}: {exc}")
+        if failures:
+            messagebox.showwarning(
+                "部分工程热更新待处理",
+                "以下运行实例的内部协调器未能滚动更新：\n" + "\n".join(failures),
+                parent=self,
+            )
+
+    def _global_agent_profiles(self) -> dict[str, dict[str, str]]:
+        return {
+            "codex": {
+                "agent_model": self.codex_agent_model,
+                "reasoning_effort": self.codex_reasoning_effort,
+                "agent_base_url": self.codex_agent_base_url,
+            },
+            "claude": {
+                "agent_model": self.claude_agent_model,
+                "reasoning_effort": self.claude_reasoning_effort,
+                "agent_base_url": self.claude_agent_base_url,
+            },
+        }
 
     def _tick(self) -> None:
         try:

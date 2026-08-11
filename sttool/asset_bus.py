@@ -395,6 +395,56 @@ class AssetBus:
         if latest:
             self.value = latest
 
+    def update_approval_policy(
+        self,
+        *,
+        approval_mode: str,
+        approval_seconds: int,
+        allow_cidr_expansion: bool,
+        reset_pending_deadlines: bool = True,
+    ) -> bool:
+        self._reload()
+        normalized_mode = (
+            approval_mode
+            if approval_mode
+            in {"automatic", "countdown_accept", "countdown_reject", "manual"}
+            else "countdown_accept"
+        )
+        normalized_seconds = max(3, min(3600, int(approval_seconds)))
+        normalized_cidr = bool(allow_cidr_expansion)
+        changed = (
+            self.approval_mode != normalized_mode
+            or self.approval_seconds != normalized_seconds
+            or self.allow_cidr_expansion != normalized_cidr
+        )
+        self.approval_mode = normalized_mode
+        self.approval_seconds = normalized_seconds
+        self.allow_cidr_expansion = normalized_cidr
+        if reset_pending_deadlines:
+            deadline = (
+                datetime.now().astimezone()
+                + timedelta(seconds=self.approval_seconds)
+            ).isoformat(timespec="seconds")
+            for item in self._records(self.value, "pending"):
+                item["default_action"] = (
+                    "reject" if self.approval_mode == "countdown_reject" else "accept"
+                )
+                if self.approval_mode == "manual":
+                    item.pop("decision_deadline_at", None)
+                elif self.approval_mode == "automatic":
+                    item["decision_deadline_at"] = now_text()
+                else:
+                    item["decision_deadline_at"] = deadline
+        self.value["approval_policy"] = {
+            "mode": self.approval_mode,
+            "countdown_seconds": self.approval_seconds,
+            "allow_cidr_expansion": self.allow_cidr_expansion,
+            "wildcard_scope_semantics": "target_auto_expansion_requires_policy",
+        }
+        self.value["updated_at"] = now_text()
+        atomic_json_write(self.path, self.value)
+        return changed
+
     @staticmethod
     def _records(value: dict[str, object], key: str) -> list[dict[str, object]]:
         records = value.get(key)

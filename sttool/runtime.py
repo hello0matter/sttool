@@ -35,6 +35,7 @@ from .models import (
     ToolDefinition,
     normalize_provider,
 )
+from .global_settings_sync import apply_global_settings_to_runs
 from .registry import DEFAULT_ST_ROOT, availability
 from .workflow_settings import normalize_workflow_settings, normalized_reasoning_effort
 
@@ -1845,6 +1846,85 @@ class RuntimeManager:
                     time.sleep(0.5 * (attempt + 1))
         assert last_error is not None
         raise last_error
+
+    def apply_workflow_settings(
+        self,
+        settings: dict[str, object],
+        *,
+        api_base_url: str = "",
+        model: str = "",
+        agent_profiles: dict[str, dict[str, str]] | None = None,
+    ) -> list[RunState]:
+        return apply_global_settings_to_runs(
+            self.projects_dir,
+            self.list_runs(),
+            settings,
+            api_base_url=api_base_url,
+            model=model,
+            agent_profiles=agent_profiles,
+        )
+
+    @staticmethod
+    def coordinator_supports_hot_settings(state: RunState) -> bool:
+        coordinator = read_json_file(
+            Path(state.run_dir) / "tool_data" / "coordinator" / "state.json"
+        )
+        try:
+            return int(coordinator.get("hot_settings_protocol") or 0) >= 1
+        except (TypeError, ValueError):
+            return False
+
+    @staticmethod
+    def coordinator_is_running(state: RunState) -> bool:
+        run_dir = Path(state.run_dir)
+        return any(
+            process.component_id == "project_coordinator"
+            and process_record_alive(process, run_dir)
+            for process in state.processes
+        )
+
+    def restart_coordinator_for_hot_settings(
+        self,
+        state: RunState,
+        *,
+        api_key: str = "",
+        agent_api_key: str = "",
+        github_token: str = "",
+    ) -> RunState:
+        with self._launch_lock():
+            request, _skipped = self._request_for_state(
+                state,
+                True,
+                api_key,
+                agent_api_key,
+                github_token,
+            )
+            run_dir = Path(state.run_dir).resolve()
+            retained: list[ProcessRecord] = []
+            for process in state.processes:
+                if process.component_id != "project_coordinator":
+                    retained.append(process)
+                    continue
+                if process_record_alive(process, run_dir):
+                    append_activity(
+                        run_dir,
+                        f"正在滚动更新项目协调器，PID {process.pid}；其他工具保持运行。",
+                    )
+                    terminate_process_tree(process.pid)
+                elif pid_alive(process.pid):
+                    raise LaunchError(
+                        f"协调器 PID {process.pid} 已被其他进程占用，拒绝终止"
+                    )
+            coordinator = self._launch_coordinator(request, run_dir)
+            state.processes = [*retained, coordinator]
+            state.status = "running"
+            state.updated_at = now_text()
+            atomic_json_write(run_dir / "run.json", state.to_dict())
+            append_activity(
+                run_dir,
+                f"项目协调器滚动更新完成，PID {coordinator.pid}；全局设置热更新已启用。",
+            )
+            return state
 
     def list_runs(self) -> list[RunState]:
         states: list[RunState] = []

@@ -80,6 +80,34 @@ def read_request(run_dir: Path) -> dict[str, Any]:
     return read_json(request_path(run_dir))
 
 
+def update_pending_request_policy(
+    run_dir: Path,
+    *,
+    mode: str,
+    countdown_seconds: int,
+) -> bool:
+    value = read_request(run_dir)
+    if not value or value.get("status") not in {"pending", ""}:
+        return False
+    normalized_mode = mode if mode in APPROVAL_MODES else "countdown_accept"
+    value["default_action"] = (
+        "reject" if normalized_mode == "countdown_reject" else "accept"
+    )
+    if normalized_mode == "manual":
+        value["decision_deadline_at"] = ""
+    elif normalized_mode == "automatic":
+        value["decision_deadline_at"] = datetime.now().astimezone().isoformat(
+            timespec="seconds"
+        )
+    else:
+        value["decision_deadline_at"] = _deadline(countdown_seconds)
+    value["policy_updated_at"] = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    atomic_json_write(request_path(run_dir), value)
+    return True
+
+
 def decide_request(run_dir: Path, action: str, decided_by: str = "user") -> dict[str, Any]:
     value = read_request(run_dir)
     if not value or value.get("status") not in {"pending", ""}:
@@ -118,6 +146,7 @@ __all__ = [
     "read_request",
     "request_path",
     "resolve_due_request",
+    "update_pending_request_policy",
     "workload_counts",
     "workload_total",
 ]

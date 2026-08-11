@@ -49,6 +49,7 @@ from .runtime import (
     process_record_alive,
     terminate_agent_process_tree,
 )
+from .workflow_settings import normalize_workflow_settings
 
 
 def file_marker(path: Path) -> tuple[int, int] | None:
@@ -1084,6 +1085,51 @@ def parse_bool(value: str) -> bool:
     raise argparse.ArgumentTypeError("expected true or false")
 
 
+_HOT_WORKFLOW_ARGUMENTS = {
+    "auto_agent": "auto_agent",
+    "wait_for_asset_commander": "wait_asset_commander",
+    "wait_for_fscan": "wait_fscan",
+    "asset_settle_seconds": "settle_seconds",
+    "max_agent_batches": "max_agent_batches",
+    "coordinator_poll_seconds": "poll_seconds",
+    "agent_stall_warn_minutes": "agent_stall_warn_minutes",
+    "ai_summary_enabled": "ai_summary",
+    "fscan_port_threads": "fscan_port_threads",
+    "allow_cidr_expansion": "allow_cidr_expansion",
+    "new_asset_approval_mode": "new_asset_approval_mode",
+    "new_asset_countdown_seconds": "new_asset_countdown_seconds",
+    "workload_approval_mode": "workload_approval_mode",
+    "workload_countdown_seconds": "workload_countdown_seconds",
+    "workload_agent_threshold": "workload_agent_threshold",
+    "workload_popup_enabled": "workload_popup_enabled",
+    "workload_popup_topmost": "workload_popup_topmost",
+}
+
+
+def apply_hot_workflow_settings(
+    args: argparse.Namespace,
+    bus: AssetBus,
+    value: dict[str, object],
+) -> dict[str, object]:
+    workflow = normalize_workflow_settings(value.get("workflow"))
+    for field, argument in _HOT_WORKFLOW_ARGUMENTS.items():
+        setattr(args, argument, workflow[field])
+    bus.update_approval_policy(
+        approval_mode=str(workflow["new_asset_approval_mode"]),
+        approval_seconds=int(workflow["new_asset_countdown_seconds"]),
+        allow_cidr_expansion=bool(workflow["allow_cidr_expansion"]),
+        reset_pending_deadlines=False,
+    )
+    agent = value.get("agent")
+    if isinstance(agent, dict) and str(agent.get("provider") or "") == str(
+        getattr(args, "provider", "")
+    ):
+        args.agent_model = str(agent.get("agent_model") or "")
+        args.reasoning_effort = str(agent.get("reasoning_effort") or "")
+        args.agent_base_url = str(agent.get("agent_base_url") or "")
+    return workflow
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="STTool project asset queue and delayed AI scheduler"
@@ -1150,6 +1196,7 @@ def main() -> int:
     fscan_path = run_dir / "results" / "fscan.txt"
     semantic_state = run_dir / "tool_data" / "semantic" / "sttool_bridge_state.json"
     tscan_database = run_dir / "tool_data" / "tscan" / "app" / "config" / "config.db"
+    hot_settings_path = run_dir / "tool_data" / "coordinator" / "hot_settings.json"
     owner_path = state_path.parent / "owner.json"
     owner = claim_coordinator_owner(owner_path, run_dir)
     if owner is None:
@@ -1198,6 +1245,7 @@ def main() -> int:
     state.update(
         status="running",
         stage="collecting_assets",
+        hot_settings_protocol=1,
         workflow={
             "auto_agent": args.auto_agent,
             "wait_for_asset_commander": args.wait_asset_commander,
@@ -1250,8 +1298,28 @@ def main() -> int:
     last_new = time.monotonic()
     if bus.generation:
         last_new = time.monotonic()
+    hot_settings_marker: tuple[int, int] | None = None
     while True:
         changed = False
+        current_hot_marker = file_marker(hot_settings_path)
+        if current_hot_marker != hot_settings_marker:
+            hot_settings = read_json(hot_settings_path)
+            if hot_settings:
+                workflow = apply_hot_workflow_settings(args, bus, hot_settings)
+                state["workflow"] = {
+                    **workflow,
+                    "agent_model": args.agent_model,
+                    "reasoning_effort": args.reasoning_effort,
+                    "vulnx": str(args.vulnx or ""),
+                    "find_gh_poc": str(args.find_gh_poc or ""),
+                    "incremental_fscan": bool(args.fscan_exe),
+                }
+                state["hot_settings_applied_at"] = now_text()
+                append_activity(
+                    run_dir,
+                    "自动调度器已应用全局工作流热更新；现有外部进程保持运行。",
+                )
+            hot_settings_marker = current_hot_marker
         tools = selected_tools(run_dir)
         decision_value = read_json(decisions_path)
         decision_rows = decision_value.get("decisions")

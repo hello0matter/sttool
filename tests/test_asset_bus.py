@@ -4,6 +4,7 @@ import json
 import os
 import sqlite3
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -21,6 +22,36 @@ from sttool.asset_bus import (
 
 
 class AssetBusTests(unittest.TestCase):
+    def test_hot_policy_update_resets_existing_pending_countdown(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(
+                path,
+                "*",
+                "example.com",
+                approval_mode="countdown_accept",
+                approval_seconds=5,
+            )
+            bus.ingest([("example.com", "domain")], "project_target")
+            bus.ingest([("new.example.net", "domain")], "asset_commander")
+
+            bus.update_approval_policy(
+                approval_mode="countdown_reject",
+                approval_seconds=20,
+                allow_cidr_expansion=False,
+            )
+
+            pending = read_json(path)["pending"][0]
+            remaining = (
+                datetime.fromisoformat(pending["decision_deadline_at"])
+                - datetime.now().astimezone()
+            ).total_seconds()
+            self.assertGreaterEqual(remaining, 18)
+            self.assertLessEqual(remaining, 20)
+            self.assertEqual(pending["default_action"], "reject")
+            self.assertEqual(bus.approval_seconds, 20)
+            self.assertFalse(bus.allow_cidr_expansion)
+
     def test_dirsearch_parser_suppresses_repeated_soft_200_wall(self) -> None:
         repeated = "\n".join(
             f"200    32KB  https://app.example.test/fake-{index}"

@@ -41,6 +41,8 @@ Agent 初始提示词采用证据驱动顺序：先读取项目状态，使用 M
 
 右上角的 **全局设置** 分成五块：**Codex / Codexx**、**Claude Agent**、**工具协作 AI**、**漏洞情报** 和 **调度方式**。Codex/Codexx 与 Claude 分别维护模型、推理强度和可选 Base URL，二者互不覆盖；Base URL 留空时继续使用对应 CLI 自身配置。项目脚本不会保存 Agent API Key，凭据仍由各 CLI 的登录或本机环境负责。仅在显式填写时，Codex/Codexx 使用 `OPENAI_BASE_URL`，Claude 使用 `ANTHROPIC_BASE_URL`。
 
+保存全局设置后，工作流与调度配置会同步到全部现有工程，并通过每个实例的 `tool_data/coordinator/hot_settings.json` 热更新仍在运行的协调器。新增资产和大批量 Agent 弹窗的处理方式、倒计时、弹窗开关，以及资产稳定等待、轮询、批次数、自动 Agent、停滞提醒、摘要开关、增量 fscan 线程和 C 段扩展策略会立即用于后续调度；尚未决策弹窗的截止时间会按新值重新计算。升级前已经运行的旧协调器会进行一次内部滚动更新，其他扫描工具和当前 Agent 保持运行。已经启动的外部扫描进程或 AI 会话不会被强制重启，其固定启动参数在后续增量任务、新实例或恢复时生效。选择历史项目不会反向覆盖全局设置。
+
 工具协作 AI 用于工具间信息汇总、传递、去重和结果优化，可维护 OpenAI 兼容 Base URL、默认模型和 API Key。Base URL 默认是 `https://api.1314mc.net/v1`，普通设置保存在本机 `launcher_settings.json`；工具协作 API Key 和 GitHub Token 使用当前 Windows 账户的 DPAPI 加密后统一保存在 `launcher_secrets.dat`，不会写入项目配置、运行状态、启动脚本或日志。内置 AssetCommander 和 AI 路径发现默认使用工具协作 AI；自定义工具只有显式勾选“使用工具协作 AI”才会收到配置。
 
 ## 工具位置与自定义工具
@@ -118,7 +120,7 @@ STTool 不读取或覆盖 Codexx、Codex、Claude CLI 的登录凭据；仅在�
 
 ## 增量资产总线与 Agent 批次
 
-新增主机确认弹窗不会暂停现有扫描和报告整理；待确认资产不会进入 fscan、Tscan、dirsearch 或 Agent。即使主界面关闭，协调器仍会在倒计时结束后按项目保存的默认动作处理，避免流程永久卡住。
+新增主机确认弹窗不会暂停现有扫描和报告整理；待确认资产不会进入 fscan、Tscan、dirsearch 或 Agent。即使主界面关闭，协调器仍会在倒计时结束后按当前全局热配置的默认动作处理，避免流程永久卡住。
 
 - `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
 - AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。

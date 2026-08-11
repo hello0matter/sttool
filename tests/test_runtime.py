@@ -13,6 +13,7 @@ from sttool.agent_runtime import (
     agent_terminal_window_name,
     is_agent_shell_process_info,
 )
+from sttool.asset_bus import AssetBus
 from sttool.models import LaunchRequest, ProcessRecord, RunState, ToolDefinition
 from sttool.registry import availability, default_tools
 from sttool.runtime import (
@@ -399,6 +400,153 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(project_dir.exists())
             self.assertTrue(other_dir.is_dir())
             self.assertEqual(manager.list_projects(), ["other"])
+
+    def test_workflow_settings_are_applied_to_existing_runs_and_projects(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = RuntimeManager(root, [], st_root=root)
+            project_dir = manager.projects_dir / "demo"
+            run_dir = project_dir / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            state = RunState(
+                run_id="run-1",
+                project_name="demo",
+                target="example.com",
+                scope="*",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[],
+                new_asset_countdown_seconds=5,
+            )
+            atomic_json_write(run_dir / "run.json", state.to_dict())
+            atomic_json_write(run_dir / "project.json", {"name": "demo"})
+            atomic_json_write(project_dir / "project.json", {"name": "demo"})
+            bus = AssetBus(
+                run_dir / "tool_data" / "asset_bus" / "assets.json",
+                "*",
+                "example.com",
+                approval_mode="countdown_accept",
+                approval_seconds=5,
+            )
+            bus.ingest([("example.com", "domain")], "project_target")
+            bus.ingest([("new.example.net", "domain")], "asset_commander")
+
+            states = manager.apply_workflow_settings(
+                {
+                    "work_mode": "custom",
+                    "new_asset_countdown_seconds": 20,
+                    "coordinator_poll_seconds": 7,
+                },
+                api_base_url="https://summary.example/v1/",
+                model="summary-model",
+                agent_profiles={
+                    "codex": {
+                        "agent_model": "agent-model",
+                        "reasoning_effort": "high",
+                        "agent_base_url": "https://agent.example/v1/",
+                    }
+                },
+            )
+
+            self.assertEqual(states[0].new_asset_countdown_seconds, 20)
+            self.assertEqual(states[0].coordinator_poll_seconds, 7)
+            self.assertEqual(states[0].api_base_url, "https://summary.example/v1")
+            self.assertEqual(states[0].model, "summary-model")
+            self.assertEqual(states[0].agent_model, "agent-model")
+            self.assertEqual(states[0].reasoning_effort, "high")
+            self.assertEqual(states[0].agent_base_url, "https://agent.example/v1")
+            persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["new_asset_countdown_seconds"], 20)
+            hot = json.loads(
+                (run_dir / "tool_data" / "coordinator" / "hot_settings.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertEqual(hot["workflow"]["new_asset_countdown_seconds"], 20)
+            self.assertEqual(hot["agent"]["agent_model"], "agent-model")
+            project = json.loads(
+                (project_dir / "project.json").read_text(encoding="utf-8")
+            )
+            self.assertEqual(project["coordinator_poll_seconds"], 7)
+            pending = json.loads(
+                (
+                    run_dir
+                    / "tool_data"
+                    / "asset_bus"
+                    / "assets.json"
+                ).read_text(encoding="utf-8")
+            )["pending"][0]
+            self.assertEqual(
+                pending["default_action"],
+                "accept",
+            )
+
+    def test_legacy_coordinator_rolls_forward_without_stopping_other_tools(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = OfflineRuntimeManager(root, [], st_root=root)
+            run_dir = manager.projects_dir / "demo" / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            other = manager._spawn(
+                "persistent",
+                "Persistent",
+                sys.executable,
+                [],
+                str(run_dir),
+                False,
+            )
+            old_coordinator = manager._spawn(
+                "project_coordinator",
+                "Coordinator",
+                sys.executable,
+                [],
+                str(run_dir),
+                False,
+            )
+            state = RunState(
+                run_id="run-1",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[other, old_coordinator],
+            )
+            atomic_json_write(run_dir / "run.json", state.to_dict())
+            atomic_json_write(run_dir / "project.json", {"name": "demo"})
+
+            try:
+                rolled = manager.restart_coordinator_for_hot_settings(state)
+
+                replacement = next(
+                    item
+                    for item in rolled.processes
+                    if item.component_id == "project_coordinator"
+                )
+                self.assertNotEqual(replacement.pid, old_coordinator.pid)
+                self.assertFalse(pid_alive(old_coordinator.pid))
+                self.assertTrue(process_record_alive(other, run_dir))
+                self.assertTrue(process_record_alive(replacement, run_dir))
+                self.assertEqual(
+                    [
+                        item.component_id
+                        for item in rolled.processes
+                        if item.component_id == "persistent"
+                    ],
+                    ["persistent"],
+                )
+            finally:
+                manager.cleanup()
 
     def test_legacy_codex_provider_migrates_to_codexx(self) -> None:
         base = {

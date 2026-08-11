@@ -3,6 +3,7 @@
 import json
 import time
 import unittest
+from datetime import datetime
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
@@ -12,6 +13,7 @@ from sttool.workload_approval import (
     decide_request,
     read_request,
     resolve_due_request,
+    update_pending_request_policy,
     workload_counts,
     workload_total,
 )
@@ -52,6 +54,36 @@ class WorkloadApprovalTests(unittest.TestCase):
             self.assertEqual(request["status"], "pending")
             self.assertEqual(request["decision_deadline_at"], "")
             self.assertEqual(request["default_action"], "accept")
+
+    def test_hot_policy_update_resets_pending_request_countdown(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = self._run_dir(temporary)
+            create_request(
+                run_dir,
+                project_name="demo",
+                run_id="run-1",
+                generation_from=1,
+                generation_to=2,
+                counts={"ips": 100, "domains": 0, "endpoints": 0, "urls": 0},
+                mode="countdown_accept",
+                countdown_seconds=5,
+            )
+
+            changed = update_pending_request_policy(
+                run_dir,
+                mode="countdown_reject",
+                countdown_seconds=20,
+            )
+
+            request = read_request(run_dir)
+            remaining = (
+                datetime.fromisoformat(request["decision_deadline_at"])
+                - datetime.now().astimezone()
+            ).total_seconds()
+            self.assertTrue(changed)
+            self.assertGreaterEqual(remaining, 18)
+            self.assertLessEqual(remaining, 20)
+            self.assertEqual(request["default_action"], "reject")
 
     def test_decide_request_accept_and_reject(self) -> None:
         with TemporaryDirectory() as temporary:
