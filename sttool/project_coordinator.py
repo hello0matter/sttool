@@ -57,6 +57,27 @@ from .runtime import (
 from .workflow_settings import normalize_workflow_settings
 
 
+MAX_CONSECUTIVE_AGENT_FAILURES = 3
+
+
+def successful_agent_batch_count(batches: list[object]) -> int:
+    return sum(
+        1
+        for item in batches
+        if isinstance(item, dict) and str(item.get("status") or "") == "completed"
+    )
+
+
+def agent_retry_status(state: dict[str, object]) -> tuple[int, int, bool]:
+    failure_count = int(state.get("agent_failure_count") or 0)
+    retry_not_before = float(state.get("agent_retry_not_before") or 0)
+    retry_seconds = max(int(retry_not_before - time.time()), 0)
+    retry_ready = (
+        retry_seconds <= 0 and failure_count < MAX_CONSECUTIVE_AGENT_FAILURES
+    )
+    return failure_count, retry_seconds, retry_ready
+
+
 def file_marker(path: Path) -> tuple[int, int] | None:
     try:
         stat = path.stat()
@@ -1916,9 +1937,7 @@ def main() -> int:
         fscan_ready = initial_fscan_gate_ready and incremental_fscan_ready
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
         consumed = int(state.get("agent_consumed_generation") or 0)
-        retry_not_before = float(state.get("agent_retry_not_before") or 0)
-        retry_seconds = max(int(retry_not_before - time.time()), 0)
-        retry_ready = retry_seconds <= 0
+        failure_count, retry_seconds, retry_ready = agent_retry_status(state)
         should_launch = agent_launch_ready(
             active_pid=active_pid,
             generation=bus.generation,
@@ -1926,7 +1945,7 @@ def main() -> int:
             asset_ready=asset_ready,
             fscan_ready=fscan_ready,
             quiet=quiet,
-            batch_count=len(batches),
+            batch_count=successful_agent_batch_count(batches),
             max_batches=args.max_agent_batches,
             auto_agent=args.auto_agent,
             retry_ready=retry_ready,
@@ -2071,7 +2090,6 @@ def main() -> int:
                     f"AI 执行记录 {batch_number} 启动失败：{exc}；{delay} 秒后重试。",
                 )
             else:
-                clear_agent_retry(state)
                 batch = {
                     "batch": batch_number,
                     "generation_from": consumed + 1,
@@ -2100,9 +2118,8 @@ def main() -> int:
                     f"资产已稳定，启动第 {batch_number} 次 AI 执行，处理资产更新第 {consumed + 1}-{bus.generation} 轮。",
                 )
 
-        retry_not_before = float(state.get("agent_retry_not_before") or 0)
-        retry_seconds = max(int(retry_not_before - time.time()), 0)
-        retry_ready = retry_seconds <= 0
+        failure_count, retry_seconds, retry_ready = agent_retry_status(state)
+        retry_exhausted = failure_count >= MAX_CONSECUTIVE_AGENT_FAILURES
         stage, stage_detail = coordinator_wait_stage(
             active_pid=int(state.get("active_agent_pid") or 0),
             generation=bus.generation,
@@ -2110,13 +2127,19 @@ def main() -> int:
             asset_ready=asset_ready,
             fscan_ready=fscan_ready,
             quiet=quiet,
-            batch_count=len(batches),
+            batch_count=successful_agent_batch_count(batches),
             max_batches=args.max_agent_batches,
             auto_agent=args.auto_agent,
             retry_ready=retry_ready,
             retry_seconds=retry_seconds,
         )
-        if workload_gate_status == "pending":
+        if retry_exhausted:
+            stage = "agent_provider_failed"
+            stage_detail = (
+                f"AI 线路连续失败 {failure_count} 次，已暂停自动重试；"
+                "请检查执行器模型与线路，修改设置或恢复项目后再试。"
+            )
+        elif workload_gate_status == "pending":
             stage = "awaiting_workload_approval"
             stage_detail = "等待用户确认是否启动下一批 AI 执行；后台资产发现与工具任务继续运行。"
         state.update(

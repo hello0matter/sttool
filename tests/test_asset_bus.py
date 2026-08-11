@@ -22,6 +22,33 @@ from sttool.asset_bus import (
 
 
 class AssetBusTests(unittest.TestCase):
+    def test_schema_two_bus_is_migrated_without_losing_asset_decisions(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            path.write_text(
+                json.dumps(
+                    {
+                        "schema_version": 2,
+                        "generation": 7,
+                        "assets": [],
+                        "pending": [],
+                        "decision_history": [{"action": "accepted"}],
+                        "blocked_assets": [{"value": "blocked.example"}],
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            AssetBus(path, "*")
+
+            migrated = read_json(path)
+            self.assertEqual(migrated["schema_version"], 1)
+            self.assertEqual(migrated["generation"], 7)
+            self.assertEqual(migrated["decision_history"], [{"action": "accepted"}])
+            self.assertEqual(
+                migrated["blocked_assets"], [{"value": "blocked.example"}]
+            )
+
     def test_asset_manager_excludes_reingest_and_can_restore_asset(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "assets.json"

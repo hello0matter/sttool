@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import threading
 import tkinter as tk
 from tkinter import messagebox, ttk
 from urllib.parse import urlsplit
 
+from .agent_connection_test import test_agent_connection
 from .models import DEFAULT_API_BASE_URL
 from .workflow_settings import (
     WORK_MODE_LABELS,
@@ -310,6 +312,87 @@ class AISettingsDialog(tk.Toplevel):
             variable=show_key_var,
             command=lambda: key_entry.configure(show="" if show_key_var.get() else "*"),
         ).grid(row=0, column=1, padx=(8, 0))
+        test_row = ttk.Frame(tab)
+        test_row.grid(row=9, column=0, sticky="ew", pady=(16, 0))
+        test_status_var = tk.StringVar(value="尚未测试")
+        if is_claude:
+            providers = (("claude", "测试 Claude"),)
+        else:
+            providers = (("codex", "测试 Codex"), ("codexx", "测试 Codexx"))
+        for cli_provider, label in providers:
+            button = ttk.Button(test_row, text=label)
+            button.configure(
+                command=lambda selected=cli_provider, control=button: self._test_agent(
+                    selected,
+                    model_var,
+                    effort_var,
+                    base_url_var,
+                    key_var,
+                    test_status_var,
+                    control,
+                )
+            )
+            button.pack(side="left", padx=(0, 8))
+        ttk.Label(test_row, textvariable=test_status_var).pack(side="left", padx=(6, 0))
+
+    def _test_agent(
+        self,
+        provider: str,
+        model_var: tk.StringVar,
+        effort_var: tk.StringVar,
+        base_url_var: tk.StringVar,
+        key_var: tk.StringVar,
+        status_var: tk.StringVar,
+        button: ttk.Button,
+    ) -> None:
+        base_url = base_url_var.get().strip().rstrip("/")
+        if not self._valid_optional_url(base_url):
+            messagebox.showerror(
+                "测试 AI 执行器",
+                "Base URL 必须留空或填写有效的 HTTP/HTTPS 地址",
+                parent=self,
+            )
+            return
+        effort = effort_var.get()
+        if effort == "CLI 默认":
+            effort = ""
+        model = model_var.get().strip()
+        api_key = key_var.get().strip()
+        button.configure(state="disabled")
+        status_var.set("正在执行最小实际请求……")
+
+        def worker() -> None:
+            result = test_agent_connection(
+                provider,
+                model,
+                effort,
+                base_url,
+                api_key,
+            )
+            try:
+                self.after(
+                    0,
+                    lambda: self._finish_agent_test(
+                        provider, result, status_var, button
+                    ),
+                )
+            except tk.TclError:
+                return
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _finish_agent_test(
+        self,
+        provider: str,
+        result: tuple[bool, str],
+        status_var: tk.StringVar,
+        button: ttk.Button,
+    ) -> None:
+        success, detail = result
+        button.configure(state="normal")
+        status_var.set("测试成功" if success else "测试失败")
+        dialog = messagebox.showinfo if success else messagebox.showerror
+        dialog(f"{provider} 实际请求测试", detail, parent=self)
 
     def _build_shared_ai_tab(self, notebook: ttk.Notebook) -> None:
         tab = self._add_scrollable_tab(notebook, "工具协作 AI")

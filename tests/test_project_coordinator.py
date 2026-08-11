@@ -19,6 +19,7 @@ from sttool.incremental_nuclei import (
 from sttool.models import ProcessRecord
 from sttool.runtime import now_text, process_creation_token
 from sttool.project_coordinator import (
+    agent_retry_status,
     agent_launch_ready,
     apply_hot_workflow_settings,
     agent_batch_health,
@@ -39,6 +40,7 @@ from sttool.project_coordinator import (
     semantic_dirsearch_marker,
     semantic_dirsearch_output_active,
     semantic_dirsearch_output_files,
+    successful_agent_batch_count,
     render_risk_summary,
     remember_agent_process_tree,
     recover_completed_batch_orphans,
@@ -50,6 +52,35 @@ from sttool.project_coordinator import (
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_failed_agent_records_do_not_consume_success_limit(self) -> None:
+        batches: list[object] = [
+            *({"status": "completed"} for _ in range(3)),
+            *({"status": "failed"} for _ in range(5)),
+        ]
+
+        completed = successful_agent_batch_count(batches)
+
+        self.assertEqual(completed, 3)
+        self.assertTrue(
+            agent_launch_ready(
+                active_pid=0,
+                generation=64,
+                consumed_generation=63,
+                asset_ready=True,
+                fscan_ready=True,
+                quiet=True,
+                batch_count=completed,
+                max_batches=8,
+            )
+        )
+
+    def test_three_consecutive_agent_failures_pause_retry(self) -> None:
+        failure_count, retry_seconds, retry_ready = agent_retry_status(
+            {"agent_failure_count": 3, "agent_retry_not_before": 0}
+        )
+
+        self.assertEqual((failure_count, retry_seconds, retry_ready), (3, 0, False))
+
     def test_hot_workflow_updates_live_coordinator_arguments(self) -> None:
         with TemporaryDirectory() as temporary:
             bus = AssetBus(Path(temporary) / "assets.json", "*", "example.com")

@@ -45,6 +45,27 @@ _ASSET_DECISION_SOURCES = {
 }
 
 
+def asset_row_matches(item: dict[str, object], query: str) -> bool:
+    needle = query.strip().casefold()
+    if not needle:
+        return True
+    values = [
+        _ASSET_STATUS.get(str(item.get("status") or ""), ""),
+        item.get("type", ""),
+        item.get("value", ""),
+        item.get("source", ""),
+        item.get("reason", ""),
+        item.get("scope_status", ""),
+    ]
+    sources = item.get("sources")
+    if isinstance(sources, list):
+        values.extend(sources)
+    decision = item.get("latest_decision")
+    if isinstance(decision, dict):
+        values.extend(decision.values())
+    return needle in " ".join(str(value) for value in values).casefold()
+
+
 class ProjectAccessDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, state: RunState) -> None:
         super().__init__(parent)
@@ -52,6 +73,8 @@ class ProjectAccessDialog(tk.Toplevel):
         self.run_dir = Path(state.run_dir)
         self.asset_path = self.run_dir / "tool_data" / "asset_bus" / "assets.json"
         self.asset_rows: dict[str, dict[str, object]] = {}
+        self.all_asset_rows: list[dict[str, object]] = []
+        self.asset_search_var = tk.StringVar()
         self.task_rows: dict[str, dict[str, object]] = {}
         self.title(f"准入与任务管理 - {state.project_name} / {state.run_id}")
         width = min(1180, self.winfo_screenwidth() - 100)
@@ -71,7 +94,7 @@ class ProjectAccessDialog(tk.Toplevel):
 
     def _build_asset_tab(self) -> None:
         self.asset_tab.columnconfigure(0, weight=1)
-        self.asset_tab.rowconfigure(1, weight=1)
+        self.asset_tab.rowconfigure(2, weight=1)
         actions = ttk.Frame(self.asset_tab)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(actions, text="刷新", command=self._refresh_assets).pack(side="left")
@@ -88,9 +111,24 @@ class ProjectAccessDialog(tk.Toplevel):
             side="left", padx=(8, 0)
         )
 
+        search = ttk.Frame(self.asset_tab)
+        search.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        search.columnconfigure(1, weight=1)
+        ttk.Label(search, text="搜索").grid(row=0, column=0, padx=(0, 8))
+        ttk.Entry(search, textvariable=self.asset_search_var).grid(
+            row=0, column=1, sticky="ew"
+        )
+        ttk.Button(search, text="选择当前结果", command=self._select_visible_assets).grid(
+            row=0, column=2, padx=(8, 0)
+        )
+        ttk.Button(search, text="清空", command=lambda: self.asset_search_var.set("")).grid(
+            row=0, column=3, padx=(8, 0)
+        )
+        self.asset_search_var.trace_add("write", lambda *_args: self._render_asset_rows())
+
         columns = ("status", "type", "value", "source", "reason", "time")
         self.asset_tree = ttk.Treeview(
-            self.asset_tab, columns=columns, show="headings", selectmode="browse"
+            self.asset_tab, columns=columns, show="headings", selectmode="extended"
         )
         headings = {
             "status": "状态",
@@ -111,11 +149,11 @@ class ProjectAccessDialog(tk.Toplevel):
         for column in columns:
             self.asset_tree.heading(column, text=headings[column])
             self.asset_tree.column(column, width=widths[column], minwidth=50)
-        self.asset_tree.grid(row=1, column=0, sticky="nsew")
+        self.asset_tree.grid(row=2, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(
             self.asset_tab, orient="vertical", command=self.asset_tree.yview
         )
-        scrollbar.grid(row=1, column=1, sticky="ns")
+        scrollbar.grid(row=2, column=1, sticky="ns")
         self.asset_tree.configure(yscrollcommand=scrollbar.set)
 
     def _build_task_tab(self) -> None:
@@ -199,6 +237,17 @@ class ProjectAccessDialog(tk.Toplevel):
                     {},
                 )
                 rows.append({"status": status, **item, "latest_decision": decision})
+        self.all_asset_rows = rows
+        self._render_asset_rows()
+
+    def _render_asset_rows(self) -> None:
+        if not hasattr(self, "asset_tree"):
+            return
+        rows = [
+            item
+            for item in self.all_asset_rows
+            if asset_row_matches(item, self.asset_search_var.get())
+        ]
         self.asset_rows = {}
         self.asset_tree.delete(*self.asset_tree.get_children())
         for index, item in enumerate(rows):
@@ -245,12 +294,15 @@ class ProjectAccessDialog(tk.Toplevel):
                 ),
             )
 
-    def _selected_asset(self) -> dict[str, object] | None:
+    def _selected_assets(self) -> list[dict[str, object]]:
         selected = self.asset_tree.selection()
         if not selected:
-            messagebox.showinfo("资产准入", "请先选择一条资产", parent=self)
-            return None
-        return self.asset_rows.get(selected[0])
+            messagebox.showinfo("资产准入", "请先选择资产", parent=self)
+            return []
+        return [self.asset_rows[item] for item in selected if item in self.asset_rows]
+
+    def _select_visible_assets(self) -> None:
+        self.asset_tree.selection_set(self.asset_tree.get_children())
 
     def _add_asset(self) -> None:
         value = simpledialog.askstring(
@@ -266,9 +318,13 @@ class ProjectAccessDialog(tk.Toplevel):
         self._refresh_assets()
 
     def _edit_asset(self) -> None:
-        item = self._selected_asset()
-        if item is None:
+        items = self._selected_assets()
+        if not items:
             return
+        if len(items) != 1:
+            messagebox.showinfo("修改资产", "修改操作一次只能选择一条资产", parent=self)
+            return
+        item = items[0]
         old_value = str(item.get("value") or "")
         new_value = simpledialog.askstring(
             "修改资产", "填写修改后的资产：", initialvalue=old_value, parent=self
@@ -288,40 +344,50 @@ class ProjectAccessDialog(tk.Toplevel):
         self._refresh_assets()
 
     def _allow_asset(self) -> None:
-        item = self._selected_asset()
-        if item is None:
+        items = self._selected_assets()
+        if not items:
             return
+        errors: list[str] = []
         try:
             bus = self._asset_bus()
-            if item.get("status") == "pending" and item.get("id"):
-                bus.apply_decisions([{"id": item["id"], "action": "accept"}])
-            else:
-                bus.restore_asset(
-                    str(item.get("value") or ""), str(item.get("type") or "")
-                )
+            pending = [
+                {"id": item["id"], "action": "accept"}
+                for item in items
+                if item.get("status") == "pending" and item.get("id")
+            ]
+            if pending:
+                bus.apply_decisions(pending)
+            for item in items:
+                if item.get("status") == "pending":
+                    continue
+                try:
+                    bus.restore_asset(
+                        str(item.get("value") or ""), str(item.get("type") or "")
+                    )
+                except ValueError as exc:
+                    errors.append(f"{item.get('value', '')}：{exc}")
         except ValueError as exc:
-            messagebox.showerror("允许失败", str(exc), parent=self)
-            return
+            errors.append(str(exc))
         self._refresh_assets()
+        if errors:
+            messagebox.showerror("部分资产允许失败", "\n".join(errors[:20]), parent=self)
 
     def _exclude_asset(self) -> None:
-        item = self._selected_asset()
-        if item is None:
+        items = self._selected_assets()
+        if not items:
             return
-        if not messagebox.askyesno(
-            "排除后续处理",
-            "该操作只阻止后续处理，不能撤销已经发送的扫描请求或删除历史证据。确定继续吗？",
-            parent=self,
-        ):
-            return
-        try:
-            self._asset_bus().exclude_asset(
-                str(item.get("value") or ""), str(item.get("type") or "")
-            )
-        except ValueError as exc:
-            messagebox.showerror("排除失败", str(exc), parent=self)
-            return
+        bus = self._asset_bus()
+        errors: list[str] = []
+        for item in items:
+            try:
+                bus.exclude_asset(
+                    str(item.get("value") or ""), str(item.get("type") or "")
+                )
+            except ValueError as exc:
+                errors.append(f"{item.get('value', '')}：{exc}")
         self._refresh_assets()
+        if errors:
+            messagebox.showerror("部分资产排除失败", "\n".join(errors[:20]), parent=self)
 
     def _refresh_tasks(self) -> None:
         rows: list[dict[str, object]] = []
@@ -386,4 +452,4 @@ class ProjectAccessDialog(tk.Toplevel):
         self._refresh_tasks()
 
 
-__all__ = ["ProjectAccessDialog"]
+__all__ = ["ProjectAccessDialog", "asset_row_matches"]

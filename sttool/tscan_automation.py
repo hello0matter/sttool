@@ -449,6 +449,65 @@ def normalize_poc_urls(
     return _unique(normalized)
 
 
+def awvs_site_targets(urls: list[str], primary_target: str = "") -> list[str]:
+    primary = primary_target.strip()
+    primary_parsed = urlsplit(primary)
+    primary_origin = ""
+    if primary_parsed.scheme in {"http", "https"} and primary_parsed.hostname:
+        primary_origin = _url_origin(primary_parsed)
+
+    targets: list[str] = []
+    seen_origins: set[str] = set()
+    for value in normalize_poc_urls(urls, [], ""):
+        parsed = urlsplit(value)
+        origin = _url_origin(parsed)
+        if not origin or origin in seen_origins:
+            continue
+        seen_origins.add(origin)
+        if origin == primary_origin:
+            targets.append(primary.split("#", 1)[0].split("?", 1)[0])
+        else:
+            targets.append(f"{origin}/")
+    return targets
+
+
+def dispatched_awvs_targets(
+    state: dict[str, object], primary_target: str = ""
+) -> set[str]:
+    dispatched: set[str] = set()
+    batches = state.get("stage_batches")
+    if not isinstance(batches, list):
+        return dispatched
+    for batch in batches:
+        if not isinstance(batch, dict):
+            continue
+        assets = batch.get("assets")
+        if not isinstance(assets, dict):
+            continue
+        urls = assets.get("urls")
+        if not isinstance(urls, list):
+            continue
+        dispatched.update(
+            awvs_site_targets([str(value) for value in urls], primary_target)
+        )
+    return dispatched
+
+
+def _url_origin(parsed) -> str:
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        return ""
+    host = f"[{parsed.hostname}]" if ":" in parsed.hostname else parsed.hostname
+    try:
+        port = parsed.port
+    except ValueError:
+        return ""
+    default_port = (parsed.scheme == "http" and port in {None, 80}) or (
+        parsed.scheme == "https" and port in {None, 443}
+    )
+    authority = host if default_port else f"{host}:{port}"
+    return f"{parsed.scheme}://{authority}"
+
+
 def web_fingerprint_targets(urls: list[str], domains: list[str], target: str) -> list[str]:
     values: list[str] = []
     for value in normalize_poc_urls(urls, domains, target):
@@ -547,6 +606,7 @@ def build_stage_plan(
             [target_for_asset_scan(target), *domains, *ips]
         ),
         "web_targets": explicit_web_targets,
+        "awvs_targets": awvs_site_targets(urls, target),
         "fingerprint_targets": web_fingerprint_targets(urls, [], target),
         "subdomain_targets": root_domains(domains),
         "unauthorized_targets": unauthorized_targets(service_endpoints),
@@ -1977,8 +2037,16 @@ def dispatch_stages_on_page(
         atomic_json_write(state_path, state)
 
     plan = build_stage_plan(target, assets)
+    if only_stages is None:
+        previous_awvs_targets = dispatched_awvs_targets(state, target)
+        plan["awvs_targets"] = [
+            value
+            for value in plan["awvs_targets"]
+            if value not in previous_awvs_targets
+        ]
     asset_targets = plan["asset_targets"]
     poc_targets = plan["web_targets"]
+    awvs_targets = plan["awvs_targets"]
     fingerprint_targets = plan["fingerprint_targets"]
     unauthorized_check_targets = plan["unauthorized_targets"]
     crack_targets = plan["password_targets"]
@@ -2119,9 +2187,9 @@ def dispatch_stages_on_page(
     )
     run_routed_stage(
         "awvs_scan",
-        f"已导入 {len(poc_targets)} 个 URL，正在测试连接并启动 AWVS",
-        poc_targets,
-        lambda: configure_awvs_scan(page, poc_targets, start_scan),
+        f"已导入 {len(awvs_targets)} 个站点入口，正在测试连接并启动 AWVS",
+        awvs_targets,
+        lambda: configure_awvs_scan(page, awvs_targets, start_scan),
     )
     run_routed_stage(
         "nessus_scan",

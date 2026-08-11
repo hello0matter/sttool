@@ -10,10 +10,12 @@ from tempfile import TemporaryDirectory
 from unittest.mock import patch
 
 from sttool.tscan_automation import (
+    awvs_site_targets,
     build_stage_plan,
     CDP_START_TIMEOUT_SECONDS,
     classify_connection_feedback,
     dismiss_blocking_modals,
+    dispatched_awvs_targets,
     dispatch_stages_on_page,
     filter_assets_by_scope,
     modal_requires_retry,
@@ -641,6 +643,54 @@ class TscanAutomationTests(unittest.TestCase):
                 ["192.0.2.10:22", "192.0.2.11:80", "192.0.2.10:6379"]
             ),
             ["192.0.2.10"],
+        )
+
+    def test_awvs_targets_collapse_paths_and_static_assets_by_origin(self) -> None:
+        self.assertEqual(
+            awvs_site_targets(
+                [
+                    "http://book.example:3143/Booking/Welcome",
+                    "http://book.example:3143/js/app.js?v=1",
+                    "http://book.example:3143/admin/login",
+                    "https://10.0.0.2/static/main.css",
+                    "https://10.0.0.2/api/users?id=1",
+                    "http://10.0.0.2/index.html",
+                ],
+                "http://book.example:3143/Booking/Welcome?from=project",
+            ),
+            [
+                "http://book.example:3143/Booking/Welcome",
+                "https://10.0.0.2/",
+                "http://10.0.0.2/",
+            ],
+        )
+
+    def test_incremental_awvs_targets_do_not_repeat_unrelated_primary_site(self) -> None:
+        self.assertEqual(
+            awvs_site_targets(
+                ["https://new.example/assets/app.js"],
+                "https://primary.example/application",
+            ),
+            ["https://new.example/"],
+        )
+
+    def test_dispatched_awvs_targets_are_deduplicated_across_batches(self) -> None:
+        state: dict[str, object] = {
+            "stage_batches": [
+                {
+                    "assets": {
+                        "urls": [
+                            "https://app.example/js/old.js",
+                            "https://api.example/v1/users",
+                        ]
+                    }
+                }
+            ]
+        }
+
+        self.assertEqual(
+            dispatched_awvs_targets(state, "https://app.example/portal"),
+            {"https://app.example/portal", "https://api.example/"},
         )
 
     def test_stage_plan_routes_unknown_ips_to_identification_only(self) -> None:

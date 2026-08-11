@@ -9,7 +9,7 @@ from tkinter import messagebox, scrolledtext, ttk
 
 from .activity import activity_log_path
 from .models import ProcessRecord, RunState
-from .runtime import process_record_alive
+from .runtime import process_creation_token, process_record_alive
 
 
 COORDINATOR_MANAGED_COMPONENTS = {
@@ -588,17 +588,29 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         if not batches:
             return "pending", "waiting_first_batch", "尚未启动 AI 执行"
         latest = batches[-1]
-        state = load_json(latest)
-        exit_state = load_json(latest.with_name("agent_exit.json"))
-        batch_status = load_json(latest.with_name("batch_status.json"))
-        status = str(state.get("status") or "pending")
-        if exit_state:
-            status = "completed" if exit_state.get("exit_code") == 0 else "failed"
-        elif batch_status:
-            status = str(batch_status.get("status") or status)
+        batch_states = [(item, load_json(item)) for item in batches]
+        state = batch_states[-1][1]
+        resolved_states: list[tuple[str, dict[str, object], dict[str, object]]] = []
+        for path, item in batch_states:
+            item_exit = load_json(path.with_name("agent_exit.json"))
+            item_status = load_json(path.with_name("batch_status.json"))
+            status = str(item.get("status") or "pending")
+            terminal_status = str(item_status.get("status") or "")
+            if terminal_status in {"completed", "failed"}:
+                status = terminal_status
+            elif status not in {"completed", "failed"} and item_exit:
+                status = "completed" if item_exit.get("exit_code") == 0 else "failed"
+            resolved_states.append((status, item_exit, item_status))
+        status, exit_state, batch_status = resolved_states[-1]
         batch_number = state.get("batch") or latest.parent.name
         provider = str(state.get("provider") or "未知执行器")
-        detail = f"共 {len(batches)} 次 AI 执行；最新为第 {batch_number} 次，执行器 {provider}"
+        statuses = [item[0] for item in resolved_states]
+        completed = statuses.count("completed")
+        failed = statuses.count("failed")
+        detail = (
+            f"共 {len(batches)} 次 AI 执行记录；成功 {completed} 次，失败 {failed} 次；"
+            f"最新为第 {batch_number} 次，执行器 {provider}"
+        )
         error = str(
             exit_state.get("error")
             or batch_status.get("error")
@@ -632,6 +644,18 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         return status, stage, detail
     if component_id == "tscan_plus":
         state = load_json(run_dir / "tool_data" / "tscan" / "state.json")
+        pid = int(state.get("pid") or 0)
+        creation_token = int(state.get("process_creation_token") or 0)
+        if (
+            pid > 0
+            and creation_token > 0
+            and process_creation_token(pid) == creation_token
+        ):
+            return (
+                "running",
+                "window_active",
+                f"TscanPlus 窗口 PID {pid} 仍在运行；自动控制已退出，恢复项目后可重新接管",
+            )
         return (
             str(state.get("status") or ""),
             str(state.get("stage") or ""),
@@ -754,6 +778,8 @@ def component_display_runtime(
             if record is not None and not process_record_alive(record, run_dir):
                 process_status = "exited"
         if process_status not in {"stopped", "exited"}:
+            return tool_status, stage, detail
+        if component_id == "tscan_plus" and stage == "window_active":
             return tool_status, stage, detail
         if process_status == "exited" and tool_status == "completed":
             if component_id == "asset_commander":

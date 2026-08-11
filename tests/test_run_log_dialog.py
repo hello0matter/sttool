@@ -93,6 +93,7 @@ class RunLogDialogTests(unittest.TestCase):
             self.assertEqual(status, "failed")
             self.assertEqual(stage, "agent_batch")
             self.assertIn("共 2 次 AI 执行", detail)
+            self.assertIn("成功 1 次，失败 1 次", detail)
 
     def test_ai_batch_status_file_completes_batch_without_shell_exit_file(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -335,6 +336,53 @@ class RunLogDialogTests(unittest.TestCase):
                     component_display_runtime(run_dir, "fscan"),
                     ("completed", "result_saved", "结果已保存：fscan.txt"),
                 )
+
+    def test_tscan_live_window_is_not_reported_as_fully_exited(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = run_dir / "tool_data" / "tscan" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "pid": 456,
+                        "process_creation_token": 789,
+                        "status": "interrupted",
+                        "stage": "interrupted",
+                        "detail": "自动控制进程已退出",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (run_dir / "run.json").write_text(
+                json.dumps(
+                    {
+                        "processes": [
+                            {
+                                "component_id": "tscan_plus",
+                                "name": "TscanPlus",
+                                "pid": 123,
+                                "command": [],
+                                "cwd": str(run_dir),
+                                "started_at": "",
+                                "status": "exited",
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            with patch(
+                "sttool.run_log_dialog.process_creation_token", return_value=789
+            ):
+                status, stage, detail = component_display_runtime(
+                    run_dir, "tscan_plus"
+                )
+
+            self.assertEqual((status, stage), ("running", "window_active"))
+            self.assertIn("窗口 PID 456 仍在运行", detail)
+            self.assertIn("自动控制已退出", detail)
 
     def test_completed_semantic_scan_is_not_displayed_as_running(self) -> None:
         with TemporaryDirectory() as temporary:

@@ -9,9 +9,24 @@ from sttool.asset_approval_dialog import (
     pending_asset_groups,
 )
 from sttool.asset_bus import read_json
+from sttool.project_access_dialog import asset_row_matches
 
 
 class AssetApprovalDialogTests(unittest.TestCase):
+    def test_project_asset_search_matches_value_source_and_status(self) -> None:
+        item = {
+            "status": "blocked",
+            "type": "url",
+            "value": "https://api.example.test/admin",
+            "sources": ["tscan", "semantic_dirscan"],
+            "reason": "user_blocked_asset",
+        }
+
+        self.assertTrue(asset_row_matches(item, "api.example"))
+        self.assertTrue(asset_row_matches(item, "tscan"))
+        self.assertTrue(asset_row_matches(item, "已阻止"))
+        self.assertFalse(asset_row_matches(item, "192.0.2.1"))
+
     def test_pending_assets_are_grouped_by_host_with_sources_and_defaults(self) -> None:
         groups = pending_asset_groups(
             {

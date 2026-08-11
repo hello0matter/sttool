@@ -16,6 +16,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 ASSET_TYPES = ("ip", "domain", "endpoint", "url")
+ASSET_BUS_SCHEMA_VERSION = 1
 _FSCAN_URL_RE = re.compile(r"https?://[^\s\[\]<>]+", re.IGNORECASE)
 _HOST_PORT_RE = re.compile(
     r"(?<![\w.-])(?P<host>(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9][A-Za-z0-9.-]*):(?P<port>\d{1,5})(?!\d)"
@@ -369,7 +370,7 @@ class AssetBus:
         self.value = read_json(path)
         if not self.value:
             self.value = {
-                "schema_version": 2,
+                "schema_version": ASSET_BUS_SCHEMA_VERSION,
                 "generation": 0,
                 "created_at": now_text(),
                 "updated_at": now_text(),
@@ -379,6 +380,13 @@ class AssetBus:
                 "decision_history": [],
                 "blocked_assets": [],
             }
+        elif int(self.value.get("schema_version") or 0) == 2:
+            # Version 2 only added optional records. Keep the wire version compatible
+            # with existing tool bridges that already ignore unknown fields.
+            self.value["schema_version"] = ASSET_BUS_SCHEMA_VERSION
+            self.value.setdefault("blocked_assets", [])
+            self.value.setdefault("decision_history", [])
+            atomic_json_write(self.path, self.value)
         self.last_ingest_stats = {"added": 0, "pending": 0, "rejected": 0}
         self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}
 
@@ -659,7 +667,7 @@ class AssetBus:
         if new_keys:
             self.value["generation"] = next_generation
             self.value["last_new_asset_at"] = timestamp
-        self.value["schema_version"] = 2
+        self.value["schema_version"] = ASSET_BUS_SCHEMA_VERSION
         self.value["updated_at"] = timestamp
         self.value["approval_policy"] = {
             "mode": self.approval_mode,
