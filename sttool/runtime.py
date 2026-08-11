@@ -430,7 +430,7 @@ class RuntimeManager:
         ):
             raise LaunchError("推理强度必须为 CLI 默认、low、medium、high 或 xhigh")
         if not 1 <= request.asset_settle_seconds <= 600:
-            raise LaunchError("资产稳定等待必须在 1-600 秒之间")
+            raise LaunchError("获准资产无新增等待必须在 1-600 秒之间")
         if not 1 <= request.max_agent_batches <= 100:
             raise LaunchError("AI 执行次数必须在 1-100 之间")
         if not 1 <= request.coordinator_poll_seconds <= 60:
@@ -1114,6 +1114,12 @@ class RuntimeManager:
             if fscan_tool is not None
             else self.st_root / "fscan" / "fscan.exe"
         )
+        nuclei_tool = self.tools.get("nuclei")
+        nuclei_path = (
+            Path(nuclei_tool.executable)
+            if nuclei_tool is not None
+            else self.st_root / "nuclei" / "nuclei.exe"
+        )
         return self._spawn(
             "project_coordinator",
             "自动调度与 AI 执行",
@@ -1159,6 +1165,8 @@ class RuntimeManager:
                 str(find_gh_poc_path),
                 "--fscan-exe",
                 str(fscan_path),
+                "--nuclei-exe",
+                str(nuclei_path),
                 "--fscan-port-threads",
                 str(request.fscan_port_threads),
                 "--allow-cidr-expansion",

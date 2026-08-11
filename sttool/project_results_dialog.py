@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import tkinter as tk
-from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, messagebox, scrolledtext, ttk
 
@@ -12,89 +13,52 @@ from .asset_bus import AssetBus
 from .findings_dialog import FindingsDialog
 from .models import RunState
 from .pentest_report import write_pentest_report
+from .project_result_catalog import (
+    ProjectResultSource,
+    preview_result_source,
+    project_result_sources,
+    result_target_label,
+)
 
 
 FINAL_RUN_STATUSES = {"completed", "failed", "stopped", "exited"}
+PREVIEW_URL = re.compile(r"https?://[^\s|<>\"']+")
+URL_TRAILING_PUNCTUATION = ".,;:!?)]}，。；：！？）】"
 
 
-@dataclass(frozen=True)
-class ProjectResultSource:
-    label: str
-    path: Path
-    kind: str
-    size: int
+def preview_url_spans(text: str) -> list[tuple[int, int, str]]:
+    spans: list[tuple[int, int, str]] = []
+    for match in PREVIEW_URL.finditer(text):
+        url = match.group(0).rstrip(URL_TRAILING_PUNCTUATION)
+        if url:
+            spans.append((match.start(), match.start() + len(url), url))
+    return spans
 
 
-def _safe_file_size(path: Path) -> int:
-    try:
-        return path.stat().st_size
-    except OSError:
-        return 0
+def human_file_size(size: int) -> str:
+    value = max(size, 0)
+    for unit in ("字节", "KB", "MB", "GB"):
+        if value < 1024 or unit == "GB":
+            return f"{value:,} {unit}" if unit == "字节" else f"{value:.1f} {unit}"
+        value /= 1024
+    return f"{size:,} 字节"
 
 
-def _result_label(run_dir: Path, path: Path) -> str:
-    try:
-        relative = path.relative_to(run_dir)
-    except ValueError:
-        relative = path
-    labels = {
-        "pentest_report.md": "渗透测试报告（Markdown）",
-        "pentest_report.txt": "渗透测试报告（TXT）",
-        "risk_summary.md": "\u9879\u76ee\u98ce\u9669\u6210\u679c\u6458\u8981",
-        "findings.json": "结构化问题库（JSON）",
-        "findings.md": "结构化问题库（Markdown）",
-        "cve_triage.md": "CVE \u5feb\u901f\u6392\u67e5",
-        "vulnerability_intel.md": "\u6f0f\u6d1e\u60c5\u62a5\u4e0e PoC \u5019\u9009",
-        "vulnerability_intel.json": "\u7ed3\u6784\u5316\u6f0f\u6d1e\u60c5\u62a5",
-        "vulnx.json": "vulnx \u72ec\u7acb\u67e5\u8be2\u7ed3\u679c",
-        "find_gh_poc.json": "GitHub PoC \u5019\u9009\u67e5\u8be2",
-        "fscan.txt": "fscan \u7aef\u53e3\u4e0e\u7ad9\u70b9\u7ed3\u679c",
-        "nuclei.txt": "nuclei \u6a21\u677f\u7ed3\u679c",
-        "asset_commander_assets.json": "AssetCommander \u8d44\u4ea7\u7ed3\u679c",
-    }
-    return f"{labels.get(path.name, path.name)}  \u00b7  {relative}"
-
-
-def project_result_sources(run_dir: Path) -> list[ProjectResultSource]:
-    candidates: list[tuple[str, Path]] = [
-        ("report", run_dir / "pentest_report.md"),
-        ("report", run_dir / "pentest_report.txt"),
-        ("summary", run_dir / "risk_summary.md"),
-        ("finding", run_dir / "findings.json"),
-        ("finding", run_dir / "findings.md"),
-        ("triage", run_dir / "cve_triage.md"),
-        ("intel", run_dir / "vulnerability_intel.md"),
-        ("intel", run_dir / "results" / "vulnerability_intel.json"),
-        ("intel", run_dir / "results" / "vulnx.json"),
-        ("intel", run_dir / "results" / "find_gh_poc.json"),
-        ("tool", run_dir / "results" / "fscan.txt"),
-        ("tool", run_dir / "results" / "nuclei.txt"),
-        ("asset", run_dir / "results" / "asset_commander_assets.json"),
-        ("tool", run_dir / "tool_data" / "tscan" / "state.json"),
-    ]
-    for pattern, kind in (
-        ("agent_batches/**/findings.md", "finding"),
-        ("agent_batches/**/cve_triage.md", "triage"),
-        ("agent_batches/**/*.md", "agent"),
-    ):
-        candidates.extend((kind, path) for path in sorted(run_dir.glob(pattern)))
-
-    seen: set[Path] = set()
-    sources: list[ProjectResultSource] = []
-    for kind, path in candidates:
-        normalized = path.resolve(strict=False)
-        if normalized in seen or not path.is_file():
-            continue
-        seen.add(normalized)
-        sources.append(
-            ProjectResultSource(
-                label=_result_label(run_dir, path),
-                path=path,
-                kind=kind,
-                size=_safe_file_size(path),
-            )
-        )
-    return sources
+def source_sort_key(source: ProjectResultSource, column: str) -> object:
+    if column == "name":
+        return source.title.casefold()
+    if column == "target":
+        return result_target_label(source).casefold()
+    if column == "kind":
+        return source.kind.casefold()
+    if column == "size":
+        return source.size
+    if column == "updated":
+        try:
+            return source.path.stat().st_mtime
+        except OSError:
+            return 0.0
+    return source.title.casefold()
 
 
 def compact_markdown(text: str, *, max_lines: int = 260) -> str:
@@ -176,20 +140,19 @@ def render_project_results(state: RunState) -> tuple[str, list[ProjectResultSour
         else "\u9636\u6bb5\u6210\u679c\uff08\u9879\u76ee\u4ecd\u5728\u8fd0\u884c\uff09"
     )
     lines = [
-        f"# {state.project_name} - {stage}",
+        f"{state.project_name} - {stage}",
         "",
-        f"- \u8fd0\u884c\u5b9e\u4f8b\uff1a{state.run_id}",
-        f"- \u5f53\u524d\u72b6\u6001\uff1a{state.status}",
-        f"- \u76ee\u6807\uff1a{state.target}",
-        f"- \u6388\u6743\u8303\u56f4\uff1a{state.scope}",
-        f"- \u66f4\u65b0\u65f6\u95f4\uff1a{state.updated_at}",
+        f"运行实例：{state.run_id}",
+        f"当前状态：{state.status}",
+        f"目标：{state.target}",
+        f"授权范围：{state.scope}",
+        f"更新时间：{state.updated_at}",
         "",
     ]
     if not sources:
         lines.extend(
             [
-                "## \u5f53\u524d\u7ed3\u8bba",
-                "",
+                "当前结论",
                 "\u5f53\u524d\u5c1a\u65e0\u53ef\u8bfb\u53d6\u7684\u9879\u76ee\u6210\u679c\u6587\u4ef6\u3002"
                 "\u5de5\u5177\u53ef\u80fd\u4ecd\u5728\u7b49\u5f85\u8d44\u4ea7\u3001\u8fd0\u884c\u4e2d\uff0c"
                 "\u6216\u672c\u8f6e\u5c1a\u672a\u5f62\u6210\u98ce\u9669\u7ebf\u7d22\u3002",
@@ -199,41 +162,12 @@ def render_project_results(state: RunState) -> tuple[str, list[ProjectResultSour
         )
         return "\n".join(lines), sources
 
-    lines.extend(["## \u6210\u679c\u6587\u4ef6", ""])
+    counts: dict[str, int] = {}
     for source in sources:
-        size_text = (
-            "\uff08\u7a7a\u6587\u4ef6\uff09"
-            if source.size == 0
-            else f"\uff08{source.size:,} \u5b57\u8282\uff09"
-        )
-        lines.append(f"- {source.label} {size_text}")
-
-    primary = next(
-        (item for item in sources if item.path.name == "pentest_report.md"), None
-    )
-    if primary is None:
-        primary = next(
-            (item for item in sources if item.path.name == "pentest_report.txt"), None
-        )
-    if primary is None:
-        primary = next((item for item in sources if item.path.name == "risk_summary.md"), None)
-    if primary is None:
-        primary = next((item for item in sources if item.size > 0), sources[0])
-    lines.extend(
-        ["", f"## \u6c47\u603b\u9884\u89c8\uff1a{primary.path.name}", ""]
-    )
-    if primary.size == 0:
-        lines.append(
-            "\u8be5\u6210\u679c\u6587\u4ef6\u5f53\u524d\u4e3a\u7a7a\uff1b"
-            "\u8fd9\u4e0d\u4ee3\u8868\u5de5\u5177\u6ca1\u6709\u8fd0\u884c\uff0c"
-            "\u53ef\u5728\u9879\u76ee\u65e5\u5fd7\u67e5\u770b\u5176\u72b6\u6001\u548c\u7b49\u5f85\u539f\u56e0\u3002"
-        )
-    else:
-        try:
-            content = primary.path.read_text(encoding="utf-8", errors="replace")
-        except OSError as exc:
-            content = f"\u8bfb\u53d6\u6210\u679c\u6587\u4ef6\u5931\u8d25\uff1a{exc}"
-        lines.append(compact_markdown(content))
+        counts[source.kind] = counts.get(source.kind, 0) + 1
+    lines.extend(("成果概览", ""))
+    lines.extend(f"• {kind}：{count} 项" for kind, count in counts.items())
+    lines.extend(("", "请在上方选择成果，下方会显示对应内容。"))
     return "\n".join(lines).strip() + "\n", sources
 
 
@@ -243,6 +177,11 @@ class ProjectResultsDialog(tk.Toplevel):
         self.state = state
         self.run_dir = Path(state.run_dir)
         self.sources: list[ProjectResultSource] = []
+        self.preview_urls_by_tag: dict[str, str] = {}
+        self.preview_link_press: tuple[str, int, int] | None = None
+        self.source_sort_column = ""
+        self.source_sort_descending = False
+        self.source_heading_labels: dict[str, str] = {}
         self.title(
             f"\u9879\u76ee\u6210\u679c - {state.project_name} / {state.run_id}"
         )
@@ -262,25 +201,41 @@ class ProjectResultsDialog(tk.Toplevel):
             font=("Microsoft YaHei UI", 11, "bold"),
         ).grid(row=0, column=0, sticky="w", pady=(0, 8))
 
+        source_frame = ttk.Frame(container)
+        source_frame.grid(row=1, column=0, sticky="nsew", pady=(0, 10))
+        source_frame.columnconfigure(0, weight=1)
+        source_frame.rowconfigure(0, weight=1)
+
+        source_scrollbar = ttk.Scrollbar(source_frame, orient="vertical")
         self.source_tree = ttk.Treeview(
-            container,
-            columns=("name", "kind", "size"),
+            source_frame,
+            columns=("name", "target", "kind", "size", "updated"),
             show="headings",
-            height=7,
+            height=10,
             selectmode="browse",
+            yscrollcommand=source_scrollbar.set,
         )
+        source_scrollbar.configure(command=self.source_tree.yview)
         for column, label, width in (
-            ("name", "\u6210\u679c\u6587\u4ef6\uff08\u53cc\u51fb\u6253\u5f00\uff09", 850),
-            ("kind", "\u7c7b\u578b", 120),
-            ("size", "\u5927\u5c0f", 130),
+            ("name", "成果", 220),
+            ("target", "目标 / 批次", 520),
+            ("kind", "来源", 110),
+            ("size", "大小", 100),
+            ("updated", "更新时间", 145),
         ):
-            self.source_tree.heading(column, text=label)
+            self.source_heading_labels[column] = label
+            self.source_tree.heading(
+                column,
+                text=label,
+                command=lambda value=column: self._sort_source_tree(value),
+            )
             self.source_tree.column(column, width=width, minwidth=80)
-        self.source_tree.grid(row=1, column=0, sticky="ew", pady=(0, 10))
+        self.source_tree.grid(row=0, column=0, sticky="nsew")
+        source_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.source_tree.bind("<<TreeviewSelect>>", self._preview_selected_source)
         self.source_tree.bind(
             "<Double-1>", lambda _event: self._open_selected_source()
         )
-        self.source_tree.bind("<Return>", lambda _event: self._open_selected_source())
 
         self.text = scrolledtext.ScrolledText(
             container,
@@ -289,6 +244,10 @@ class ProjectResultsDialog(tk.Toplevel):
             state="disabled",
         )
         self.text.grid(row=2, column=0, sticky="nsew")
+        self.text.bind("<ButtonPress-1>", self._preview_link_pressed)
+        self.text.bind("<ButtonRelease-1>", self._preview_link_released)
+        self.text.bind("<Motion>", self._preview_link_motion)
+        self.text.bind("<Leave>", lambda _event: self.text.configure(cursor="xterm"))
 
         actions = ttk.Frame(container)
         actions.grid(row=3, column=0, sticky="ew", pady=(10, 0))
@@ -302,23 +261,13 @@ class ProjectResultsDialog(tk.Toplevel):
         ).pack(side="left", padx=(8, 0))
         ttk.Button(
             actions,
-            text="\u6253\u5f00\u9009\u4e2d\u6210\u679c",
+            text="打开原始文件",
             command=self._open_selected_source,
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            actions,
-            text="\u6253\u5f00\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a",
-            command=self._open_primary,
         ).pack(side="left", padx=(8, 0))
         ttk.Button(
             actions,
             text="导出报告",
             command=self._export_report,
-        ).pack(side="left", padx=(8, 0))
-        ttk.Button(
-            actions,
-            text="打开证据目录",
-            command=self._open_evidence_dir,
         ).pack(side="left", padx=(8, 0))
         ttk.Button(
             actions,
@@ -331,7 +280,7 @@ class ProjectResultsDialog(tk.Toplevel):
         self._refresh()
 
     def _refresh(self) -> None:
-        content, self.sources = render_project_results(self.state)
+        overview, self.sources = render_project_results(self.state)
         stage = (
             "\u6700\u7ec8\u6210\u679c"
             if self.state.status in FINAL_RUN_STATUSES
@@ -341,22 +290,123 @@ class ProjectResultsDialog(tk.Toplevel):
             f"{stage} \u00b7 \u72b6\u6001 {self.state.status} \u00b7 "
             f"\u5df2\u53d1\u73b0 {len(self.sources)} \u4e2a\u6210\u679c\u6587\u4ef6"
         )
+        self._populate_source_tree()
+        if self.sources:
+            self.source_tree.selection_set("0")
+            self.source_tree.focus("0")
+            self.source_tree.see("0")
+            self._show_preview(preview_result_source(self.sources[0]))
+        else:
+            self._show_preview(overview)
+
+    def _populate_source_tree(self, selected_path: Path | None = None) -> None:
         self.source_tree.delete(*self.source_tree.get_children())
+        selected_iid = ""
         for index, source in enumerate(self.sources):
+            try:
+                updated = source.path.stat().st_mtime
+                updated_text = datetime.fromtimestamp(updated).strftime(
+                    "%Y-%m-%d %H:%M"
+                )
+            except OSError:
+                updated_text = "未知"
             self.source_tree.insert(
                 "",
                 "end",
                 iid=str(index),
                 values=(
-                    source.label,
+                    source.title,
+                    result_target_label(source),
                     source.kind,
-                    f"{source.size:,} \u5b57\u8282",
+                    human_file_size(source.size),
+                    updated_text,
                 ),
             )
+            if selected_path is not None and source.path == selected_path:
+                selected_iid = str(index)
+        if selected_iid:
+            self.source_tree.selection_set(selected_iid)
+            self.source_tree.focus(selected_iid)
+            self.source_tree.see(selected_iid)
+
+    def _sort_source_tree(self, column: str) -> None:
+        selected = self._selected_source()
+        if self.source_sort_column == column:
+            descending = not self.source_sort_descending
+        else:
+            descending = column in {"size", "updated"}
+        self.source_sort_column = column
+        self.source_sort_descending = descending
+        for heading, label in self.source_heading_labels.items():
+            self.source_tree.heading(heading, text=label)
+        direction = "▼" if descending else "▲"
+        self.source_tree.heading(
+            column,
+            text=f"{self.source_heading_labels[column]} {direction}",
+        )
+        self.sources.sort(
+            key=lambda source: source_sort_key(source, column),
+            reverse=descending,
+        )
+        self._populate_source_tree(selected.path if selected is not None else None)
+
+    def _show_preview(self, content: str) -> None:
         self.text.configure(state="normal")
         self.text.delete("1.0", "end")
         self.text.insert("1.0", content)
+        self.preview_urls_by_tag = {}
+        for index, (start, end, url) in enumerate(preview_url_spans(content)):
+            tag = f"preview_url_{index}"
+            self.preview_urls_by_tag[tag] = url
+            self.text.tag_add(tag, f"1.0 + {start} chars", f"1.0 + {end} chars")
+            self.text.tag_configure(tag, foreground="#0563c1", underline=True)
         self.text.configure(state="disabled")
+
+    def _preview_url_at(self, x: int, y: int) -> str:
+        index = self.text.index(f"@{x},{y}")
+        for tag in self.text.tag_names(index):
+            url = self.preview_urls_by_tag.get(tag)
+            if url:
+                return url
+        return ""
+
+    def _preview_link_pressed(self, event: tk.Event) -> None:
+        url = self._preview_url_at(event.x, event.y)
+        self.preview_link_press = (url, event.x, event.y) if url else None
+
+    def _preview_link_released(self, event: tk.Event) -> str | None:
+        pressed = self.preview_link_press
+        self.preview_link_press = None
+        if pressed is None:
+            return None
+        url, start_x, start_y = pressed
+        if (
+            abs(event.x - start_x) <= 4
+            and abs(event.y - start_y) <= 4
+            and self._preview_url_at(event.x, event.y) == url
+        ):
+            self._open_preview_url(url)
+            return "break"
+        return None
+
+    def _preview_link_motion(self, event: tk.Event) -> None:
+        cursor = "hand2" if self._preview_url_at(event.x, event.y) else "xterm"
+        self.text.configure(cursor=cursor)
+
+    def _open_preview_url(self, url: str) -> None:
+        try:
+            os.startfile(url)
+        except OSError as exc:
+            messagebox.showerror(
+                "打开地址",
+                f"无法使用默认浏览器打开：\n{url}\n\n{exc}",
+                parent=self,
+            )
+
+    def _preview_selected_source(self, _event: tk.Event | None = None) -> None:
+        source = self._selected_source()
+        if source is not None:
+            self._show_preview(preview_result_source(source))
 
     def _manage_findings(self) -> None:
         dialog = FindingsDialog(self, self.run_dir)
@@ -398,11 +448,6 @@ class ProjectResultsDialog(tk.Toplevel):
             return
         messagebox.showinfo("导出报告", f"报告已导出到：\n{destination}", parent=self)
 
-    def _open_evidence_dir(self) -> None:
-        path = self.run_dir / "evidence"
-        path.mkdir(parents=True, exist_ok=True)
-        os.startfile(path)
-
     def _selected_source(self) -> ProjectResultSource | None:
         selection = self.source_tree.selection()
         if not selection:
@@ -422,17 +467,6 @@ class ProjectResultsDialog(tk.Toplevel):
             )
             return
         os.startfile(source.path)
-
-    def _open_primary(self) -> None:
-        primary = self._primary_source()
-        if primary is None:
-            messagebox.showinfo(
-                "\u9879\u76ee\u6210\u679c",
-                "\u9879\u76ee\u6e17\u900f\u6d4b\u8bd5\u62a5\u544a\u5c1a\u672a\u751f\u6210\u3002",
-                parent=self,
-            )
-            return
-        os.startfile(primary.path)
 
     def _open_run_dir(self) -> None:
         os.startfile(self.run_dir)

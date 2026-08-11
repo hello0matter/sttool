@@ -7,8 +7,17 @@ from tempfile import TemporaryDirectory
 from sttool.models import RunState
 from sttool.project_results_dialog import (
     compact_markdown,
+    human_file_size,
+    preview_url_spans,
     regenerate_pentest_report,
     render_project_results,
+    source_sort_key,
+)
+from sttool.project_result_catalog import (
+    ProjectResultSource,
+    preview_result_source,
+    project_result_sources,
+    readable_markdown,
 )
 
 
@@ -71,20 +80,163 @@ class ProjectResultsDialogTests(unittest.TestCase):
             )
 
         self.assertIn("\u6700\u7ec8\u6210\u679c", content)
-        self.assertIn("\u5f85\u9a8c\u8bc1\u95ee\u9898", content)
-        self.assertIn("pentest_report.md", content)
+        self.assertIn("成果概览", content)
         self.assertEqual(
             {item.path.name for item in sources},
             {
                 "pentest_report.md",
-                "findings.json",
                 "findings.md",
                 "risk_summary.md",
                 "vulnerability_intel.md",
-                "vulnerability_intel.json",
                 "fscan.txt",
             },
         )
+
+    def test_catalog_includes_incremental_scans_and_hides_internal_files(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            (run_dir / "results").mkdir()
+            (run_dir / "results" / "fscan.txt").write_text(
+                "10.0.0.1:80", encoding="utf-8"
+            )
+            batch = run_dir / "tool_data" / "fscan_incremental" / "batch-0002"
+            batch.mkdir(parents=True)
+            (batch / "targets.txt").write_text("10.0.0.2\n10.0.0.3\n", encoding="utf-8")
+            (batch / "result.txt").write_text("10.0.0.2:443", encoding="utf-8")
+            tscan = run_dir / "tool_data" / "tscan"
+            tscan.mkdir(parents=True)
+            (tscan / "state.json").write_text('{"status":"running"}', encoding="utf-8")
+            agent = run_dir / "agent_batches" / "0001"
+            agent.mkdir(parents=True)
+            (agent / "execution_log.md").write_text("internal", encoding="utf-8")
+
+            sources = project_result_sources(run_dir)
+
+        self.assertEqual(
+            [source.title for source in sources],
+            ["fscan 初始扫描", "fscan 第 2 轮"],
+        )
+        self.assertNotIn("state.json", {source.path.name for source in sources})
+        self.assertNotIn("execution_log.md", {source.path.name for source in sources})
+
+    def test_catalog_discovers_each_dirsearch_target(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            base = run_dir / "tool_data" / "semantic" / "projects" / "demo" / "runs"
+            for index, target in enumerate(("http://10.0.0.1/", "https://example.test/"), start=1):
+                scan = base / f"target-{index}"
+                scan.mkdir(parents=True)
+                (scan / "summary.json").write_text(
+                    '{"target":"' + target + '"}', encoding="utf-8"
+                )
+                (scan / "dirsearch.txt").write_text(
+                    f"200  12KB  {target}admin\n", encoding="utf-8"
+                )
+
+            sources = project_result_sources(run_dir)
+
+        directory_sources = [source for source in sources if source.kind == "路径发现"]
+        self.assertEqual(len(directory_sources), 2)
+        self.assertEqual(
+            {source.target for source in directory_sources},
+            {"http://10.0.0.1/", "https://example.test/"},
+        )
+
+    def test_catalog_discovers_each_incremental_nuclei_batch(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            results = run_dir / "results"
+            results.mkdir()
+            (results / "nuclei.txt").write_text("initial hit", encoding="utf-8")
+            batch = run_dir / "tool_data" / "nuclei_incremental" / "batch-0001"
+            batch.mkdir(parents=True)
+            (batch / "targets.txt").write_text(
+                "https://one.example/\nhttps://two.example/\n", encoding="utf-8"
+            )
+            (batch / "result.txt").write_text("incremental hit", encoding="utf-8")
+
+            sources = project_result_sources(run_dir)
+
+        nuclei_sources = [source for source in sources if source.kind == "漏洞扫描"]
+        self.assertEqual(
+            [source.title for source in nuclei_sources],
+            ["nuclei 初始扫描", "nuclei 第 1 轮扫描"],
+        )
+        self.assertEqual(
+            nuclei_sources[1].subtitle,
+            "https://one.example/ 等 2 个目标",
+        )
+
+    def test_human_previews_remove_markdown_and_dirsearch_command(self) -> None:
+        markdown = "# 风险摘要\n\n| 等级 | 数量 |\n|---|---|\n| 高危 | 2 |\n"
+        self.assertEqual(readable_markdown(markdown), "风险摘要\n\n等级：高危    数量：2")
+
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "dirsearch.txt"
+            path.write_text(
+                "# Dirsearch started with internal command\n\n"
+                "302  0B  http://example.test/admin -> REDIRECTS TO: /login\n",
+                encoding="utf-8",
+            )
+            source = project_result_sources(Path(temporary))
+            self.assertEqual(source, [])
+            preview = preview_result_source(
+                ProjectResultSource(
+                    title="目录扫描",
+                    subtitle="http://example.test/",
+                    path=path,
+                    kind="路径发现",
+                    size=path.stat().st_size,
+                    preview_kind="dirsearch",
+                )
+            )
+
+        self.assertIn("发现路径：1 条", preview)
+        self.assertIn("http://example.test/admin", preview)
+        self.assertNotIn("internal command", preview)
+
+    def test_preview_url_spans_make_clean_browser_links(self) -> None:
+        text = (
+            "• http://10.0.0.1/admin | 200\n"
+            "说明：https://example.test/path?q=1。"
+        )
+
+        spans = preview_url_spans(text)
+
+        self.assertEqual(
+            [url for _start, _end, url in spans],
+            ["http://10.0.0.1/admin", "https://example.test/path?q=1"],
+        )
+        self.assertEqual(
+            [text[start:end] for start, end, _url in spans],
+            ["http://10.0.0.1/admin", "https://example.test/path?q=1"],
+        )
+
+    def test_result_size_is_human_readable_and_numerically_sortable(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            small = ProjectResultSource(
+                title="small",
+                subtitle="",
+                path=root / "small.txt",
+                kind="test",
+                size=900,
+                preview_kind="plain",
+            )
+            large = ProjectResultSource(
+                title="large",
+                subtitle="",
+                path=root / "large.txt",
+                kind="test",
+                size=2 * 1024 * 1024,
+                preview_kind="plain",
+            )
+
+            ordered = sorted([large, small], key=lambda item: source_sort_key(item, "size"))
+
+        self.assertEqual([item.title for item in ordered], ["small", "large"])
+        self.assertEqual(human_file_size(small.size), "900 字节")
+        self.assertEqual(human_file_size(large.size), "2.0 MB")
 
     def test_regenerate_report_after_manual_findings_update(self) -> None:
         with TemporaryDirectory() as temporary:

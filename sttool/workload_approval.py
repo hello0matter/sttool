@@ -11,10 +11,15 @@ from .asset_bus import atomic_json_write, read_json
 
 APPROVAL_MODES = {"automatic", "countdown_accept", "countdown_reject", "manual"}
 REQUEST_FILE = "workload_approval.json"
+HISTORY_FILE = "workload_approval_history.json"
 
 
 def request_path(run_dir: Path) -> Path:
     return run_dir / "tool_data" / "coordinator" / REQUEST_FILE
+
+
+def history_path(run_dir: Path) -> Path:
+    return run_dir / "tool_data" / "coordinator" / HISTORY_FILE
 
 
 def workload_counts(value: dict[str, Any], after_generation: int) -> dict[str, int]:
@@ -80,6 +85,12 @@ def read_request(run_dir: Path) -> dict[str, Any]:
     return read_json(request_path(run_dir))
 
 
+def read_history(run_dir: Path) -> list[dict[str, Any]]:
+    value = read_json(history_path(run_dir))
+    rows = value.get("requests")
+    return [item for item in rows if isinstance(item, dict)] if isinstance(rows, list) else []
+
+
 def update_pending_request_policy(
     run_dir: Path,
     *,
@@ -120,6 +131,22 @@ def decide_request(run_dir: Path, action: str, decided_by: str = "user") -> dict
         decided_at=datetime.now().astimezone().isoformat(timespec="seconds"),
     )
     atomic_json_write(request_path(run_dir), value)
+    history = read_history(run_dir)
+    request_id = str(value.get("request_id") or "")
+    history = [
+        item
+        for item in history
+        if str(item.get("request_id") or "") != request_id
+    ]
+    history.append(dict(value))
+    atomic_json_write(
+        history_path(run_dir),
+        {
+            "schema_version": 1,
+            "updated_at": value["decided_at"],
+            "requests": history[-1000:],
+        },
+    )
     return value
 
 
@@ -140,9 +167,12 @@ def resolve_due_request(run_dir: Path, now: float | None = None) -> dict[str, An
 
 __all__ = [
     "APPROVAL_MODES",
+    "HISTORY_FILE",
     "REQUEST_FILE",
     "create_request",
     "decide_request",
+    "history_path",
+    "read_history",
     "read_request",
     "request_path",
     "resolve_due_request",

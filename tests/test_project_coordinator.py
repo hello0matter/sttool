@@ -11,6 +11,11 @@ from unittest.mock import MagicMock, patch
 
 from sttool.agent_launcher import write_agent_batch_script
 from sttool.asset_bus import AssetBus, parse_fscan_output
+from sttool.incremental_nuclei import (
+    build_incremental_nuclei_command,
+    initial_incremental_nuclei_urls,
+    incremental_nuclei_candidates,
+)
 from sttool.models import ProcessRecord
 from sttool.runtime import now_text, process_creation_token
 from sttool.project_coordinator import (
@@ -321,6 +326,63 @@ class ProjectCoordinatorTests(unittest.TestCase):
         self.assertIn("-nopoc", command)
         self.assertEqual(command[command.index("-t") + 1], "321")
         self.assertNotIn("-h", command)
+
+    def test_incremental_nuclei_batches_only_unattempted_urls(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(Path(temporary) / "assets.json", "*")
+            bus.ingest(
+                [
+                    ("https://one.example/", "url"),
+                    ("https://two.example/", "url"),
+                    ("192.0.2.10", "ip"),
+                ],
+                "test",
+            )
+
+            candidates = incremental_nuclei_candidates(
+                bus, ["https://one.example/"], limit=1
+            )
+
+        self.assertEqual(candidates, ["https://two.example/"])
+
+    def test_existing_project_seeds_nuclei_history_without_backfill(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(Path(temporary) / "assets.json", "*")
+            bus.ingest(
+                [
+                    ("https://existing-one.example/", "url"),
+                    ("https://existing-two.example/", "url"),
+                ],
+                "legacy",
+            )
+
+            attempted = initial_incremental_nuclei_urls(
+                bus, "https://initial.example/"
+            )
+
+        self.assertEqual(
+            attempted,
+            ["https://existing-one.example/", "https://existing-two.example/"],
+        )
+
+    def test_incremental_nuclei_command_uses_target_file_and_distinct_output(
+        self,
+    ) -> None:
+        command = build_incremental_nuclei_command(
+            Path("nuclei.exe"), Path("targets.txt"), Path("result.txt")
+        )
+
+        self.assertEqual(
+            command,
+            [
+                "nuclei.exe",
+                "-l",
+                "targets.txt",
+                "-silent",
+                "-o",
+                "result.txt",
+            ],
+        )
 
     def test_agent_batch_health_reports_stall_without_killing_process(self) -> None:
         with TemporaryDirectory() as temporary:

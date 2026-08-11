@@ -421,7 +421,7 @@ class AISettingsDialog(tk.Toplevel):
         tuning.grid(row=3, column=0, columnspan=2, sticky="ew")
         tuning.columnconfigure(1, weight=1)
         self._spin_field(
-            tuning, 0, "资产稳定等待（秒）", self.settle_seconds_var, 1, 600
+            tuning, 0, "获准资产无新增等待（秒）", self.settle_seconds_var, 1, 600
         )
         self._spin_field(
             tuning, 1, "单项目最大 AI 执行次数", self.max_batches_var, 1, 100
@@ -490,11 +490,11 @@ class AISettingsDialog(tk.Toplevel):
             wraplength=680,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(8, 0))
         workload = ttk.LabelFrame(
-            tab, text="\u5927\u6279\u91cf Agent \u51c6\u5165\uff08\u8fd0\u884c\u4e2d\u4e34\u65f6\u51b3\u7b56\uff09", padding=12
+            tab, text="下一批 AI 执行确认（待处理资产较多时）", padding=12
         )
         workload.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
         workload.columnconfigure(1, weight=1)
-        ttk.Label(workload, text="\u5927\u6279\u91cf\u9ed8\u8ba4\u5904\u7406").grid(
+        ttk.Label(workload, text="超过阈值时默认处理").grid(
             row=0, column=0, sticky="w", pady=4
         )
         ttk.Combobox(
@@ -504,13 +504,13 @@ class AISettingsDialog(tk.Toplevel):
             state="readonly",
         ).grid(row=0, column=1, sticky="ew", padx=(16, 0), pady=4)
         self._spin_field(
-            workload, 1, "Agent \u5f39\u7a97\u5012\u8ba1\u65f6\uff08\u79d2\uff09", self.workload_countdown_var, 3, 3600
+            workload, 1, "AI 执行确认倒计时（秒）", self.workload_countdown_var, 3, 3600
         )
         self._spin_field(
-            workload, 2, "\u89e6\u53d1\u9608\u503c\uff08\u8d44\u4ea7\u6761\u6570\uff09", self.workload_agent_threshold_var, 1, 100000
+            workload, 2, "触发确认的待处理资产数", self.workload_agent_threshold_var, 1, 100000
         )
         ttk.Checkbutton(
-            workload, text="\u5927\u6279\u91cf Agent \u65f6\u663e\u793a\u9192\u76ee\u5f39\u7a97",
+            workload, text="待处理资产超过阈值时显示确认弹窗",
             variable=self.workload_popup_enabled_var,
         ).grid(row=3, column=0, columnspan=2, sticky="w", pady=3)
         ttk.Checkbutton(
@@ -519,7 +519,7 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=4, column=0, columnspan=2, sticky="w", pady=3)
         ttk.Label(
             workload,
-            text="\u8be5\u5f39\u7a97\u53ea\u5ef6\u540e Agent\uff0c\u4e0d\u6682\u505c\u8d44\u4ea7\u53d1\u73b0\u3001fscan\u3001Tscan\u3001dirsearch \u6216\u62a5\u544a\u6574\u7406\u3002",
+            text="该确认只控制是否启动下一批 Codex/Claude；资产发现、扫描器和报告整理继续运行。",
             wraplength=680,
         ).grid(row=5, column=0, columnspan=2, sticky="w", pady=(6, 0))
 

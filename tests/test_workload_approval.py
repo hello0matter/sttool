@@ -12,6 +12,7 @@ from sttool.workload_approval import (
     create_request,
     decide_request,
     read_request,
+    read_history,
     resolve_due_request,
     update_pending_request_policy,
     workload_counts,
@@ -108,6 +109,24 @@ class WorkloadApprovalTests(unittest.TestCase):
             )
             rejected = decide_request(run_dir, "reject")
             self.assertEqual(rejected["decision"], "reject")
+
+    def test_decisions_are_preserved_in_management_history(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = self._run_dir(temporary)
+            create_request(
+                run_dir,
+                project_name="demo",
+                run_id="run-1",
+                generation_from=1,
+                generation_to=2,
+                counts={"ips": 80, "domains": 0, "endpoints": 0, "urls": 0},
+                mode="countdown_accept",
+                countdown_seconds=20,
+            )
+
+            decided = decide_request(run_dir, "reject", "project_access_manager")
+
+            self.assertEqual(read_history(run_dir), [decided])
 
     def test_due_request_uses_default_accept_or_reject(self) -> None:
         with TemporaryDirectory() as temporary:

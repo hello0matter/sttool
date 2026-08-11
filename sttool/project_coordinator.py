@@ -31,6 +31,11 @@ from .asset_bus import (
     target_assets,
 )
 from .models import ProcessRecord
+from .incremental_nuclei import (
+    initial_incremental_nuclei_urls,
+    incremental_nuclei_candidates,
+    launch_incremental_nuclei,
+)
 from .pentest_report import write_pentest_report
 from .vulnerability_intel import generate_vulnerability_intel
 from .workload_approval import (
@@ -1063,7 +1068,7 @@ def agent_workload_gate(
         )
         append_activity(
             run_dir,
-            f"\u5927\u6279\u91cf Agent \u51c6\u5165\u63d0\u9192\uff1a\u672c\u6279\u9884\u8ba1\u5904\u7406 {total} \u6761\u8d44\u4ea7\uff0c\u5df2\u521b\u5efa\u786e\u8ba4\u8bf7\u6c42\u3002",
+            f"下一批 AI 执行确认：预计处理 {total} 条新增资产，已创建确认请求。",
         )
     request = resolve_due_request(run_dir)
     state["workload_approval"] = request
@@ -1159,6 +1164,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--vulnx", type=Path, default=None)
     parser.add_argument("--find-gh-poc", type=Path, default=None)
     parser.add_argument("--fscan-exe", type=Path, default=None)
+    parser.add_argument("--nuclei-exe", type=Path, default=None)
     parser.add_argument("--fscan-port-threads", type=int, default=600)
     parser.add_argument("--allow-cidr-expansion", type=parse_bool, default=False)
     parser.add_argument(
@@ -1198,6 +1204,7 @@ def main() -> int:
     tscan_database = run_dir / "tool_data" / "tscan" / "app" / "config" / "config.db"
     hot_settings_path = run_dir / "tool_data" / "coordinator" / "hot_settings.json"
     owner_path = state_path.parent / "owner.json"
+    existing_coordinator_state = state_path.is_file()
     owner = claim_coordinator_owner(owner_path, run_dir)
     if owner is None:
         append_activity(run_dir, "检测到同一运行实例已有自动调度器，本次重复启动已退出。")
@@ -1229,6 +1236,30 @@ def main() -> int:
     state.setdefault("incremental_fscan_attempted_ips", initial_fscan_ips)
     state.setdefault("incremental_fscan_batches", [])
     state.setdefault("active_incremental_fscan", {})
+    if "incremental_nuclei_attempted_urls" not in state:
+        existing_urls = list(bus.bundle().get("urls", []))
+        initial_urls = (
+            initial_incremental_nuclei_urls(bus, args.target)
+            if existing_coordinator_state
+            else [
+                value
+                for value, kind in target_assets(args.target)
+                if kind == "url"
+            ]
+        )
+        state["incremental_nuclei_attempted_urls"] = initial_urls
+        state["incremental_nuclei_migration_skipped_urls"] = max(
+            len(existing_urls) - len(
+                [
+                    value
+                    for value, kind in target_assets(args.target)
+                    if kind == "url"
+                ]
+            ),
+            0,
+        )
+    state.setdefault("incremental_nuclei_batches", [])
+    state.setdefault("active_incremental_nuclei", {})
     existing_batches = state.get("agent_batches")
     recovered_orphans = recover_completed_batch_orphans(
         existing_batches if isinstance(existing_batches, list) else [], run_dir
@@ -1260,6 +1291,7 @@ def main() -> int:
             "vulnx": str(args.vulnx or ""),
             "find_gh_poc": str(args.find_gh_poc or ""),
             "incremental_fscan": bool(args.fscan_exe),
+            "incremental_nuclei": bool(args.nuclei_exe),
             "fscan_port_threads": max(args.fscan_port_threads, 1),
             "allow_cidr_expansion": args.allow_cidr_expansion,
             "new_asset_approval_mode": args.new_asset_approval_mode,
@@ -1286,7 +1318,7 @@ def main() -> int:
         launch_policy = "自动 AI 执行已关闭，只持续汇总资产与风险摘要"
     append_activity(
         run_dir,
-        f"自动调度器已启动：{launch_policy}；资产稳定等待 {args.settle_seconds:g} 秒，最多 {args.max_agent_batches} 次 AI 执行。",
+        f"自动调度器已启动：{launch_policy}；获准资产连续 {args.settle_seconds:g} 秒无新增后进入 AI 调度，最多 {args.max_agent_batches} 次 AI 执行。",
     )
 
     sources = {
@@ -1313,6 +1345,7 @@ def main() -> int:
                     "vulnx": str(args.vulnx or ""),
                     "find_gh_poc": str(args.find_gh_poc or ""),
                     "incremental_fscan": bool(args.fscan_exe),
+                    "incremental_nuclei": bool(args.nuclei_exe),
                 }
                 state["hot_settings_applied_at"] = now_text()
                 append_activity(
@@ -1589,6 +1622,118 @@ def main() -> int:
                     f"后台启动 fscan 新增 IP 补探测第 {batch_number} 轮，"
                     f"本轮 {len(candidates)} 个 IP；仅识别端口和服务，"
                     "不执行 POC 或口令检测。",
+                )
+
+        nuclei_batches = state.get("incremental_nuclei_batches")
+        if not isinstance(nuclei_batches, list):
+            nuclei_batches = []
+            state["incremental_nuclei_batches"] = nuclei_batches
+        active_nuclei = state.get("active_incremental_nuclei")
+        if not isinstance(active_nuclei, dict):
+            active_nuclei = {}
+            state["active_incremental_nuclei"] = active_nuclei
+        nuclei_pid = int(active_nuclei.get("pid") or 0)
+        nuclei_token = int(active_nuclei.get("creation_token") or 0)
+        nuclei_alive = bool(
+            nuclei_pid
+            and tracked_process_alive(nuclei_pid, nuclei_token, run_dir)
+        )
+        if nuclei_pid and not nuclei_alive:
+            output_file = Path(str(active_nuclei.get("output_file") or ""))
+            active_nuclei["status"] = (
+                "completed" if output_file.is_file() else "failed"
+            )
+            active_nuclei["completed_at"] = now_text()
+            for batch in reversed(nuclei_batches):
+                if not isinstance(batch, dict):
+                    continue
+                if int(batch.get("batch") or 0) != int(
+                    active_nuclei.get("batch") or 0
+                ):
+                    continue
+                batch.update(active_nuclei)
+                break
+            if active_nuclei["status"] == "failed":
+                nuclei_attempted = state.get("incremental_nuclei_attempted_urls")
+                if not isinstance(nuclei_attempted, list):
+                    nuclei_attempted = []
+                failed_targets = {
+                    str(value) for value in active_nuclei.get("targets") or []
+                }
+                state["incremental_nuclei_attempted_urls"] = [
+                    value
+                    for value in nuclei_attempted
+                    if str(value) not in failed_targets
+                ]
+                state["incremental_nuclei_retry_not_before"] = time.time() + 60
+            append_activity(
+                run_dir,
+                f"nuclei 新增 URL 扫描第 {active_nuclei.get('batch')} 轮已结束："
+                f"处理 {len(active_nuclei.get('targets') or [])} 个 URL，"
+                f"结果位于 {output_file}。",
+            )
+            state["active_incremental_nuclei"] = {}
+            active_nuclei = {}
+            nuclei_pid = 0
+
+        nuclei_attempted = state.get("incremental_nuclei_attempted_urls")
+        if not isinstance(nuclei_attempted, list):
+            nuclei_attempted = []
+            state["incremental_nuclei_attempted_urls"] = nuclei_attempted
+        nuclei_candidates = incremental_nuclei_candidates(bus, nuclei_attempted)
+        state["incremental_nuclei_pending_urls"] = nuclei_candidates
+        nuclei_retry_not_before = float(
+            state.get("incremental_nuclei_retry_not_before") or 0
+        )
+        initial_nuclei_ready = (
+            "nuclei" not in tools
+            or not component_process_alive(run_dir, "nuclei")
+        )
+        if (
+            not nuclei_pid
+            and nuclei_candidates
+            and initial_nuclei_ready
+            and time.time() >= nuclei_retry_not_before
+            and "nuclei" in tools
+            and args.nuclei_exe is not None
+            and args.nuclei_exe.is_file()
+        ):
+            batch_number = len(nuclei_batches) + 1
+            try:
+                batch = launch_incremental_nuclei(
+                    executable=args.nuclei_exe,
+                    run_dir=run_dir,
+                    batch_number=batch_number,
+                    targets=nuclei_candidates,
+                )
+            except OSError as exc:
+                state["incremental_nuclei_error"] = (
+                    f"{type(exc).__name__}: {exc}"
+                )
+                state["incremental_nuclei_retry_not_before"] = time.time() + 60
+                append_activity(
+                    run_dir,
+                    "nuclei 新增 URL 扫描启动失败："
+                    f"{type(exc).__name__}: {exc}；60 秒后重试。",
+                )
+            else:
+                nuclei_batches.append(batch)
+                state["active_incremental_nuclei"] = batch
+                nuclei_attempted.extend(
+                    value
+                    for value in nuclei_candidates
+                    if value not in nuclei_attempted
+                )
+                state["incremental_nuclei_pending_urls"] = []
+                state.pop("incremental_nuclei_error", None)
+                state.pop("incremental_nuclei_retry_not_before", None)
+                nuclei_pid = int(batch["pid"])
+                atomic_json_write(state_path, state)
+                append_activity(
+                    run_dir,
+                    f"后台启动 nuclei 新增 URL 扫描第 {batch_number} 轮，"
+                    f"本轮 {len(nuclei_candidates)} 个获准 URL；"
+                    "每轮独立保存结果，不覆盖初始扫描。",
                 )
         if changed:
             state["asset_generation"] = bus.generation
@@ -1973,7 +2118,7 @@ def main() -> int:
         )
         if workload_gate_status == "pending":
             stage = "awaiting_workload_approval"
-            stage_detail = "\u7b49\u5f85\u7528\u6237\u786e\u8ba4\u5927\u6279\u91cf Agent \u51c6\u5165\uff1b\u540e\u53f0\u8d44\u4ea7\u53d1\u73b0\u4e0e\u5de5\u5177\u4efb\u52a1\u7ee7\u7eed\u8fd0\u884c\u3002"
+            stage_detail = "等待用户确认是否启动下一批 AI 执行；后台资产发现与工具任务继续运行。"
         state.update(
             status="running",
             stage=stage,

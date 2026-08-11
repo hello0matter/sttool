@@ -29,19 +29,19 @@ python .\main.py --list-tools
 
 - AssetCommander：默认启动，工作目录隔离到本次运行目录；通过源码状态机自动执行常用资产流程，不依赖屏幕坐标点击。
 - semantic-recursive-dirscan：默认启动其工程 GUI，自动接收主目标、AssetCommander 域名/已确认 URL 和 fscan Web 服务，并使用自身工程状态继续未完成扫描。
-- fscan、nuclei：一次性外部扫描进程，项目创建时默认勾选；任务结束后由运行实例保留退出状态、日志和成果入口。
+- fscan、nuclei：项目创建时先执行一次初始扫描；随后自动调度器分别对新获准的 IP 和 URL 做去重增量补扫，每轮单独保留目标、日志和结果。
 - vulnx：主漏洞情报引擎，项目创建时默认勾选；它是协调器管理的短任务阶段，不伪装为常驻 GUI/PID。按 CVE、产品和版本聚合 CVSS、EPSS、KEV、PoC 链接和 Nuclei 模板元数据，不执行 PoC，可在工具设置中编辑可执行文件路径。
 - trickest/find-gh-poc：项目创建时默认勾选，是已有 CVE 的 GitHub 候选仓库补充，也是协调器管理的短任务阶段。它使用 GitHub GraphQL API，实际查询需要 GitHub Token；未配置时安全跳过，不会导致项目失败。Token 由当前 Windows 账户的 DPAPI 加密保存，只通过子进程环境传递，不进入项目文件、日志、命令行或启动脚本。结果仅作为不可信元数据写入 `results/find_gh_poc.json`，不会自动 clone 或执行。
 - TscanPlus：每个运行实例使用独立 exe 名、WebView2 目录和私有 `config.db`，启动时清理历史项目目标、结果和 AWVS 报告。自动调度信息收集、资产探测、Web 指纹、域名/目录枚举、JsFinder、Swagger、WAF、POC、未授权、密码检测、DumpAll、AWVS 和 Nessus；AWVS/Nessus 只在连接测试明确成功后点击开始。
 - Codexx CLI / Codex CLI / Claude CLI：三选一且必选；调度器在资产稳定后使用所选本地 Agent 启动首次全量批次，之后只对新代次资产启动增量批次。Agent 在命名 Windows Terminal/PowerShell 标签页中运行，多个项目和多个批次可通过 Ctrl+Tab 切换。
 
-所有内置工具在新建项目时默认勾选。运行类型分为三类：AssetCommander、AI 路径发现、TscanPlus 和项目协调器属于常驻/监听组件；fscan、nuclei 属于一次性外部进程；vulnx、find-gh-poc 属于协调器阶段短任务。运行实例会同时显示真实进程和协调器虚拟状态，但不会给短任务伪造 PID。
+所有内置工具在新建项目时默认勾选。运行类型分为三类：AssetCommander、AI 路径发现、TscanPlus 和项目协调器属于常驻/监听组件；fscan、nuclei 的初始扫描属于一次性外部进程，后续增量批次由协调器串行启动；vulnx、find-gh-poc 属于协调器阶段短任务。运行实例会同时显示真实进程和协调器虚拟状态，但不会给短任务伪造 PID。
 
 Agent 初始提示词采用证据驱动顺序：先读取项目状态，使用 Microsoft Playwright 查看界面、DOM、响应和网络请求，再按真实产品/版本证据检索厂商公告与 CVE；经源码审查的验证代码只能保存到本实例 `evidence/poc_review/<CVE>/`，执行时采用单目标、低并发、无持久化的最小影响验证，然后再联动固定扫描工具。手动执行 `codex --yolo` 时可复用 `docs/manual-codex-pentest-prompt.md`。
 
 右上角的 **全局设置** 分成五块：**Codex / Codexx**、**Claude Agent**、**工具协作 AI**、**漏洞情报** 和 **调度方式**。Codex/Codexx 与 Claude 分别维护模型、推理强度和可选 Base URL，二者互不覆盖；Base URL 留空时继续使用对应 CLI 自身配置。项目脚本不会保存 Agent API Key，凭据仍由各 CLI 的登录或本机环境负责。仅在显式填写时，Codex/Codexx 使用 `OPENAI_BASE_URL`，Claude 使用 `ANTHROPIC_BASE_URL`。
 
-保存全局设置后，工作流与调度配置会同步到全部现有工程，并通过每个实例的 `tool_data/coordinator/hot_settings.json` 热更新仍在运行的协调器。新增资产和大批量 Agent 弹窗的处理方式、倒计时、弹窗开关，以及资产稳定等待、轮询、批次数、自动 Agent、停滞提醒、摘要开关、增量 fscan 线程和 C 段扩展策略会立即用于后续调度；尚未决策弹窗的截止时间会按新值重新计算。升级前已经运行的旧协调器会进行一次内部滚动更新，其他扫描工具和当前 Agent 保持运行。已经启动的外部扫描进程或 AI 会话不会被强制重启，其固定启动参数在后续增量任务、新实例或恢复时生效。选择历史项目不会反向覆盖全局设置。
+保存全局设置后，工作流与调度配置会同步到全部现有工程，并通过每个实例的 `tool_data/coordinator/hot_settings.json` 热更新仍在运行的协调器。新增资产和下一批 AI 执行确认弹窗的处理方式、倒计时、弹窗开关，以及获准资产无新增等待、轮询、批次数、自动 Agent、停滞提醒、摘要开关、增量 fscan 线程和 C 段扩展策略会立即用于后续调度；尚未决策弹窗的截止时间会按新值重新计算。升级前已经运行的旧协调器会进行一次内部滚动更新，其他扫描工具和当前 Agent 保持运行。已经启动的外部扫描进程或 AI 会话不会被强制重启，其固定启动参数在后续增量任务、新实例或恢复时生效。选择历史项目不会反向覆盖全局设置。
 
 工具协作 AI 用于工具间信息汇总、传递、去重和结果优化，可维护 OpenAI 兼容 Base URL、默认模型和 API Key。Base URL 默认是 `https://api.1314mc.net/v1`，普通设置保存在本机 `launcher_settings.json`；工具协作 API Key 和 GitHub Token 使用当前 Windows 账户的 DPAPI 加密后统一保存在 `launcher_secrets.dat`，不会写入项目配置、运行状态、启动脚本或日志。内置 AssetCommander 和 AI 路径发现默认使用工具协作 AI；自定义工具只有显式勾选“使用工具协作 AI”才会收到配置。
 
@@ -87,10 +87,11 @@ projects/<稳定项目名>/runs/<时间戳-编号>/
 
 “运行实例”表中的每一行都是一次历史运行记录，程序异常结束后记录和产物仍会保留。选中一行后可以使用：
 
-- **恢复实例**：复用原运行目录，保留已有配置、进度和结果，只重启 AssetCommander、路径发现器、TscanPlus 等常驻工具以及 Agent。Codexx 使用 `codexx --yolo resume --last` 恢复当前目录最近一次会话，不会重复提交初始提示词；也不会自动重跑一次性的 fscan/nuclei。
+- **恢复实例**：复用原运行目录，保留已有配置、进度和结果，只重启 AssetCommander、路径发现器、TscanPlus 等常驻工具以及 Agent。Codexx 使用 `codexx --yolo resume --last` 恢复当前目录最近一次会话，不会重复提交初始提示词；也不会重跑 fscan/nuclei 初始扫描，但恢复后的新获准资产仍会进入增量批次。
 - **新实例重跑**：读取该历史实例的项目配置，在重新确认授权后创建一个全新的运行目录。
 - **暂停工程**：结束该工程所有运行中实例的进程并保留运行目录和断点，之后可在原目录恢复。Agent 会按各运行目录识别其 PowerShell 根进程并结束 Codex/Codexx/Node 子进程，不会按进程名全局终止其他项目或用户手工启动的会话。
 - **删除工程**：先暂停该工程的全部运行实例，再永久删除工程配置、运行状态、扫描结果、证据、日志、工具工作区及整个本地工程目录。删除前需要两次确认，删除后无法恢复。
+- **准入与任务**：集中查看已允许、待确认、排除记录和已阻止资产；可人工添加、修改、允许、恢复或排除后续处理。被排除资产写入阻止清单，再次被工具发现也不会自动加入。窗口同时显示下一批 AI 执行确认历史和真实 AI 批次，可处理尚未决定的确认请求。排除只能阻止后续任务，不能撤销已经发送的请求或删除历史证据。
 
 “恢复实例”和“新实例重跑”都要求本次重新勾选授权确认，避免历史授权被静默沿用。
 
@@ -122,6 +123,8 @@ STTool 不读取或覆盖 Codexx、Codex、Claude CLI 的登录凭据；仅在�
 
 新增主机确认弹窗不会暂停现有扫描和报告整理；待确认资产不会进入 fscan、Tscan、dirsearch 或 Agent。即使主界面关闭，协调器仍会在倒计时结束后按当前全局热配置的默认动作处理，避免流程永久卡住。
 
+各控制项按顺序生效，并非重复开关：授权范围先决定资产是否允许测试；新资产准入策略决定新主机是否进入后续队列；“获准资产无新增等待”从最后一次允许新资产开始计时，用于合并零散发现；待处理资产达到阈值时，再确认是否启动下一批 Codex/Claude；最后仍受最大 AI 执行次数限制。弹窗倒计时与无新增等待不会并行争抢同一个决定：资产获准后才开始后者。资产确认弹窗到期后由界面提交选择，协调器额外保留短暂宽限作为兜底；AI 执行确认到期由协调器统一决定，避免重复启动。
+
 - `tool_data/asset_bus/assets.json` 是单写者资产总线，记录 IP、域名、端点、URL、来源和首次出现代次。
 - AssetCommander、fscan、路径发现和 TscanPlus 的结构化结果会去重后进入总线；Tscan 枚举的新 IP/域名会回流 AssetCommander 资产池并使用历史任务键做增量对撞。
 - 首个 Agent 批次必须等待 AssetCommander 完成、fscan 结束且资产连续 20 秒无新增。Agent 提示词必须读取 fscan 全量输出，对每个 Web URL/端口逐个检查。
@@ -133,7 +136,7 @@ STTool 不读取或覆盖 Codexx、Codex、Claude CLI 的登录凭据；仅在�
 
 ## 项目成果入口
 
-“运行实例”页面提供独立的 **项目成果** 按钮，与“项目日志”分开。成果窗口会显示阶段/最终状态、项目摘要预览和所有可用成果文件，可双击打开 `risk_summary.md`、`vulnerability_intel.md/json`、`findings.md`、`cve_triage.md`、vulnx/find-gh-poc/fscan/nuclei 结果及 Tscan 状态。大型资产清单在预览中自动折叠，完整内容仍可一键打开。即使当前没有漏洞结果，也会显示可读的运行中/暂无线索说明，不再留空白页。
+“运行实例”页面提供独立的 **项目成果** 按钮，与“项目日志”分开。成果窗口只展示面向人的报告、问题、资产和扫描成果，隐藏内部状态与 Agent 日志；单击上方成果即可在下方查看可读预览，其中的 URL 可直接用默认浏览器打开。fscan、nuclei 和目录扫描会按目标/批次分别显示，Tscan 数据库会转换为可读线索。大型资产清单在预览中自动折叠，原始文件仍可一键打开。
 
 
 ### Human-readable per-tool logs

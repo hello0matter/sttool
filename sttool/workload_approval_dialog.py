@@ -25,7 +25,7 @@ class WorkloadApprovalDialog(tk.Toplevel):
         self.request = request
         self.on_close = on_close
         self._closed = False
-        self.title("\u9700\u8981\u786e\u8ba4\uff1a\u4e0b\u4e00\u6279 Agent \u5c06\u6d88\u8017\u8f83\u591a\u65f6\u95f4")
+        self.title("需要确认：下一批 AI 执行待处理资产较多")
         self.geometry("760x430")
         self.minsize(680, 380)
         self.configure(bg="#111827")
@@ -37,7 +37,7 @@ class WorkloadApprovalDialog(tk.Toplevel):
         banner.pack(fill="x")
         tk.Label(
             banner,
-            text="\u26a0 \u4e0b\u4e00\u6279 Agent \u5904\u7406\u91cf\u8f83\u5927\uff0c\u53ef\u80fd\u660e\u663e\u589e\u52a0\u8017\u65f6\u548c API \u6d88\u8017",
+            text="下一批 Codex/Claude 将处理较多新增资产，可能增加耗时和 API 消耗",
             bg="#9f1239",
             fg="white",
             font=("Microsoft YaHei UI", 14, "bold"),
@@ -67,16 +67,16 @@ class WorkloadApprovalDialog(tk.Toplevel):
         ttk.Label(
             body,
             text="\n".join(lines)
-            + "\n\n\u540e\u53f0\u8d44\u4ea7\u53d1\u73b0\u3001fscan\u3001Tscan\u3001dirsearch \u548c\u62a5\u544a\u6574\u7406\u4e0d\u4f1a\u56e0\u672c\u7a97\u53e3\u6682\u505c\u3002\n\u672c\u7a97\u53e3\u53ea\u51b3\u5b9a\u662f\u5426\u73b0\u5728\u542f\u52a8\u8fd9\u4e00\u6279 Agent\u3002",
+            + "\n\n后台资产发现、fscan、Tscan、dirsearch 和报告整理不会因本窗口暂停。\n本窗口只决定是否启动下一批 Codex/Claude AI 执行。",
             justify="left",
             wraplength=700,
         ).pack(anchor="w", fill="x")
 
         actions = ttk.Frame(self, padding=(18, 0, 18, 18))
         actions.pack(fill="x")
-        ttk.Button(actions, text="\u8df3\u8fc7\u672c\u6279 Agent", command=lambda: self._submit("reject")).pack(side="left")
+        ttk.Button(actions, text="跳过本次 AI 执行", command=lambda: self._submit("reject")).pack(side="left")
         ttk.Button(actions, text="\u9690\u85cf\u63d0\u9192\uff08\u6309\u9ed8\u8ba4\u7b56\u7565\uff09", command=self._hide_with_default).pack(side="right")
-        ttk.Button(actions, text="\u7acb\u5373\u542f\u52a8 Agent", command=lambda: self._submit("accept")).pack(side="right", padx=(0, 8))
+        ttk.Button(actions, text="立即启动本次 AI 执行", command=lambda: self._submit("accept")).pack(side="right", padx=(0, 8))
         self.after(100, self._make_noticeable)
         self.after(250, self._tick_countdown)
 
@@ -103,10 +103,10 @@ class WorkloadApprovalDialog(tk.Toplevel):
             return
         remaining = self._remaining()
         if remaining is None:
-            self.countdown_label.configure(text="\u7b49\u5f85\u4eba\u5de5\u786e\u8ba4\uff0c\u4e0d\u4f1a\u81ea\u52a8\u542f\u52a8\u3002")
+            self.countdown_label.configure(text="等待人工确认，不会自动启动下一批 AI 执行。")
         else:
             default_text = "\u542f\u52a8" if self.request.get("default_action") == "accept" else "\u8df3\u8fc7"
-            self.countdown_label.configure(text=f"{remaining} \u79d2\u540e\u6309\u9ed8\u8ba4\u7b56\u7565\uff1a{default_text}\u672c\u6279 Agent\u3002")
+            self.countdown_label.configure(text=f"{remaining} 秒后按默认策略：{default_text}本次 AI 执行。")
             if remaining <= 0:
                 self._close_only()
                 return

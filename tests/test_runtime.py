@@ -1707,6 +1707,10 @@ class RuntimeTests(unittest.TestCase):
                 self.assertIn(
                     str((root / "fscan" / "fscan.exe").resolve()), coordinator
                 )
+                self.assertIn("--nuclei-exe", coordinator)
+                self.assertIn(
+                    str((root / "nuclei" / "nuclei.exe").resolve()), coordinator
+                )
                 self.assertIn("--fscan-port-threads", coordinator)
                 self.assertEqual(
                     coordinator[

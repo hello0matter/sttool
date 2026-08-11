@@ -377,6 +377,7 @@ class AssetBus:
                 "pending": [],
                 "rejected": [],
                 "decision_history": [],
+                "blocked_assets": [],
             }
         self.last_ingest_stats = {"added": 0, "pending": 0, "rejected": 0}
         self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}
@@ -534,11 +535,16 @@ class AssetBus:
             (str(item.get("type")), str(item.get("value")), str(item.get("source"))): item
             for item in rejected_log
         }
+        blocked_keys = {
+            (str(item.get("type")), str(item.get("value")))
+            for item in self._records(self.value, "blocked_assets")
+        }
         known_hosts = {
             _host(str(item.get("value") or "")) for item in records
         }
         known_hosts.discard("")
         accepted: list[tuple[str, str]] = []
+        accepted_reasons: dict[tuple[str, str], str] = {}
         queued = 0
         rejected = 0
         timestamp = now_text()
@@ -548,6 +554,21 @@ class AssetBus:
                 continue
             value, kind = normalized
             key = (kind, value)
+            if key in blocked_keys:
+                rejected_key = (kind, value, source)
+                if rejected_key not in rejected_by_key:
+                    record = {
+                        "value": value,
+                        "type": kind,
+                        "source": source,
+                        "seen_at": timestamp,
+                        "scope_status": "blocked_by_user",
+                        "reason": "user_blocked_asset",
+                    }
+                    rejected_log.append(record)
+                    rejected_by_key[rejected_key] = record
+                    rejected += 1
+                continue
             existing = by_key.get(key)
             if existing is not None:
                 self._update_sources(existing, source, timestamp)
@@ -576,6 +597,7 @@ class AssetBus:
 
             if decision == "accept":
                 accepted.append(normalized)
+                accepted_reasons[key] = reason
                 if host:
                     known_hosts.add(host)
                 continue
@@ -628,6 +650,7 @@ class AssetBus:
                     "first_generation": next_generation,
                     "sources": [source],
                     "scope_status": "allowed",
+                    "reason": accepted_reasons.get(key, "allowed"),
                 }
                 records.append(record)
                 by_key[key] = record
@@ -651,6 +674,149 @@ class AssetBus:
             "rejected": rejected,
         }
         return len(new_keys)
+
+    def add_manual_asset(self, raw_value: str, asset_type: str = "") -> tuple[str, str]:
+        normalized = normalize_asset(raw_value, asset_type)
+        if normalized is None:
+            raise ValueError("资产格式无效，请填写 URL、域名、IP 或 IP:端口")
+        value, kind = normalized
+        if self.scope.strip() != "*" and not asset_allowed(value, self.scope, self.target):
+            raise ValueError("该资产不在当前明确授权范围内")
+        self._reload()
+        records = self._records(self.value, "assets")
+        key = (kind, value)
+        if any(
+            (str(item.get("type")), str(item.get("value"))) == key
+            for item in records
+        ):
+            return normalized
+        self.value["blocked_assets"] = [
+            item
+            for item in self._records(self.value, "blocked_assets")
+            if (str(item.get("type")), str(item.get("value"))) != key
+        ]
+        self.value["pending"] = [
+            item
+            for item in self._records(self.value, "pending")
+            if (str(item.get("type")), str(item.get("value"))) != key
+        ]
+        timestamp = now_text()
+        generation = self.generation + 1
+        records.append(
+            {
+                "value": value,
+                "type": kind,
+                "first_seen_at": timestamp,
+                "last_seen_at": timestamp,
+                "first_generation": generation,
+                "sources": ["user_manual"],
+                "scope_status": "allowed_by_user",
+            }
+        )
+        history = self._records(self.value, "decision_history")
+        history.append(
+            {
+                "value": value,
+                "type": kind,
+                "action": "manual_add",
+                "decision_source": "project_access_manager",
+                "decided_at": timestamp,
+            }
+        )
+        self.value.update(
+            assets=records,
+            generation=generation,
+            last_new_asset_at=timestamp,
+            updated_at=timestamp,
+            decision_history=history[-1000:],
+        )
+        atomic_json_write(self.path, self.value)
+        return normalized
+
+    def exclude_asset(self, raw_value: str, asset_type: str = "") -> bool:
+        normalized = normalize_asset(raw_value, asset_type)
+        if normalized is None:
+            raise ValueError("资产格式无效")
+        value, kind = normalized
+        target_keys = set(target_assets(self.target))
+        if normalized in target_keys:
+            raise ValueError("主要目标不能从项目中排除；请新建或删除工程")
+        self._reload()
+        key = (kind, value)
+        records = self._records(self.value, "assets")
+        pending = self._records(self.value, "pending")
+        removed = any(
+            (str(item.get("type")), str(item.get("value"))) == key
+            for item in [*records, *pending]
+        )
+        self.value["assets"] = [
+            item
+            for item in records
+            if (str(item.get("type")), str(item.get("value"))) != key
+        ]
+        self.value["pending"] = [
+            item
+            for item in pending
+            if (str(item.get("type")), str(item.get("value"))) != key
+        ]
+        blocked = self._records(self.value, "blocked_assets")
+        if not any(
+            (str(item.get("type")), str(item.get("value"))) == key
+            for item in blocked
+        ):
+            blocked.append(
+                {
+                    "value": value,
+                    "type": kind,
+                    "blocked_at": now_text(),
+                    "reason": "user_blocked_asset",
+                }
+            )
+        history = self._records(self.value, "decision_history")
+        history.append(
+            {
+                "value": value,
+                "type": kind,
+                "action": "exclude",
+                "decision_source": "project_access_manager",
+                "decided_at": now_text(),
+            }
+        )
+        self.value["blocked_assets"] = blocked[-2000:]
+        self.value["decision_history"] = history[-1000:]
+        self.value["updated_at"] = now_text()
+        atomic_json_write(self.path, self.value)
+        return removed
+
+    def restore_asset(self, raw_value: str, asset_type: str = "") -> tuple[str, str]:
+        normalized = normalize_asset(raw_value, asset_type)
+        if normalized is None:
+            raise ValueError("资产格式无效")
+        self._reload()
+        key = (normalized[1], normalized[0])
+        self.value["blocked_assets"] = [
+            item
+            for item in self._records(self.value, "blocked_assets")
+            if (str(item.get("type")), str(item.get("value"))) != key
+        ]
+        atomic_json_write(self.path, self.value)
+        return self.add_manual_asset(*normalized)
+
+    def replace_manual_asset(
+        self,
+        old_value: str,
+        old_type: str,
+        new_value: str,
+    ) -> tuple[str, str]:
+        normalized = normalize_asset(new_value)
+        if normalized is None:
+            raise ValueError("修改后的资产格式无效")
+        if self.scope.strip() != "*" and not asset_allowed(
+            normalized[0], self.scope, self.target
+        ):
+            raise ValueError("修改后的资产不在当前明确授权范围内")
+        self.exclude_asset(old_value, old_type)
+        return self.add_manual_asset(*normalized)
 
     def apply_decisions(self, decisions: Iterable[dict[str, object]]) -> int:
         self.last_resolution_stats = {"added": 0, "accepted": 0, "rejected": 0}

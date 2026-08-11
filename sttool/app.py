@@ -24,6 +24,7 @@ from .models import (
 )
 from .registry import availability
 from .project_results_dialog import ProjectResultsDialog
+from .project_access_dialog import ProjectAccessDialog
 from .run_log_dialog import RunLogDialog, component_summary_status
 from .runtime import LaunchError, RuntimeManager, project_name_is_url, safe_project_name
 from .secret_store import (
@@ -411,6 +412,9 @@ class LauncherApp(tk.Tk):
             command=self._open_project_results,
         ).pack(side="left", padx=(8, 0))
         ttk.Button(actions, text="项目日志", command=self._open_run_log).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="准入与任务", command=self._open_project_access).pack(
             side="left", padx=(8, 0)
         )
         self.recover_button = ttk.Button(
@@ -1223,6 +1227,13 @@ class LauncherApp(tk.Tk):
             messagebox.showinfo("项目日志", "请先选择一个运行实例")
             return
         RunLogDialog(self, state)
+
+    def _open_project_access(self) -> None:
+        state = self._selected_state()
+        if state is None:
+            messagebox.showinfo("准入与任务", "请先选择一个运行实例")
+            return
+        ProjectAccessDialog(self, state)
 
     def _open_project_dir(self) -> None:
         name = self.project_var.get().strip()

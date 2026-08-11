@@ -22,6 +22,37 @@ from sttool.asset_bus import (
 
 
 class AssetBusTests(unittest.TestCase):
+    def test_asset_manager_excludes_reingest_and_can_restore_asset(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(path, "*", "example.com", approval_mode="automatic")
+            bus.ingest([("example.com", "domain")], "project_target")
+            bus.add_manual_asset("api.example.net")
+
+            removed = bus.exclude_asset("api.example.net", "domain")
+            readded = bus.ingest([("api.example.net", "domain")], "tscan")
+
+            self.assertTrue(removed)
+            self.assertEqual(readded, 0)
+            self.assertNotIn("api.example.net", bus.bundle()["domains"])
+            self.assertEqual(
+                read_json(path)["blocked_assets"][0]["value"], "api.example.net"
+            )
+
+            restored = bus.restore_asset("api.example.net", "domain")
+
+            self.assertEqual(restored, ("api.example.net", "domain"))
+            self.assertIn("api.example.net", bus.bundle()["domains"])
+            self.assertEqual(read_json(path)["blocked_assets"], [])
+
+    def test_asset_manager_rejects_primary_target_exclusion(self) -> None:
+        with TemporaryDirectory() as temporary:
+            bus = AssetBus(Path(temporary) / "assets.json", "*", "example.com")
+            bus.ingest([("example.com", "domain")], "project_target")
+
+            with self.assertRaisesRegex(ValueError, "主要目标"):
+                bus.exclude_asset("example.com", "domain")
+
     def test_hot_policy_update_resets_existing_pending_countdown(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "assets.json"
