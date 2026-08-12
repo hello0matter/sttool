@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import tkinter as tk
+import ipaddress
 from pathlib import Path
 from tkinter import messagebox, simpledialog, ttk
 
-from .asset_bus import AssetBus, read_json
+from .asset_bus import AssetBus, parse_asset_export, read_json
 from .models import RunState
 from .workload_approval import decide_request, read_history, read_request
 
@@ -14,7 +15,28 @@ _ASSET_STATUS = {
     "pending": "待确认",
     "rejected": "排除记录",
     "blocked": "已阻止",
+    "filtered": "范围过滤",
 }
+
+_ASSET_TYPE_LABELS = {
+    "": "全部类型",
+    "ip": "IP",
+    "domain": "域名",
+    "endpoint": "端点",
+    "url": "URL",
+}
+
+_ASSET_STATUS_FILTERS = {
+    "全部状态": "",
+    "已允许": "allowed",
+    "待确认": "pending",
+    "排除记录": "rejected",
+    "已阻止": "blocked",
+    "范围过滤": "filtered",
+}
+
+_ASSET_TYPE_FILTERS = {label: value for value, label in _ASSET_TYPE_LABELS.items()}
+_ASSET_COLUMNS = ("status", "type", "value", "source", "reason", "time")
 
 _TASK_STATUS = {
     "pending": "待确认",
@@ -66,6 +88,37 @@ def asset_row_matches(item: dict[str, object], query: str) -> bool:
     return needle in " ".join(str(value) for value in values).casefold()
 
 
+def asset_row_sort_key(item: dict[str, object], column: str) -> object:
+    if column == "status":
+        return _ASSET_STATUS.get(str(item.get("status") or ""), "").casefold()
+    if column == "type":
+        return _ASSET_TYPE_LABELS.get(
+            str(item.get("type") or ""), str(item.get("type") or "")
+        ).casefold()
+    if column == "value":
+        value = str(item.get("value") or "")
+        try:
+            return (0, int(ipaddress.ip_address(value)))
+        except ValueError:
+            return (1, value.casefold())
+    if column == "source":
+        sources = item.get("sources")
+        value = ", ".join(map(str, sources)) if isinstance(sources, list) else str(
+            item.get("source") or ""
+        )
+        return value.casefold()
+    if column == "reason":
+        return str(item.get("reason") or item.get("scope_status") or "").casefold()
+    return str(
+        item.get("decided_at")
+        or item.get("blocked_at")
+        or item.get("filtered_at")
+        or item.get("first_seen_at")
+        or item.get("seen_at")
+        or ""
+    )
+
+
 class ProjectAccessDialog(tk.Toplevel):
     def __init__(self, parent: tk.Misc, state: RunState) -> None:
         super().__init__(parent)
@@ -75,6 +128,11 @@ class ProjectAccessDialog(tk.Toplevel):
         self.asset_rows: dict[str, dict[str, object]] = {}
         self.all_asset_rows: list[dict[str, object]] = []
         self.asset_search_var = tk.StringVar()
+        self.asset_status_filter_var = tk.StringVar(value="全部状态")
+        self.asset_type_filter_var = tk.StringVar(value="全部类型")
+        self.asset_source_filter_var = tk.StringVar(value="全部来源")
+        self.asset_sort_column = "time"
+        self.asset_sort_reverse = True
         self.task_rows: dict[str, dict[str, object]] = {}
         self.title(f"准入与任务管理 - {state.project_name} / {state.run_id}")
         width = min(1180, self.winfo_screenwidth() - 100)
@@ -94,7 +152,7 @@ class ProjectAccessDialog(tk.Toplevel):
 
     def _build_asset_tab(self) -> None:
         self.asset_tab.columnconfigure(0, weight=1)
-        self.asset_tab.rowconfigure(2, weight=1)
+        self.asset_tab.rowconfigure(3, weight=1)
         actions = ttk.Frame(self.asset_tab)
         actions.grid(row=0, column=0, sticky="ew", pady=(0, 8))
         ttk.Button(actions, text="刷新", command=self._refresh_assets).pack(side="left")
@@ -111,8 +169,36 @@ class ProjectAccessDialog(tk.Toplevel):
             side="left", padx=(8, 0)
         )
 
+        filters = ttk.Frame(self.asset_tab)
+        filters.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        ttk.Label(filters, text="状态").pack(side="left")
+        ttk.Combobox(
+            filters,
+            textvariable=self.asset_status_filter_var,
+            values=tuple(_ASSET_STATUS_FILTERS),
+            state="readonly",
+            width=10,
+        ).pack(side="left", padx=(6, 14))
+        ttk.Label(filters, text="类型").pack(side="left")
+        ttk.Combobox(
+            filters,
+            textvariable=self.asset_type_filter_var,
+            values=tuple(_ASSET_TYPE_FILTERS),
+            state="readonly",
+            width=10,
+        ).pack(side="left", padx=(6, 14))
+        ttk.Label(filters, text="来源").pack(side="left")
+        self.asset_source_filter = ttk.Combobox(
+            filters,
+            textvariable=self.asset_source_filter_var,
+            values=("全部来源",),
+            state="readonly",
+            width=24,
+        )
+        self.asset_source_filter.pack(side="left", padx=(6, 0))
+
         search = ttk.Frame(self.asset_tab)
-        search.grid(row=1, column=0, sticky="ew", pady=(0, 8))
+        search.grid(row=2, column=0, sticky="ew", pady=(0, 8))
         search.columnconfigure(1, weight=1)
         ttk.Label(search, text="搜索").grid(row=0, column=0, padx=(0, 8))
         ttk.Entry(search, textvariable=self.asset_search_var).grid(
@@ -126,9 +212,11 @@ class ProjectAccessDialog(tk.Toplevel):
         )
         self.asset_search_var.trace_add("write", lambda *_args: self._render_asset_rows())
 
-        columns = ("status", "type", "value", "source", "reason", "time")
         self.asset_tree = ttk.Treeview(
-            self.asset_tab, columns=columns, show="headings", selectmode="extended"
+            self.asset_tab,
+            columns=_ASSET_COLUMNS,
+            show="headings",
+            selectmode="extended",
         )
         headings = {
             "status": "状态",
@@ -146,15 +234,25 @@ class ProjectAccessDialog(tk.Toplevel):
             "reason": 155,
             "time": 145,
         }
-        for column in columns:
-            self.asset_tree.heading(column, text=headings[column])
+        for column in _ASSET_COLUMNS:
+            self.asset_tree.heading(
+                column,
+                text=headings[column],
+                command=lambda selected=column: self._sort_assets(selected),
+            )
             self.asset_tree.column(column, width=widths[column], minwidth=50)
-        self.asset_tree.grid(row=2, column=0, sticky="nsew")
+        self.asset_tree.grid(row=3, column=0, sticky="nsew")
         scrollbar = ttk.Scrollbar(
             self.asset_tab, orient="vertical", command=self.asset_tree.yview
         )
-        scrollbar.grid(row=2, column=1, sticky="ns")
+        scrollbar.grid(row=3, column=1, sticky="ns")
         self.asset_tree.configure(yscrollcommand=scrollbar.set)
+        for variable in (
+            self.asset_status_filter_var,
+            self.asset_type_filter_var,
+            self.asset_source_filter_var,
+        ):
+            variable.trace_add("write", lambda *_args: self._render_asset_rows())
 
     def _build_task_tab(self) -> None:
         self.task_tab.columnconfigure(0, weight=1)
@@ -202,7 +300,12 @@ class ProjectAccessDialog(tk.Toplevel):
         self.task_tree.configure(yscrollcommand=scrollbar.set)
 
     def _asset_bus(self) -> AssetBus:
-        return AssetBus(self.asset_path, self.state.scope, self.state.target)
+        return AssetBus(
+            self.asset_path,
+            self.state.scope,
+            self.state.target,
+            processing_scope=self.state.asset_processing_scope,
+        )
 
     def _refresh_all(self) -> None:
         self._refresh_assets()
@@ -225,6 +328,7 @@ class ProjectAccessDialog(tk.Toplevel):
             ("pending", "pending"),
             ("rejected", "rejected"),
             ("blocked", "blocked_assets"),
+            ("filtered", "filtered_assets"),
         ):
             entries = value.get(key)
             if not isinstance(entries, list):
@@ -237,17 +341,62 @@ class ProjectAccessDialog(tk.Toplevel):
                     {},
                 )
                 rows.append({"status": status, **item, "latest_decision": decision})
+        represented = {
+            (str(item.get("type") or ""), str(item.get("value") or ""))
+            for item in rows
+        }
+        export_path = self.run_dir / "results" / "asset_commander_assets.json"
+        for value, kind in parse_asset_export(export_path):
+            if (kind, value) in represented:
+                continue
+            rows.append(
+                {
+                    "status": "filtered",
+                    "type": kind,
+                    "value": value,
+                    "source": "asset_commander",
+                    "reason": "未进入当前处理范围",
+                }
+            )
+            represented.add((kind, value))
         self.all_asset_rows = rows
+        sources = sorted(
+            {
+                source
+                for item in rows
+                for source in self._row_sources(item)
+                if source
+            },
+            key=str.casefold,
+        )
+        self.asset_source_filter.configure(values=("全部来源", *sources))
+        if self.asset_source_filter_var.get() not in {"全部来源", *sources}:
+            self.asset_source_filter_var.set("全部来源")
         self._render_asset_rows()
 
     def _render_asset_rows(self) -> None:
         if not hasattr(self, "asset_tree"):
             return
+        status_filter = _ASSET_STATUS_FILTERS.get(
+            self.asset_status_filter_var.get(), ""
+        )
+        type_filter = _ASSET_TYPE_FILTERS.get(self.asset_type_filter_var.get(), "")
+        source_filter = self.asset_source_filter_var.get()
         rows = [
             item
             for item in self.all_asset_rows
             if asset_row_matches(item, self.asset_search_var.get())
+            and (not status_filter or item.get("status") == status_filter)
+            and (not type_filter or item.get("type") == type_filter)
+            and (
+                source_filter == "全部来源"
+                or source_filter in self._row_sources(item)
+            )
         ]
+        rows.sort(
+            key=lambda item: asset_row_sort_key(item, self.asset_sort_column),
+            reverse=self.asset_sort_reverse,
+        )
         self.asset_rows = {}
         self.asset_tree.delete(*self.asset_tree.get_children())
         for index, item in enumerate(rows):
@@ -283,7 +432,9 @@ class ProjectAccessDialog(tk.Toplevel):
                 iid=identity,
                 values=(
                     _ASSET_STATUS[str(item["status"])],
-                    item.get("type", ""),
+                    _ASSET_TYPE_LABELS.get(
+                        str(item.get("type") or ""), item.get("type", "")
+                    ),
                     item.get("value", ""),
                     source,
                     decision_text
@@ -293,6 +444,22 @@ class ProjectAccessDialog(tk.Toplevel):
                     timestamp.replace("T", " ")[:19],
                 ),
             )
+
+    @staticmethod
+    def _row_sources(item: dict[str, object]) -> list[str]:
+        sources = item.get("sources")
+        if isinstance(sources, list):
+            return [str(value) for value in sources]
+        source = str(item.get("source") or "")
+        return [value.strip() for value in source.split(",") if value.strip()]
+
+    def _sort_assets(self, column: str) -> None:
+        if self.asset_sort_column == column:
+            self.asset_sort_reverse = not self.asset_sort_reverse
+        else:
+            self.asset_sort_column = column
+            self.asset_sort_reverse = False
+        self._render_asset_rows()
 
     def _selected_assets(self) -> list[dict[str, object]]:
         selected = self.asset_tree.selection()

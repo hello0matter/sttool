@@ -1749,7 +1749,9 @@ def configure_awvs_scan(
 ) -> dict[str, object]:
     click_tab(page, "VulCheck")
     click_tab(page, "AwvsScan")
-    normalized = _unique(targets)
+    # AWVS crawls from a site entry. Never submit individual paths or static
+    # resources, including when retrying a batch written by an older version.
+    normalized = awvs_site_targets(targets)
     target_box = visible(page.locator('textarea[placeholder*="请输入目标URL"]'))
     set_native_value(target_box, "\n".join(normalized))
     configured = required_inputs_configured(
@@ -1786,6 +1788,7 @@ def configure_awvs_scan(
                 reason = "已点击启动，但 Tscan 未确认 AWVS 任务进入运行状态"
     return {
         "target_count": len(normalized),
+        "submitted_targets": normalized,
         "configured": configured,
         "connection_tested": connection_tested,
         "connection_feedback": feedback,

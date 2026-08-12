@@ -7,13 +7,14 @@ import sys
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 from sttool.tscan_automation import (
     awvs_site_targets,
     build_stage_plan,
     CDP_START_TIMEOUT_SECONDS,
     classify_connection_feedback,
+    configure_awvs_scan,
     dismiss_blocking_modals,
     dispatched_awvs_targets,
     dispatch_stages_on_page,
@@ -663,6 +664,37 @@ class TscanAutomationTests(unittest.TestCase):
                 "https://10.0.0.2/",
                 "http://10.0.0.2/",
             ],
+        )
+
+    def test_awvs_configuration_normalizes_legacy_path_targets_at_dispatch(self) -> None:
+        page = MagicMock()
+        target_box = MagicMock()
+        with (
+            patch("sttool.tscan_automation.click_tab"),
+            patch("sttool.tscan_automation.visible", return_value=target_box),
+            patch("sttool.tscan_automation.set_native_value") as set_value,
+            patch(
+                "sttool.tscan_automation.required_inputs_configured",
+                return_value=True,
+            ),
+        ):
+            result = configure_awvs_scan(
+                page,
+                [
+                    "http://10.17.200.52/login/../js/sm3.js?v=1",
+                    "http://10.17.200.52/admin/login",
+                    "https://10.17.200.52/static/app.js",
+                ],
+                False,
+            )
+
+        set_value.assert_called_once_with(
+            target_box,
+            "http://10.17.200.52/\nhttps://10.17.200.52/",
+        )
+        self.assertEqual(
+            result["submitted_targets"],
+            ["http://10.17.200.52/", "https://10.17.200.52/"],
         )
 
     def test_incremental_awvs_targets_do_not_repeat_unrelated_primary_site(self) -> None:

@@ -9,7 +9,7 @@ from sttool.asset_approval_dialog import (
     pending_asset_groups,
 )
 from sttool.asset_bus import read_json
-from sttool.project_access_dialog import asset_row_matches
+from sttool.project_access_dialog import asset_row_matches, asset_row_sort_key
 
 
 class AssetApprovalDialogTests(unittest.TestCase):
@@ -26,6 +26,20 @@ class AssetApprovalDialogTests(unittest.TestCase):
         self.assertTrue(asset_row_matches(item, "tscan"))
         self.assertTrue(asset_row_matches(item, "已阻止"))
         self.assertFalse(asset_row_matches(item, "192.0.2.1"))
+
+    def test_asset_value_sort_orders_ip_addresses_numerically(self) -> None:
+        rows = [
+            {"value": "192.0.2.100"},
+            {"value": "192.0.2.8"},
+            {"value": "192.0.2.20"},
+        ]
+
+        rows.sort(key=lambda item: asset_row_sort_key(item, "value"))
+
+        self.assertEqual(
+            [item["value"] for item in rows],
+            ["192.0.2.8", "192.0.2.20", "192.0.2.100"],
+        )
 
     def test_pending_assets_are_grouped_by_host_with_sources_and_defaults(self) -> None:
         groups = pending_asset_groups(
