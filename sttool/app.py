@@ -353,13 +353,20 @@ class LauncherApp(tk.Tk):
 
         action = ttk.Frame(right, style="Panel.TFrame")
         action.grid(row=5, column=0, sticky="ew", pady=(18, 0))
+        for column in range(3):
+            action.columnconfigure(column, weight=1, uniform="launch-actions")
         self.start_button = ttk.Button(
             action, text="启动新实例", style="Accent.TButton", command=self._start
         )
-        self.start_button.pack(side="left")
-        ttk.Button(action, text="打开项目目录", command=self._open_project_dir).pack(
-            side="left", padx=(10, 0)
-        )
+        self.start_button.grid(row=0, column=0, sticky="ew")
+        ttk.Button(
+            action,
+            text="保存项目配置",
+            command=self._save_project,
+        ).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        ttk.Button(
+            action, text="打开项目目录", command=self._open_project_dir
+        ).grid(row=0, column=2, sticky="ew", padx=(10, 0))
         self.launch_status = ttk.Label(
             right, text="每次启动都会创建独立运行目录", style="Muted.TLabel"
         )
@@ -1353,6 +1360,31 @@ class LauncherApp(tk.Tk):
             )
 
         threading.Thread(target=worker, daemon=True).start()
+
+    def _save_project(self) -> None:
+        if self._busy:
+            return
+        request = self._request()
+        try:
+            path = self.manager.save_project(request)
+        except (LaunchError, OSError) as exc:
+            messagebox.showerror("保存项目配置失败", str(exc), parent=self)
+            return
+        self._save_launcher_settings()
+        self.project_box.configure(values=self.manager.list_projects())
+        self.launch_status.configure(
+            text="项目配置已保存；不会启动或改变当前运行中的外部进程",
+            foreground=ACCENT,
+        )
+        messagebox.showinfo(
+            "项目配置已保存",
+            (
+                f"配置已保存到：\n{path}\n\n"
+                "工具勾选和参数将在以后新建实例时使用。"
+                "当前运行实例不会因此自动启动或停止工具。"
+            ),
+            parent=self,
+        )
 
     def _scope_update_finished(
         self,

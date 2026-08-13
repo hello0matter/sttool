@@ -452,6 +452,43 @@ class RuntimeTests(unittest.TestCase):
                 {"name": "demo", "target": "example.com"},
             )
 
+    def test_save_project_persists_tool_selection_without_starting_a_run(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tool = ToolDefinition(
+                tool_id="passhack",
+                name="PassHack",
+                category="test",
+                description="test",
+                executable=sys.executable,
+            )
+            manager = RuntimeManager(root, [tool], st_root=root)
+            project_dir = manager.projects_dir / "demo"
+            project_dir.mkdir(parents=True)
+            atomic_json_write(
+                project_dir / "project.json",
+                {"name": "demo", "last_run_id": "existing-run"},
+            )
+            request = LaunchRequest(
+                project_name="demo",
+                target="https://example.test/",
+                scope="example.test",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=("passhack",),
+                user_prompt="saved only",
+                authorization_confirmed=False,
+                asset_processing_scope="example.test",
+            )
+
+            path = manager.save_project(request)
+            saved = json.loads(path.read_text(encoding="utf-8"))
+
+            self.assertEqual(saved["selected_tools"], ["passhack"])
+            self.assertEqual(saved["last_run_id"], "existing-run")
+            self.assertEqual(saved["asset_processing_scope"], "example.test")
+            self.assertFalse((project_dir / "runs").exists())
+
     def test_delete_project_stops_its_runs_and_removes_only_its_directory(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

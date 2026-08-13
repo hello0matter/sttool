@@ -550,6 +550,89 @@ class RuntimeManager:
                 continue
         raise LaunchError("无法分配新的运行目录")
 
+    def _project_value(
+        self, request: LaunchRequest, *, last_run_id: str = ""
+    ) -> dict[str, object]:
+        return {
+            "schema_version": 7,
+            "name": request.project_name.strip(),
+            "target": request.target.strip(),
+            "scope": request.scope.strip(),
+            "provider": request.provider,
+            "model": request.model.strip(),
+            "api_base_url": request.api_base_url.strip().rstrip("/"),
+            "agent_model": request.agent_model.strip(),
+            "reasoning_effort": request.reasoning_effort,
+            "agent_base_url": request.agent_base_url.strip().rstrip("/"),
+            "work_mode": request.work_mode,
+            "auto_agent": request.auto_agent,
+            "wait_for_asset_commander": request.wait_for_asset_commander,
+            "wait_for_fscan": request.wait_for_fscan,
+            "asset_settle_seconds": request.asset_settle_seconds,
+            "max_agent_batches": request.max_agent_batches,
+            "coordinator_poll_seconds": request.coordinator_poll_seconds,
+            "agent_stall_warn_minutes": request.agent_stall_warn_minutes,
+            "ai_summary_enabled": request.ai_summary_enabled,
+            "fscan_skip_poc": request.fscan_skip_poc,
+            "fscan_skip_brute": request.fscan_skip_brute,
+            "fscan_port_threads": request.fscan_port_threads,
+            "semantic_threads": request.semantic_threads,
+            "semantic_max_depth": request.semantic_max_depth,
+            "semantic_run_dirsearch": request.semantic_run_dirsearch,
+            "semantic_max_rate": request.semantic_max_rate,
+            "allow_cidr_expansion": request.allow_cidr_expansion,
+            "new_asset_approval_mode": request.new_asset_approval_mode,
+            "new_asset_countdown_seconds": request.new_asset_countdown_seconds,
+            "new_asset_popup_enabled": request.new_asset_popup_enabled,
+            "new_asset_popup_topmost": request.new_asset_popup_topmost,
+            "workload_approval_mode": request.workload_approval_mode,
+            "workload_countdown_seconds": request.workload_countdown_seconds,
+            "workload_agent_threshold": request.workload_agent_threshold,
+            "workload_popup_enabled": request.workload_popup_enabled,
+            "workload_popup_topmost": request.workload_popup_topmost,
+            "asset_processing_scope": request.asset_processing_scope,
+            "credential_audit_enabled": request.credential_audit_enabled,
+            "credential_audit_default_action": request.credential_audit_default_action,
+            "credential_audit_countdown_seconds": request.credential_audit_countdown_seconds,
+            "credential_audit_popup_enabled": request.credential_audit_popup_enabled,
+            "credential_audit_popup_topmost": request.credential_audit_popup_topmost,
+            "credential_audit_wordlist_path": request.credential_audit_wordlist_path,
+            "credential_audit_max_attempts": request.credential_audit_max_attempts,
+            "credential_audit_requests_per_minute": request.credential_audit_requests_per_minute,
+            "credential_audit_concurrency": request.credential_audit_concurrency,
+            "credential_audit_stop_on_defense": request.credential_audit_stop_on_defense,
+            "selected_tools": list(request.selected_tools),
+            "user_prompt": request.user_prompt,
+            "last_run_id": last_run_id,
+            "updated_at": now_text(),
+        }
+
+    def save_project(self, request: LaunchRequest) -> Path:
+        name = request.project_name.strip()
+        if not name:
+            raise LaunchError("请填写项目名称")
+        if project_name_is_url(name):
+            raise LaunchError("项目名称必须是稳定名称，不能填写目标 URL 或 AI Base URL")
+        if not request.target.strip():
+            raise LaunchError("请填写目标")
+        if not request.scope.strip():
+            raise LaunchError("请填写授权范围")
+        unknown = [tool_id for tool_id in request.selected_tools if tool_id not in self.tools]
+        if unknown:
+            raise LaunchError(f"未知工具: {', '.join(unknown)}")
+        project_dir = self.projects_dir / safe_project_name(name)
+        project_dir.mkdir(parents=True, exist_ok=True)
+        path = project_dir / "project.json"
+        previous = read_json_file(path)
+        atomic_json_write(
+            path,
+            self._project_value(
+                request,
+                last_run_id=str(previous.get("last_run_id") or ""),
+            ),
+        )
+        return path
+
     def _new_standalone_dir(self, tool_id: str) -> tuple[str, Path]:
         runs_dir = self.app_dir / "standalone_runs" / safe_project_name(tool_id)
         runs_dir.mkdir(parents=True, exist_ok=True)
@@ -1476,59 +1559,7 @@ class RuntimeManager:
             state_path = run_dir / "run.json"
             atomic_json_write(state_path, state.to_dict())
 
-            project_value = {
-                "schema_version": 7,
-                "name": request.project_name.strip(),
-                "target": request.target.strip(),
-                "scope": request.scope.strip(),
-                "provider": request.provider,
-                "model": request.model.strip(),
-                "api_base_url": request.api_base_url.strip().rstrip("/"),
-                "agent_model": request.agent_model.strip(),
-                "reasoning_effort": request.reasoning_effort,
-                "agent_base_url": request.agent_base_url.strip().rstrip("/"),
-                "work_mode": request.work_mode,
-                "auto_agent": request.auto_agent,
-                "wait_for_asset_commander": request.wait_for_asset_commander,
-                "wait_for_fscan": request.wait_for_fscan,
-                "asset_settle_seconds": request.asset_settle_seconds,
-                "max_agent_batches": request.max_agent_batches,
-                "coordinator_poll_seconds": request.coordinator_poll_seconds,
-                "agent_stall_warn_minutes": request.agent_stall_warn_minutes,
-                "ai_summary_enabled": request.ai_summary_enabled,
-                "fscan_skip_poc": request.fscan_skip_poc,
-                "fscan_skip_brute": request.fscan_skip_brute,
-                "fscan_port_threads": request.fscan_port_threads,
-                "semantic_threads": request.semantic_threads,
-                "semantic_max_depth": request.semantic_max_depth,
-                "semantic_run_dirsearch": request.semantic_run_dirsearch,
-                "semantic_max_rate": request.semantic_max_rate,
-                "allow_cidr_expansion": request.allow_cidr_expansion,
-                "new_asset_approval_mode": request.new_asset_approval_mode,
-                "new_asset_countdown_seconds": request.new_asset_countdown_seconds,
-                "new_asset_popup_enabled": request.new_asset_popup_enabled,
-                "new_asset_popup_topmost": request.new_asset_popup_topmost,
-                "workload_approval_mode": request.workload_approval_mode,
-                "workload_countdown_seconds": request.workload_countdown_seconds,
-                "workload_agent_threshold": request.workload_agent_threshold,
-                "workload_popup_enabled": request.workload_popup_enabled,
-                "workload_popup_topmost": request.workload_popup_topmost,
-                "asset_processing_scope": request.asset_processing_scope,
-                "credential_audit_enabled": request.credential_audit_enabled,
-                "credential_audit_default_action": request.credential_audit_default_action,
-                "credential_audit_countdown_seconds": request.credential_audit_countdown_seconds,
-                "credential_audit_popup_enabled": request.credential_audit_popup_enabled,
-                "credential_audit_popup_topmost": request.credential_audit_popup_topmost,
-                "credential_audit_wordlist_path": request.credential_audit_wordlist_path,
-                "credential_audit_max_attempts": request.credential_audit_max_attempts,
-                "credential_audit_requests_per_minute": request.credential_audit_requests_per_minute,
-                "credential_audit_concurrency": request.credential_audit_concurrency,
-                "credential_audit_stop_on_defense": request.credential_audit_stop_on_defense,
-                "selected_tools": list(request.selected_tools),
-                "user_prompt": request.user_prompt,
-                "last_run_id": run_id,
-                "updated_at": now_text(),
-            }
+            project_value = self._project_value(request, last_run_id=run_id)
             atomic_json_write(project_dir / "project.json", project_value)
             atomic_json_write(run_dir / "project.json", project_value)
             (run_dir / "scope.txt").write_text(
