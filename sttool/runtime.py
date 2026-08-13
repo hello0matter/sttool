@@ -1708,6 +1708,21 @@ class RuntimeManager:
             selected = self.preflight(
                 recovery_request, allow_legacy_url_project=True
             )
+            asset_path = run_dir / "tool_data" / "asset_bus" / "assets.json"
+            if asset_path.is_file():
+                AssetBus(
+                    asset_path,
+                    request.scope,
+                    request.target,
+                    approval_mode=request.new_asset_approval_mode,
+                    approval_seconds=request.new_asset_countdown_seconds,
+                    allow_cidr_expansion=request.allow_cidr_expansion,
+                    processing_scope=request.asset_processing_scope,
+                ).update_scopes(
+                    scope=request.scope,
+                    processing_scope=request.asset_processing_scope,
+                )
+                append_activity(run_dir, "恢复前已重新检查授权范围和自动处理范围。")
             self.refresh(state)
             project_dir = run_dir.parent.parent
             context = self._run_context(request, project_dir, run_dir)

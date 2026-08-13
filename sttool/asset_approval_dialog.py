@@ -17,6 +17,31 @@ _REASON_LABELS = {
 }
 
 
+def pending_group_matches(
+    item: dict[str, object],
+    query: str = "",
+    asset_type: str = "",
+    source: str = "",
+) -> bool:
+    types = [str(value) for value in item.get("types", [])]
+    sources = [str(value) for value in item.get("sources", [])]
+    if asset_type and asset_type not in types:
+        return False
+    if source and source not in sources:
+        return False
+    needle = query.strip().casefold()
+    if not needle:
+        return True
+    values = [
+        item.get("group_key", ""),
+        item.get("reason_text", ""),
+        *types,
+        *sources,
+        *item.get("examples", []),
+    ]
+    return needle in " ".join(map(str, values)).casefold()
+
+
 def pending_asset_groups(value: dict[str, object]) -> list[dict[str, object]]:
     rows = value.get("pending")
     if not isinstance(rows, list):
@@ -128,6 +153,9 @@ class AssetApprovalDialog(tk.Toplevel):
         self.run_dir = run_dir
         self.decisions_path = run_dir / "tool_data" / "asset_bus" / "decisions.json"
         self.groups = pending_asset_groups(pending_value)
+        self.search_var = tk.StringVar()
+        self.type_filter_var = tk.StringVar(value="全部类型")
+        self.source_filter_var = tk.StringVar(value="全部来源")
         self.on_close = on_close
         self.checked: dict[str, bool] = {
             str(item["group_key"]): str(item["default_action"]) == "accept"
@@ -174,8 +202,41 @@ class AssetApprovalDialog(tk.Toplevel):
             wraplength=920,
         ).pack(fill="x", anchor="w", pady=(0, 12))
 
+        filters = ttk.Frame(body)
+        filters.pack(fill="x", pady=(0, 8))
+        ttk.Label(filters, text="搜索").pack(side="left")
+        ttk.Entry(filters, textvariable=self.search_var).pack(
+            side="left", fill="x", expand=True, padx=(6, 12)
+        )
+        ttk.Label(filters, text="类型").pack(side="left")
+        types = sorted(
+            {str(value) for item in self.groups for value in item.get("types", [])}
+        )
+        ttk.Combobox(
+            filters,
+            textvariable=self.type_filter_var,
+            values=("全部类型", *types),
+            state="readonly",
+            width=11,
+        ).pack(side="left", padx=(6, 12))
+        ttk.Label(filters, text="来源").pack(side="left")
+        sources = sorted(
+            {str(value) for item in self.groups for value in item.get("sources", [])}
+        )
+        ttk.Combobox(
+            filters,
+            textvariable=self.source_filter_var,
+            values=("全部来源", *sources),
+            state="readonly",
+            width=18,
+        ).pack(side="left", padx=(6, 0))
+
         columns = ("choice", "host", "kind", "source", "reason", "count", "example")
-        self.tree = ttk.Treeview(body, columns=columns, show="headings", selectmode="none")
+        table = ttk.Frame(body)
+        table.pack(fill="both", expand=True)
+        self.tree = ttk.Treeview(
+            table, columns=columns, show="headings", selectmode="extended"
+        )
         headings = {
             "choice": "加入？",
             "host": "主机 / IP",
@@ -197,17 +258,25 @@ class AssetApprovalDialog(tk.Toplevel):
         for column in columns:
             self.tree.heading(column, text=headings[column])
             self.tree.column(column, width=widths[column], minwidth=55, stretch=column == "example")
-        scrollbar = ttk.Scrollbar(body, orient="vertical", command=self.tree.yview)
+        scrollbar = ttk.Scrollbar(table, orient="vertical", command=self.tree.yview)
         self.tree.configure(yscrollcommand=scrollbar.set)
         self.tree.pack(side="left", fill="both", expand=True)
         scrollbar.pack(side="left", fill="y")
         self.tree.bind("<Button-1>", self._toggle_row)
+        for variable in (self.search_var, self.type_filter_var, self.source_filter_var):
+            variable.trace_add("write", lambda *_args: self._render_rows())
         self._render_rows()
 
         actions = ttk.Frame(self, padding=(16, 0, 16, 16))
         actions.pack(fill="x")
-        ttk.Button(actions, text="全部勾选", command=lambda: self._set_all(True)).pack(side="left")
-        ttk.Button(actions, text="全部取消", command=lambda: self._set_all(False)).pack(
+        ttk.Button(actions, text="所选允许", command=lambda: self._set_selected(True)).pack(side="left")
+        ttk.Button(actions, text="所选排除", command=lambda: self._set_selected(False)).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="当前结果允许", command=lambda: self._set_visible(True)).pack(
+            side="left", padx=(8, 0)
+        )
+        ttk.Button(actions, text="当前结果排除", command=lambda: self._set_visible(False)).pack(
             side="left", padx=(8, 0)
         )
         ttk.Button(
@@ -234,8 +303,16 @@ class AssetApprovalDialog(tk.Toplevel):
             return
 
     def _render_rows(self) -> None:
+        selected = set(self.tree.selection())
         self.tree.delete(*self.tree.get_children())
         for item in self.groups:
+            if not pending_group_matches(
+                item,
+                self.search_var.get(),
+                "" if self.type_filter_var.get() == "全部类型" else self.type_filter_var.get(),
+                "" if self.source_filter_var.get() == "全部来源" else self.source_filter_var.get(),
+            ):
+                continue
             key = str(item["group_key"])
             self.tree.insert(
                 "",
@@ -251,17 +328,27 @@ class AssetApprovalDialog(tk.Toplevel):
                     " | ".join(item["examples"]),
                 ),
             )
+        self.tree.selection_set(
+            [identity for identity in selected if self.tree.exists(identity)]
+        )
 
     def _toggle_row(self, event: tk.Event[tk.Misc]) -> None:
+        if self.tree.identify_column(event.x) != "#1":
+            return
         row = self.tree.identify_row(event.y)
         if not row:
             return
         self.checked[row] = not self.checked.get(row, True)
         self._render_rows()
 
-    def _set_all(self, selected: bool) -> None:
-        for key in self.checked:
-            self.checked[key] = selected
+    def _set_selected(self, accepted: bool) -> None:
+        for key in self.tree.selection():
+            self.checked[key] = accepted
+        self._render_rows()
+
+    def _set_visible(self, accepted: bool) -> None:
+        for key in self.tree.get_children():
+            self.checked[key] = accepted
         self._render_rows()
 
     def _seconds_remaining(self) -> int | None:

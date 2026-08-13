@@ -6,6 +6,7 @@ from tempfile import TemporaryDirectory
 
 from sttool.asset_approval_dialog import (
     append_asset_decisions,
+    pending_group_matches,
     pending_asset_groups,
 )
 from sttool.asset_bus import read_json
@@ -74,6 +75,21 @@ class AssetApprovalDialogTests(unittest.TestCase):
         self.assertEqual(groups[0]["count"], 2)
         self.assertEqual(groups[0]["sources"], ["asset_commander", "fscan"])
         self.assertEqual(groups[0]["default_action"], "accept")
+
+    def test_pending_group_filters_support_search_type_and_source(self) -> None:
+        item = {
+            "group_key": "api.example.test",
+            "types": ["domain", "url"],
+            "sources": ["asset_commander", "tscan"],
+            "reason_text": "新发现的主机",
+            "examples": ["https://api.example.test/login"],
+        }
+
+        self.assertTrue(pending_group_matches(item, "login"))
+        self.assertTrue(pending_group_matches(item, asset_type="url"))
+        self.assertTrue(pending_group_matches(item, source="tscan"))
+        self.assertFalse(pending_group_matches(item, asset_type="ip"))
+        self.assertFalse(pending_group_matches(item, source="fscan"))
 
     def test_decision_file_merges_without_losing_previous_choices(self) -> None:
         with TemporaryDirectory() as temporary:

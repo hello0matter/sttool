@@ -8,7 +8,7 @@ import re
 import sqlite3
 import tempfile
 import time
-from collections import Counter
+from collections import Counter, defaultdict
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Callable, Iterable
@@ -17,6 +17,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 ASSET_TYPES = ("ip", "domain", "endpoint", "url")
 ASSET_BUS_SCHEMA_VERSION = 1
+FILTERED_ASSET_LIMIT = 50_000
 _FSCAN_URL_RE = re.compile(r"https?://[^\s\[\]<>]+", re.IGNORECASE)
 _HOST_PORT_RE = re.compile(
     r"(?<![\w.-])(?P<host>(?:\d{1,3}\.){3}\d{1,3}|[A-Za-z0-9][A-Za-z0-9.-]*):(?P<port>\d{1,5})(?!\d)"
@@ -494,6 +495,38 @@ class AssetBus:
         self.scope = normalized_scope
         self.processing_scope = str(processing_scope or "").strip()
         self._apply_processing_scope()
+        newly_allowed = [
+            item
+            for item in self._records(self.value, "filtered_assets")
+            if self._authorization_allowed(str(item.get("value") or ""))
+            and self._processing_allowed(str(item.get("value") or ""))
+        ]
+        if newly_allowed:
+            allowed_keys = {
+                (str(item.get("type") or ""), str(item.get("value") or ""))
+                for item in newly_allowed
+            }
+            self.value["filtered_assets"] = [
+                item
+                for item in self._records(self.value, "filtered_assets")
+                if (str(item.get("type") or ""), str(item.get("value") or ""))
+                not in allowed_keys
+            ]
+            atomic_json_write(self.path, self.value)
+            assets_by_source: dict[str, list[tuple[str, str]]] = defaultdict(list)
+            for item in newly_allowed:
+                sources = item.get("sources")
+                source = (
+                    str(sources[0])
+                    if isinstance(sources, list) and sources
+                    else str(item.get("source") or "scope_recheck")
+                )
+                assets_by_source[source].append(
+                    (str(item.get("value") or ""), str(item.get("type") or ""))
+                )
+            for source, assets in assets_by_source.items():
+                self.ingest(assets, source)
+            self._reload()
         self.value["approval_policy"] = {
             **dict(self.value.get("approval_policy") or {}),
             "processing_scope": self.processing_scope,
@@ -533,7 +566,7 @@ class AssetBus:
                     )
                     filtered_keys.add(key)
             self.value[container] = retained
-        self.value["filtered_assets"] = filtered[-5000:]
+        self.value["filtered_assets"] = filtered[-FILTERED_ASSET_LIMIT:]
 
     @staticmethod
     def _records(value: dict[str, object], key: str) -> list[dict[str, object]]:
@@ -674,7 +707,7 @@ class AssetBus:
                             "reason": "outside_processing_scope",
                         }
                     )
-                    self.value["filtered_assets"] = filtered[-5000:]
+                    self.value["filtered_assets"] = filtered[-FILTERED_ASSET_LIMIT:]
                     rejected += 1
                 continue
             existing = by_key.get(key)
@@ -1027,7 +1060,37 @@ class AssetBus:
                 }
             )
             if action == "accept":
-                accepted_rows.append(item)
+                value = str(item.get("value") or "")
+                authorization_allowed = self._authorization_allowed(value)
+                processing_allowed = self._processing_allowed(value)
+                if authorization_allowed and processing_allowed:
+                    accepted_rows.append(item)
+                    continue
+                reason = (
+                    "outside_authorization_scope"
+                    if not authorization_allowed
+                    else "outside_processing_scope"
+                )
+                filtered = self._records(self.value, "filtered_assets")
+                key = (str(item.get("type") or ""), value)
+                if not any(
+                    (str(row.get("type") or ""), str(row.get("value") or ""))
+                    == key
+                    for row in filtered
+                ):
+                    filtered.append(
+                        {
+                            **item,
+                            "filtered_at": timestamp,
+                            "scope_status": reason,
+                            "reason": reason,
+                            "requested_action": "accept",
+                        }
+                    )
+                    self.value["filtered_assets"] = filtered[-FILTERED_ASSET_LIMIT:]
+                history[-1]["effective_action"] = "filtered"
+                history[-1]["effective_reason"] = reason
+                rejected_count += 1
             else:
                 rejected_log.append(
                     {

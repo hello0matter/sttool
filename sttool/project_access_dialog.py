@@ -51,6 +51,7 @@ _DECISIONS = {
     "reject": "跳过",
     "exclude": "排除",
     "manual_add": "人工加入",
+    "filtered": "被范围阻止",
 }
 
 _DECISION_SOURCES = {
@@ -422,8 +423,8 @@ class ProjectAccessDialog(tk.Toplevel):
                     str(decision.get("decision_source") or ""),
                 )
                 action_text = _DECISIONS.get(
-                    str(decision.get("action") or ""),
-                    str(decision.get("action") or ""),
+                    str(decision.get("effective_action") or decision.get("action") or ""),
+                    str(decision.get("effective_action") or decision.get("action") or ""),
                 )
                 decision_text = f"{source_text}：{action_text}"
             self.asset_tree.insert(

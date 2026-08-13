@@ -478,6 +478,57 @@ http://192.0.2.12:1080
             self.assertIn("http://10.17.200.99:8080/", bus.bundle()["urls"])
             self.assertEqual(bus.generation, 2)
 
+    def test_manual_accept_cannot_override_processing_scope(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(
+                path,
+                "*",
+                "primary.example",
+                approval_mode="countdown_accept",
+            )
+            bus.ingest([("primary.example", "domain")], "project_target")
+            bus.ingest([("outside.example.net", "domain")], "asset_commander")
+            self.assertEqual(bus.pending_count, 1)
+
+            bus.processing_scope = "primary.example"
+            added = bus.apply_decisions(
+                [{"id": bus.value["pending"][0]["id"], "action": "accept"}]
+            )
+
+            self.assertEqual(added, 0)
+            self.assertNotIn("outside.example.net", bus.bundle()["domains"])
+            self.assertEqual(bus.pending_count, 0)
+            current = read_json(path)
+            self.assertEqual(
+                current["filtered_assets"][0]["reason"],
+                "outside_processing_scope",
+            )
+            self.assertEqual(
+                current["decision_history"][-1]["effective_action"], "filtered"
+            )
+
+    def test_expanding_processing_scope_requeues_previously_filtered_asset(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "assets.json"
+            bus = AssetBus(
+                path,
+                "*",
+                "primary.example",
+                approval_mode="countdown_accept",
+                processing_scope="primary.example",
+            )
+            bus.ingest([("primary.example", "domain")], "project_target")
+            bus.ingest([("outside.example.net", "domain")], "asset_commander")
+            self.assertEqual(bus.pending_count, 0)
+            self.assertEqual(len(bus.value["filtered_assets"]), 1)
+
+            bus.update_scopes(scope="*", processing_scope="outside.example.net")
+
+            self.assertEqual(bus.pending_count, 1)
+            self.assertEqual(bus.value["pending"][0]["value"], "outside.example.net")
+            self.assertEqual(bus.value["filtered_assets"], [])
+
     def test_countdown_default_can_accept_or_reject_without_ui(self) -> None:
         for mode, expected_added, expected_rejected in (
             ("countdown_accept", 1, 0),

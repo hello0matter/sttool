@@ -1299,6 +1299,8 @@ class LauncherApp(tk.Tk):
         ProjectAccessDialog(self, state)
 
     def _edit_selected_scope(self) -> None:
+        if self._busy:
+            return
         state = self._selected_state()
         if state is None:
             messagebox.showinfo("项目范围", "请先选择一个运行实例")
@@ -1313,14 +1315,57 @@ class LauncherApp(tk.Tk):
         self.wait_window(dialog)
         if dialog.result is None:
             return
-        try:
-            self.manager.update_project_scopes(
-                state,
-                scope=dialog.result["scope"],
-                processing_scope=dialog.result["asset_processing_scope"],
+        scope = dialog.result["scope"]
+        processing_scope = dialog.result["asset_processing_scope"]
+        self._busy = True
+        progress = tk.Toplevel(self)
+        progress.title("正在更新项目范围")
+        progress.geometry("420x130")
+        progress.resizable(False, False)
+        progress.transient(self)
+        progress.protocol("WM_DELETE_WINDOW", lambda: None)
+        ttk.Label(
+            progress,
+            text="正在重新检查现有资产并更新后续任务，请稍候...",
+            padding=(20, 22, 20, 10),
+        ).pack(fill="x")
+        bar = ttk.Progressbar(progress, mode="indeterminate")
+        bar.pack(fill="x", padx=20, pady=(0, 20))
+        bar.start(12)
+        progress.update_idletasks()
+        progress.lift()
+
+        def worker() -> None:
+            try:
+                self.manager.update_project_scopes(
+                    state,
+                    scope=scope,
+                    processing_scope=processing_scope,
+                )
+            except (OSError, ValueError) as exc:
+                error = str(exc)
+            else:
+                error = ""
+            self.after(
+                0,
+                lambda: self._scope_update_finished(state, progress, error),
             )
-        except (OSError, ValueError) as exc:
-            messagebox.showerror("项目范围", str(exc), parent=self)
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _scope_update_finished(
+        self,
+        state: RunState,
+        progress: tk.Toplevel,
+        error: str,
+    ) -> None:
+        self._busy = False
+        try:
+            progress.destroy()
+        except tk.TclError:
+            pass
+        if error:
+            messagebox.showerror("项目范围", error, parent=self)
             return
         self.run_states[self._state_key(state)] = state
         self._refresh_runs()
