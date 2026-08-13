@@ -45,6 +45,7 @@ from sttool.project_coordinator import (
     render_risk_summary,
     remember_agent_process_tree,
     recover_completed_batch_orphans,
+    reconcile_stale_incremental_tasks,
     response_text,
     terminate_remembered_agent_processes,
     tracked_process_alive,
@@ -53,6 +54,37 @@ from sttool.project_coordinator import (
 
 
 class ProjectCoordinatorTests(unittest.TestCase):
+    def test_reconcile_stale_incremental_tasks_requeues_targets(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state = {
+                "active_incremental_nuclei": {
+                    "batch": 2,
+                    "pid": 987654,
+                    "targets": ["https://example.com/admin"],
+                    "status": "running",
+                },
+                "incremental_nuclei_batches": [
+                    {"batch": 2, "pid": 987654, "status": "running"}
+                ],
+                "incremental_nuclei_attempted_urls": [
+                    "https://example.com/",
+                    "https://example.com/admin",
+                ],
+            }
+
+            reconciled = reconcile_stale_incremental_tasks(state, run_dir)
+
+            self.assertEqual(reconciled, ["nuclei"])
+            self.assertEqual(state["active_incremental_nuclei"], {})
+            self.assertEqual(
+                state["incremental_nuclei_attempted_urls"],
+                ["https://example.com/"],
+            )
+            self.assertEqual(
+                state["incremental_nuclei_batches"][0]["status"],
+                "interrupted",
+            )
     def test_failed_agent_records_do_not_consume_success_limit(self) -> None:
         batches: list[object] = [
             *({"status": "completed"} for _ in range(3)),
@@ -681,6 +713,30 @@ class ProjectCoordinatorTests(unittest.TestCase):
             self.assertIn("并发不超过 1", prompt)
             self.assertIn("成功口令不得写入", prompt)
             self.assertNotIn("must-not-leak", prompt)
+
+    def test_agent_prompt_uses_only_assets_retained_for_this_batch(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            bus = AssetBus(run_dir / "tool_data" / "asset_bus" / "assets.json", "*")
+            bus.ingest(
+                [
+                    ("https://keep.example.test/", "url"),
+                    ("https://exclude.example.test/", "url"),
+                    ("10.0.0.8:443", "endpoint"),
+                ],
+                "test",
+            )
+            approved = [
+                {"type": "url", "value": "https://keep.example.test/"},
+                {"type": "endpoint", "value": "10.0.0.8:443"},
+            ]
+
+            prompt = build_batch_prompt(run_dir, "base", bus, 0, 1, approved)
+
+            self.assertIn("https://keep.example.test/", prompt)
+            self.assertIn("10.0.0.8:443", prompt)
+            self.assertNotIn("https://exclude.example.test/", prompt)
+            self.assertIn("本批 AI 获准资产（唯一目标清单）", prompt)
 
     def test_finished_batch_updates_state_and_batch_metadata(self) -> None:
         with TemporaryDirectory() as temporary:

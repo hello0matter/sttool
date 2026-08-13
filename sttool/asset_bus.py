@@ -993,6 +993,8 @@ class AssetBus:
         now = datetime.now().astimezone()
         due_by_id: dict[str, dict[str, object]] = {}
         for item in pending:
+            if item.get("countdown_paused_at"):
+                continue
             deadline_text = str(item.get("decision_deadline_at") or "")
             if not deadline_text:
                 continue

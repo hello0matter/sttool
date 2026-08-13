@@ -1072,6 +1072,7 @@ class LauncherApp(tk.Tk):
             "completed": "已结束",
             "failed": "失败",
             "stopped": "已暂停",
+            "interrupted": "已中断",
         }.get(state.status, state.status)
         if state.recovery_count:
             return f"{value}(恢复{state.recovery_count})"

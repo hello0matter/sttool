@@ -16,6 +16,7 @@ BUILTIN_TOOL_IDS = (
     "vulnx",
     "find_gh_poc",
     "tscan_plus",
+    "passhack",
 )
 
 
@@ -28,11 +29,12 @@ def default_locations(st_root: Path = DEFAULT_ST_ROOT) -> dict[str, str]:
         "vulnx": str(st_root / "vulnx" / "vulnx.exe"),
         "find_gh_poc": str(st_root / "find-gh-poc" / "find-gh-poc.exe"),
         "tscan_plus": str(st_root / "TscanPlus_Win_Amd64" / "TscanPlus_Win_Amd64.exe"),
+        "passhack": str(st_root / "tmp" / "passhack"),
     }
 
 
 def builtin_location_kind(tool_id: str) -> str:
-    return "directory" if tool_id in {"asset_commander", "semantic_dirscan"} else "file"
+    return "directory" if tool_id in {"asset_commander", "semantic_dirscan", "passhack"} else "file"
 
 
 def _pythonw() -> str:
@@ -61,6 +63,9 @@ def default_tools(
     tscan = Path(resolved_locations["tscan_plus"])
     tscan_automation = Path(__file__).with_name("tscan_automation.py")
     github_poc_search = Path(__file__).with_name("github_poc_search.py")
+    passhack_root = Path(resolved_locations["passhack"])
+    passhack_bridge = passhack_root / "passhack_bridge.py"
+    passhack_source = passhack_root / "passhack.py"
     asset_main = asset / "main.py"
     asset_workflow = asset / "asset_workflow.py"
     asset_handoff = asset / "asset_handoff.py"
@@ -286,6 +291,35 @@ def default_tools(
             required_paths=(str(tscan), str(tscan_automation)),
             restart_on_recovery=True,
             result_paths=("{run_dir}/tool_data/tscan/state.json",),
+        ),
+        ToolDefinition(
+            tool_id="passhack",
+            name="PassHack 登录面审计",
+            category="登录面安全审计",
+            description="消费 STTool 已批准的登录入口，识别登录表单并按明确审批策略执行受限验证；结果脱敏回流工程",
+            executable=_pythonw(),
+            args=(
+                "{run_dir}/tool_data/passhack/passhack_bridge.py",
+                "--run-dir", "{run_dir}",
+                "--scope", "{scope}",
+                "--target", "{target}",
+                "--candidates", "{run_dir}/tool_data/credential_audit/credential_audit.json",
+                "--state", "{run_dir}/tool_data/passhack/state.json",
+                "--export", "{run_dir}/results/passhack.json",
+            ),
+            cwd="{run_dir}/tool_data/passhack",
+            default_selected=False,
+            sends_requests=True,
+            required_paths=(str(passhack_bridge), str(passhack_source)),
+            refresh_files=(
+                (str(passhack_bridge), "tool_data/passhack/passhack_bridge.py"),
+                (str(passhack_source), "tool_data/passhack/passhack.py"),
+            ),
+            restart_on_recovery=True,
+            result_paths=(
+                "{run_dir}/tool_data/passhack/state.json",
+                "{run_dir}/results/passhack.json",
+            ),
         ),
     )
 

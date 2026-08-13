@@ -215,6 +215,8 @@ def resolve_candidate_decisions(run_dir: Path, now: float | None = None) -> int:
     for item in rows:
         if not isinstance(item, dict) or item.get("status") != "pending":
             continue
+        if item.get("countdown_paused_at"):
+            continue
         identity = str(item.get("id") or "")
         decision = decision_by_id.get(identity)
         action = str((decision or {}).get("action") or "")

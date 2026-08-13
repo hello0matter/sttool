@@ -8,6 +8,7 @@ from tkinter import ttk
 from typing import Callable
 
 from .asset_bus import atomic_json_write, now_text, read_json
+from .countdown_pause import HoverCountdownPause, set_countdown_paused
 
 
 _REASON_LABELS = {
@@ -292,6 +293,10 @@ class AssetApprovalDialog(tk.Toplevel):
 
         self.after(100, self._make_noticeable)
         self.after(250, self._tick_countdown)
+        self._hover_pause = HoverCountdownPause(
+            self,
+            lambda paused: self._set_countdown_paused(paused),
+        )
 
     def _make_noticeable(self) -> None:
         try:
@@ -371,7 +376,11 @@ class AssetApprovalDialog(tk.Toplevel):
         if not self.winfo_exists():
             return
         seconds = self._seconds_remaining()
-        if seconds is None:
+        if getattr(self, "_hover_pause", None) and self._hover_pause.paused:
+            self.countdown_label.configure(
+                text="鼠标位于窗口内，倒计时已暂停；移出窗口后继续。"
+            )
+        elif seconds is None:
             self.countdown_label.configure(text="当前策略：始终等待人工确认，不会自动加入。")
         elif seconds <= 0:
             self.countdown_label.configure(text="倒计时结束，正在应用当前勾选结果……")
@@ -384,7 +393,19 @@ class AssetApprovalDialog(tk.Toplevel):
             )
         self.after(500, self._tick_countdown)
 
+    def _set_countdown_paused(self, paused: bool) -> None:
+        value = set_countdown_paused(
+            self.run_dir / "tool_data" / "asset_bus" / "assets.json",
+            paused,
+            collection="pending",
+            pending_only=True,
+        )
+        refreshed = pending_asset_groups(value)
+        if refreshed:
+            self.groups = refreshed
+
     def _submit(self, source: str) -> None:
+        self._hover_pause.resume()
         decisions: list[dict[str, object]] = []
         for item in self.groups:
             accepted = self.checked.get(str(item["group_key"]), True)
@@ -401,6 +422,7 @@ class AssetApprovalDialog(tk.Toplevel):
         self._finish()
 
     def _hide_with_default(self) -> None:
+        self._hover_pause.resume()
         self._finish()
 
     def _finish(self) -> None:

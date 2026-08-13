@@ -28,6 +28,8 @@ def workload_counts(value: dict[str, Any], after_generation: int) -> dict[str, i
     for item in value.get("assets", []):
         if not isinstance(item, dict):
             continue
+        if item.get("included") is False:
+            continue
         try:
             generation = int(item.get("first_generation") or 0)
         except (TypeError, ValueError):
@@ -38,6 +40,49 @@ def workload_counts(value: dict[str, Any], after_generation: int) -> dict[str, i
         if bucket:
             counts[bucket] += 1
     return counts
+
+
+def workload_assets(value: dict[str, Any], after_generation: int) -> list[dict[str, Any]]:
+    """Return the allowed AssetBus delta as a stable, editable batch snapshot."""
+    rows: list[dict[str, Any]] = []
+    for item in value.get("assets", []):
+        if not isinstance(item, dict):
+            continue
+        try:
+            generation = int(item.get("first_generation") or 0)
+        except (TypeError, ValueError):
+            generation = 0
+        if generation <= after_generation:
+            continue
+        kind = str(item.get("type") or "")
+        asset_value = str(item.get("value") or "")
+        if kind not in {"ip", "domain", "endpoint", "url"} or not asset_value:
+            continue
+        sources = item.get("sources")
+        if not isinstance(sources, list):
+            source = str(item.get("source") or "")
+            sources = [source] if source else []
+        rows.append(
+            {
+                "type": kind,
+                "value": asset_value,
+                "sources": [str(source) for source in sources if str(source)],
+                "first_generation": generation,
+                "included": True,
+            }
+        )
+    return rows
+
+
+def included_assets(request: dict[str, Any]) -> list[dict[str, Any]]:
+    assets = request.get("assets")
+    if not isinstance(assets, list):
+        return []
+    return [
+        item
+        for item in assets
+        if isinstance(item, dict) and item.get("included") is not False
+    ]
 
 
 def workload_total(counts: dict[str, int]) -> int:
@@ -58,12 +103,17 @@ def create_request(
     counts: dict[str, int],
     mode: str,
     countdown_seconds: int,
+    assets: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     normalized_mode = mode if mode in APPROVAL_MODES else "countdown_accept"
     default_action = "reject" if normalized_mode == "countdown_reject" else "accept"
     deadline = "" if normalized_mode == "manual" else _deadline(countdown_seconds)
+    asset_selection_enabled = assets is not None
+    snapshot = [dict(item) for item in (assets or []) if isinstance(item, dict)]
+    if snapshot:
+        counts = workload_counts({"assets": snapshot}, -1)
     value = {
-        "schema_version": 1,
+        "schema_version": 2,
         "request_id": uuid.uuid4().hex,
         "kind": "agent_batch",
         "status": "pending",
@@ -73,6 +123,9 @@ def create_request(
         "generation_to": generation_to,
         "counts": counts,
         "total": workload_total(counts),
+        "original_total": len(snapshot) if snapshot else workload_total(counts),
+        "assets": snapshot,
+        "asset_selection_enabled": asset_selection_enabled,
         "default_action": default_action,
         "decision_deadline_at": deadline,
         "created_at": datetime.now().astimezone().isoformat(timespec="seconds"),
@@ -124,6 +177,13 @@ def decide_request(run_dir: Path, action: str, decided_by: str = "user") -> dict
     if not value or value.get("status") not in {"pending", ""}:
         return value
     normalized = "accept" if str(action).strip().lower() in {"accept", "yes", "y", "\u7acb\u5373\u542f\u52a8", "\u542f\u52a8"} else "reject"
+    if (
+        normalized == "accept"
+        and value.get("asset_selection_enabled") is True
+        and not included_assets(value)
+    ):
+        normalized = "reject"
+        value["decision_reason"] = "all_assets_excluded"
     value.update(
         status="decided",
         decision=normalized,
@@ -150,9 +210,74 @@ def decide_request(run_dir: Path, action: str, decided_by: str = "user") -> dict
     return value
 
 
+def update_asset_inclusion(
+    run_dir: Path,
+    keys: set[tuple[str, str]],
+    *,
+    included: bool,
+) -> dict[str, Any]:
+    value = read_request(run_dir)
+    if not value or value.get("status") not in {"pending", ""}:
+        return value
+    assets = value.get("assets")
+    if not isinstance(assets, list):
+        return value
+    for item in assets:
+        if not isinstance(item, dict):
+            continue
+        key = (str(item.get("type") or ""), str(item.get("value") or ""))
+        if key in keys:
+            item["included"] = included
+    counts = workload_counts({"assets": assets}, -1)
+    value["counts"] = counts
+    value["total"] = workload_total(counts)
+    value["selection_updated_at"] = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    atomic_json_write(request_path(run_dir), value)
+    return value
+
+
+def synchronize_request_assets(
+    run_dir: Path, assets: list[dict[str, Any]]
+) -> dict[str, Any]:
+    value = read_request(run_dir)
+    if not value or value.get("status") not in {"pending", "", "decided"}:
+        return value
+    previous = value.get("assets")
+    inclusion = {
+        (str(item.get("type") or ""), str(item.get("value") or "")): item.get(
+            "included"
+        )
+        is not False
+        for item in previous
+        if isinstance(item, dict)
+    } if isinstance(previous, list) else {}
+    snapshot: list[dict[str, Any]] = []
+    for item in assets:
+        row = dict(item)
+        key = (str(row.get("type") or ""), str(row.get("value") or ""))
+        row["included"] = inclusion.get(key, True)
+        snapshot.append(row)
+    counts = workload_counts({"assets": snapshot}, -1)
+    if previous == snapshot and value.get("counts") == counts:
+        return value
+    value["assets"] = snapshot
+    value["counts"] = counts
+    value["total"] = workload_total(counts)
+    value["original_total"] = len(snapshot)
+    value["assets_synchronized_at"] = datetime.now().astimezone().isoformat(
+        timespec="seconds"
+    )
+    atomic_json_write(request_path(run_dir), value)
+    return value
+
+
 def resolve_due_request(run_dir: Path, now: float | None = None) -> dict[str, Any]:
     value = read_request(run_dir)
     if not value or value.get("status") not in {"pending", ""}:
+        return value
+    if value.get("countdown_paused_at"):
         return value
     deadline = str(value.get("decision_deadline_at") or "")
     try:
@@ -177,6 +302,10 @@ __all__ = [
     "request_path",
     "resolve_due_request",
     "update_pending_request_policy",
+    "update_asset_inclusion",
+    "synchronize_request_assets",
+    "included_assets",
+    "workload_assets",
     "workload_counts",
     "workload_total",
 ]

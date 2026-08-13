@@ -8,6 +8,7 @@ from tkinter import filedialog, ttk
 from typing import Callable
 
 from .credential_audit import append_decisions
+from .countdown_pause import HoverCountdownPause, set_countdown_paused
 
 
 _ACTION_TEXT = {
@@ -114,6 +115,10 @@ class CredentialAuditDialog(tk.Toplevel):
         )
         self.after(100, self._make_noticeable)
         self.after(250, self._tick_countdown)
+        self._hover_pause = HoverCountdownPause(
+            self,
+            lambda paused: self._set_countdown_paused(paused),
+        )
 
     def _browse(self) -> None:
         value = filedialog.askopenfilename(parent=self, title="选择口令字典")
@@ -143,7 +148,11 @@ class CredentialAuditDialog(tk.Toplevel):
         if self._closed:
             return
         remaining = self._remaining()
-        if remaining is None:
+        if getattr(self, "_hover_pause", None) and self._hover_pause.paused:
+            self.countdown_label.configure(
+                text="鼠标位于窗口内，倒计时已暂停；移出窗口后继续。"
+            )
+        elif remaining is None:
             self.countdown_label.configure(text="等待人工确认。")
         else:
             self.countdown_label.configure(
@@ -154,6 +163,20 @@ class CredentialAuditDialog(tk.Toplevel):
                 return
         self.after(250, self._tick_countdown)
 
+    def _set_countdown_paused(self, paused: bool) -> None:
+        value = set_countdown_paused(
+            self.run_dir / "tool_data" / "credential_audit" / "credential_audit.json",
+            paused,
+            collection="candidates",
+            pending_only=True,
+        )
+        candidates = value.get("candidates")
+        if isinstance(candidates, list):
+            self.candidates = [
+                item for item in candidates
+                if isinstance(item, dict) and item.get("status") == "pending"
+            ]
+
     def _submit_selected(self) -> None:
         reverse = {label: action for action, label in _ACTION_TEXT.items()}
         self._submit(reverse.get(self.action_var.get(), "save_only"))
@@ -162,6 +185,7 @@ class CredentialAuditDialog(tk.Toplevel):
         self._submit(self.default_action, "hidden_default")
 
     def _submit(self, action: str, source: str = "user") -> None:
+        self._hover_pause.resume()
         usernames = [
             item.strip()
             for item in self.usernames_var.get().replace(";", ",").replace(" ", ",").split(",")

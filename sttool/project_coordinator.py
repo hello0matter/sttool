@@ -48,9 +48,12 @@ from .pentest_report import write_pentest_report
 from .vulnerability_intel import generate_vulnerability_intel
 from .workload_approval import (
     create_request,
+    included_assets,
     read_request,
     resolve_due_request,
+    synchronize_request_assets,
     workload_counts,
+    workload_assets,
     workload_total,
 )
 from .report_integrity import restore_corrupted_report_files
@@ -413,6 +416,52 @@ def tracked_process_alive(pid: int, creation_token: int, run_dir: Path) -> bool:
         started_at="",
     )
     return process_record_alive(legacy, run_dir)
+
+
+def reconcile_stale_incremental_tasks(
+    state: dict[str, object], run_dir: Path
+) -> list[str]:
+    reconciled: list[str] = []
+    task_types = (
+        (
+            "fscan",
+            "active_incremental_fscan",
+            "incremental_fscan_batches",
+            "incremental_fscan_attempted_ips",
+        ),
+        (
+            "nuclei",
+            "active_incremental_nuclei",
+            "incremental_nuclei_batches",
+            "incremental_nuclei_attempted_urls",
+        ),
+    )
+    for name, active_key, batches_key, attempted_key in task_types:
+        active = state.get(active_key)
+        if not isinstance(active, dict) or not active:
+            continue
+        pid = int(active.get("pid") or 0)
+        creation_token = int(active.get("creation_token") or 0)
+        if pid and tracked_process_alive(pid, creation_token, run_dir):
+            continue
+        detail = "自动调度器恢复时发现原增量任务进程已退出"
+        active.update(status="interrupted", interrupted_at=now_text(), error=detail)
+        batches = state.get(batches_key)
+        if isinstance(batches, list):
+            batch_number = int(active.get("batch") or 0)
+            for batch in reversed(batches):
+                if isinstance(batch, dict) and int(batch.get("batch") or 0) == batch_number:
+                    batch.update(active)
+                    break
+        attempted = state.get(attempted_key)
+        failed_targets = {str(value) for value in active.get("targets") or []}
+        if isinstance(attempted, list):
+            state[attempted_key] = [
+                value for value in attempted if str(value) not in failed_targets
+            ]
+        state[active_key] = {}
+        reconciled.append(name)
+    return reconciled
 
 
 def remember_agent_process_tree(batch: dict[str, object], root_pid: int) -> None:
@@ -1007,11 +1056,36 @@ def build_batch_prompt(
     bus: AssetBus,
     after_generation: int,
     batch_number: int,
+    approved_assets: list[dict[str, object]] | None = None,
 ) -> str:
     delta = bus.bundle(after_generation)
     all_assets = bus.bundle()
     urls = delta["urls"] if after_generation else all_assets["urls"]
     endpoints = delta["endpoints"] if after_generation else all_assets["endpoints"]
+    if approved_assets is not None:
+        approved_keys = {
+            (str(item.get("type") or ""), str(item.get("value") or ""))
+            for item in approved_assets
+            if isinstance(item, dict)
+        }
+        urls = [value for value in urls if ("url", value) in approved_keys]
+        endpoints = [
+            value for value in endpoints if ("endpoint", value) in approved_keys
+        ]
+    approved_asset_text = ""
+    if approved_assets is not None:
+        approved_asset_text = (
+            "\n\n### 本批 AI 获准资产（唯一目标清单）\n"
+            + (
+                "\n".join(
+                    f"- [{item.get('type', '')}] {item.get('value', '')}"
+                    for item in approved_assets
+                    if isinstance(item, dict)
+                )
+                or "- 本批没有获准资产"
+            )
+            + "\n不得把资产总线、历史扫描结果或工具输出中的其他资产作为本批测试目标。"
+        )
     collision_results, collision_evidence = asset_commander_collision_paths(run_dir)
     credential_rows = approved_agent_candidates(run_dir)
     credential_value = read_json(
@@ -1080,6 +1154,7 @@ def build_batch_prompt(
         + "\u4e0d\u8981\u628a\u7ec8\u7aef\u989c\u8272\u63a7\u5236\u7801\u5199\u5165\u62a5\u544a\uff1b\u9519\u8bef\u4fe1\u606f\u9700\u5148\u53bb\u9664 ANSI \u63a7\u5236\u5e8f\u5217\u3002\n"
         + "下面的待确认资产尚未获得准入，不得测试，也不得自行扩大授权范围：\n"
         + pending_text
+        + approved_asset_text
         + "\n\n### 获准的登录入口口令安全检测待办\n"
         + credential_text
         + (
@@ -1111,8 +1186,18 @@ def agent_workload_gate(
     project_name: str,
     run_id: str,
 ) -> str:
-    counts = workload_counts(bus.value, consumed_generation)
+    # Reconcile restored or hot-updated projects before presenting a workload count.
+    scope_marker = (bus.scope, bus.processing_scope)
+    if getattr(bus, "_workload_scope_marker", None) != scope_marker:
+        bus.update_scopes(scope=bus.scope, processing_scope=bus.processing_scope)
+        bus._workload_scope_marker = scope_marker
+    snapshot = workload_assets(bus.value, consumed_generation)
+    counts = workload_counts({"assets": snapshot}, -1)
     total = workload_total(counts)
+    if total == 0:
+        state.pop("workload_approval", None)
+        state["agent_consumed_generation"] = bus.generation
+        return "rejected"
     if mode == "automatic" or total < max(threshold, 1):
         state.pop("workload_approval", None)
         return "accepted"
@@ -1132,16 +1217,29 @@ def agent_workload_gate(
             counts=counts,
             mode=mode,
             countdown_seconds=countdown_seconds,
+            assets=snapshot,
         )
         append_activity(
             run_dir,
             f"下一批 AI 执行确认：预计处理 {total} 条新增资产，已创建确认请求。",
         )
+    else:
+        request = synchronize_request_assets(run_dir, snapshot)
     request = resolve_due_request(run_dir)
     state["workload_approval"] = request
     if request.get("status") in {"pending", ""}:
         return "pending"
     if request.get("decision") == "accept":
+        if (
+            request.get("asset_selection_enabled") is True
+            and workload_total(dict(request.get("counts") or {})) == 0
+        ):
+            state["agent_consumed_generation"] = bus.generation
+            append_activity(
+                run_dir,
+                "本批 AI 资产经范围过滤和人工排除后为 0 条，已自动跳过。",
+            )
+            return "rejected"
         return "accepted"
     state["agent_consumed_generation"] = bus.generation
     append_activity(run_dir, "\u7528\u6237\u9009\u62e9\u8df3\u8fc7\u672c\u6279 Agent\uff1b\u672c\u6279\u8d44\u4ea7\u6807\u8bb0\u4e3a\u5df2\u6d88\u8d39\uff0c\u4e0d\u91cd\u590d\u5f39\u7a97\u3002")
@@ -1281,6 +1379,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--credential-audit-requests-per-minute", type=int, default=10)
     parser.add_argument("--credential-audit-concurrency", type=int, default=1)
     parser.add_argument("--credential-audit-stop-on-defense", type=parse_bool, default=True)
+    parser.add_argument("--passhack-enabled", type=parse_bool, default=False)
     parser.add_argument("--terminal-window", default="")
     return parser.parse_args()
 
@@ -1360,6 +1459,14 @@ def main() -> int:
         )
     state.setdefault("incremental_nuclei_batches", [])
     state.setdefault("active_incremental_nuclei", {})
+    reconciled_incremental = reconcile_stale_incremental_tasks(state, run_dir)
+    if reconciled_incremental:
+        append_activity(
+            run_dir,
+            "自动调度器启动时已归档失效的增量任务并重新排队目标："
+            + "、".join(reconciled_incremental)
+            + "。",
+        )
     existing_batches = state.get("agent_batches")
     recovered_orphans = recover_completed_batch_orphans(
         existing_batches if isinstance(existing_batches, list) else [], run_dir
@@ -1376,6 +1483,9 @@ def main() -> int:
     state.update(
         status="running",
         stage="collecting_assets",
+        process_status="running",
+        process_status_detail=f"自动调度器 PID {os.getpid()} 正在运行",
+        process_status_updated_at=now_text(),
         hot_settings_protocol=1,
         workflow={
             "auto_agent": args.auto_agent,
@@ -2043,7 +2153,9 @@ def main() -> int:
         discover_login_candidates(run_dir, bus, credential_workflow)
         resolve_candidate_decisions(run_dir)
         credential_pending = pending_candidates(run_dir)
-        credential_approved = approved_agent_candidates(run_dir)
+        credential_approved = (
+            [] if args.passhack_enabled else approved_agent_candidates(run_dir)
+        )
         consumed = int(state.get("agent_consumed_generation") or 0)
         failure_count, retry_seconds, retry_ready = agent_retry_status(state)
         should_launch = agent_launch_ready(
@@ -2190,8 +2302,20 @@ def main() -> int:
                 encoding="utf-8", errors="replace"
             )
             batch_number = len(batches) + 1
+            workload_request = state.get("workload_approval")
+            approved_batch_assets = (
+                included_assets(workload_request)
+                if isinstance(workload_request, dict)
+                and workload_request.get("decision") == "accept"
+                else None
+            )
             prompt = build_batch_prompt(
-                run_dir, base_prompt, bus, consumed, batch_number
+                run_dir,
+                base_prompt,
+                bus,
+                consumed,
+                batch_number,
+                approved_batch_assets,
             )
             try:
                 pid, batch_dir = launch_agent_batch(
@@ -2218,6 +2342,11 @@ def main() -> int:
                     "batch": batch_number,
                     "generation_from": consumed + 1,
                     "generation_to": bus.generation,
+                    "approved_asset_count": (
+                        len(approved_batch_assets)
+                        if approved_batch_assets is not None
+                        else workload_total(workload_counts(bus.value, consumed))
+                    ),
                     "pid": pid,
                     "run_dir": str(batch_dir),
                     "started_at": now_text(),

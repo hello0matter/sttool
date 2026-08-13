@@ -189,6 +189,29 @@ def reconcile_component_state(
         value["status"] = process_status
         value["stage"] = process_status
         value["detail"] = detail
+        if component_id == "project_coordinator" and process_status == "interrupted":
+            for active_key, batches_key in (
+                ("active_incremental_fscan", "incremental_fscan_batches"),
+                ("active_incremental_nuclei", "incremental_nuclei_batches"),
+            ):
+                active = value.get(active_key)
+                if not isinstance(active, dict) or not active:
+                    continue
+                active.update(
+                    status="interrupted",
+                    interrupted_at=timestamp,
+                    error=detail,
+                )
+                batches = value.get(batches_key)
+                if isinstance(batches, list):
+                    active_batch = int(active.get("batch") or 0)
+                    for batch in reversed(batches):
+                        if not isinstance(batch, dict):
+                            continue
+                        if int(batch.get("batch") or 0) == active_batch:
+                            batch.update(active)
+                            break
+                value[active_key] = {}
     value["updated_at"] = timestamp
     atomic_json_write(path, value)
 
@@ -870,6 +893,9 @@ class RuntimeManager:
                 if request.semantic_run_dirsearch
                 else "--no-dirsearch"
             ),
+            "credential_audit_max_attempts": str(request.credential_audit_max_attempts),
+            "credential_audit_requests_per_minute": str(request.credential_audit_requests_per_minute),
+            "credential_audit_stop_on_defense": str(request.credential_audit_stop_on_defense).lower(),
         }
 
     def _launch_tool(
@@ -1204,6 +1230,8 @@ class RuntimeManager:
                 str(request.credential_audit_stop_on_defense).lower(),
                 "--credential-audit-wordlist-path",
                 request.credential_audit_wordlist_path,
+                "--passhack-enabled",
+                str("passhack" in request.selected_tools).lower(),
                 "--terminal-window",
                 agent_terminal_window_name(self.app_dir),
             ],
@@ -1548,7 +1576,7 @@ class RuntimeManager:
                 if dead:
                     raise LaunchError(f"组件启动后立即退出: {', '.join(dead)}")
                 for item in started:
-                    if item.component_id == "asset_commander":
+                    if item.component_id in {"asset_commander", "project_coordinator"}:
                         reconcile_component_state(
                             run_dir,
                             item.component_id,
@@ -1853,6 +1881,17 @@ class RuntimeManager:
     def refresh(self, state: RunState) -> RunState:
         previous_state_status = state.status
         running = 0
+        coordinator_terminal_status = ""
+        coordinator_state_path = (
+            Path(state.run_dir) / "tool_data" / "coordinator" / "state.json"
+        )
+        if any(
+            process.component_id == "project_coordinator"
+            for process in state.processes
+        ):
+            coordinator_terminal_status = str(
+                read_json_file(coordinator_state_path).get("status") or ""
+            )
         for process in state.processes:
             if process.status == "stopped":
                 continue
@@ -1876,7 +1915,14 @@ class RuntimeManager:
                         f"组件进程 PID {process.pid} 已退出，保留断点供恢复",
                     )
         if state.status not in {"failed", "stopped"}:
-            state.status = "running" if running else "completed"
+            if running:
+                state.status = "running"
+            elif coordinator_terminal_status in {"completed", "failed"}:
+                state.status = coordinator_terminal_status
+            elif coordinator_terminal_status:
+                state.status = "interrupted"
+            else:
+                state.status = "completed"
         if state.status != previous_state_status:
             append_activity(
                 state.run_dir,

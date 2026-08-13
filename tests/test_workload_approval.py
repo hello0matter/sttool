@@ -15,6 +15,8 @@ from sttool.workload_approval import (
     read_history,
     resolve_due_request,
     update_pending_request_policy,
+    update_asset_inclusion,
+    workload_assets,
     workload_counts,
     workload_total,
 )
@@ -39,6 +41,42 @@ class WorkloadApprovalTests(unittest.TestCase):
         counts = workload_counts(value, 1)
         self.assertEqual(counts, {"ips": 0, "domains": 1, "endpoints": 1, "urls": 1})
         self.assertEqual(workload_total(counts), 3)
+
+    def test_request_snapshot_and_exclusions_update_live_counts(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = self._run_dir(temporary)
+            snapshot = workload_assets(
+                {
+                    "assets": [
+                        {"type": "ip", "value": "10.0.0.1", "first_generation": 1, "sources": ["fscan"]},
+                        {"type": "url", "value": "https://example.test/", "first_generation": 2, "sources": ["tscan"]},
+                    ]
+                },
+                1,
+            )
+            request = create_request(
+                run_dir,
+                project_name="demo",
+                run_id="run-1",
+                generation_from=2,
+                generation_to=2,
+                counts={},
+                mode="manual",
+                countdown_seconds=10,
+                assets=snapshot,
+            )
+            self.assertEqual(request["total"], 1)
+            self.assertEqual(request["assets"][0]["value"], "https://example.test/")
+
+            updated = update_asset_inclusion(
+                run_dir,
+                {("url", "https://example.test/")},
+                included=False,
+            )
+            self.assertEqual(updated["total"], 0)
+            decided = decide_request(run_dir, "accept")
+            self.assertEqual(decided["decision"], "reject")
+            self.assertEqual(decided["decision_reason"], "all_assets_excluded")
 
     def test_create_request_manual_has_no_deadline(self) -> None:
         with TemporaryDirectory() as temporary:
@@ -274,6 +312,29 @@ class AgentWorkloadGateTests(unittest.TestCase):
                 ),
                 "accepted",
             )
+
+    def test_gate_skips_when_scope_refresh_removes_all_approved_assets(self) -> None:
+        from sttool.project_coordinator import agent_workload_gate
+
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            (run_dir / "tool_data" / "coordinator").mkdir(parents=True)
+            bus = self._bus(run_dir, 3)
+            state: dict[str, object] = {}
+            agent_workload_gate(
+                run_dir, state, bus, consumed_generation=0, mode="manual",
+                countdown_seconds=10, threshold=2, project_name="demo", run_id="run-1",
+            )
+            decide_request(run_dir, "accept")
+            bus.update_scopes(scope="example.test", processing_scope="no-match.invalid")
+
+            result = agent_workload_gate(
+                run_dir, state, bus, consumed_generation=0, mode="manual",
+                countdown_seconds=10, threshold=2, project_name="demo", run_id="run-1",
+            )
+
+            self.assertEqual(result, "rejected")
+            self.assertEqual(state["agent_consumed_generation"], bus.generation)
 
 
 if __name__ == "__main__":

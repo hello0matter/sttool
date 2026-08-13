@@ -209,7 +209,15 @@ def atomic_json_write(path: Path, value: object) -> None:
             json.dump(value, handle, ensure_ascii=False, indent=2)
             handle.flush()
             os.fsync(handle.fileno())
-        os.replace(temporary, path)
+        for attempt, delay in enumerate((0.0, 0.02, 0.05, 0.1, 0.25, 0.5, 1.0)):
+            if delay:
+                time.sleep(delay)
+            try:
+                os.replace(temporary, path)
+                break
+            except PermissionError:
+                if attempt == 6:
+                    raise
     finally:
         try:
             os.unlink(temporary)

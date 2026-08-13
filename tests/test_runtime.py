@@ -209,6 +209,93 @@ class RuntimeTests(unittest.TestCase):
             persisted = json.loads((run_dir / "run.json").read_text(encoding="utf-8"))
             self.assertEqual(persisted["status"], "stopped")
 
+    def test_refresh_marks_run_interrupted_when_coordinator_exits(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            coordinator_path = run_dir / "tool_data" / "coordinator" / "state.json"
+            coordinator_path.parent.mkdir(parents=True)
+            coordinator_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "active_incremental_nuclei": {
+                            "batch": 2,
+                            "pid": 987654,
+                            "status": "running",
+                        },
+                        "incremental_nuclei_batches": [
+                            {"batch": 2, "pid": 987654, "status": "running"}
+                        ],
+                    }
+                ),
+                encoding="utf-8",
+            )
+            coordinator = ProcessRecord(
+                component_id="project_coordinator",
+                name="Coordinator",
+                pid=987654,
+                command=[sys.executable],
+                cwd=str(run_dir),
+                started_at=now_text(),
+            )
+            state = RunState(
+                run_id="run",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[coordinator],
+            )
+            manager = RuntimeManager(run_dir, [], st_root=run_dir)
+
+            refreshed = manager.refresh(state)
+
+            self.assertEqual(refreshed.status, "interrupted")
+            coordinator_state = json.loads(coordinator_path.read_text(encoding="utf-8"))
+            self.assertEqual(coordinator_state["status"], "interrupted")
+            self.assertEqual(coordinator_state["active_incremental_nuclei"], {})
+            self.assertEqual(
+                coordinator_state["incremental_nuclei_batches"][0]["status"],
+                "interrupted",
+            )
+
+    def test_refresh_without_coordinator_completes_when_processes_exit(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            process = ProcessRecord(
+                component_id="nuclei",
+                name="Nuclei",
+                pid=987654,
+                command=[sys.executable],
+                cwd=str(run_dir),
+                started_at=now_text(),
+            )
+            state = RunState(
+                run_id="run",
+                project_name="demo",
+                target="example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=[],
+                run_dir=str(run_dir),
+                created_at=now_text(),
+                updated_at=now_text(),
+                status="running",
+                processes=[process],
+            )
+            manager = RuntimeManager(run_dir, [], st_root=run_dir)
+
+            refreshed = manager.refresh(state)
+
+            self.assertEqual(refreshed.status, "completed")
+
     def test_atomic_json_write_retries_transient_replace_permission_error(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "state.json"
@@ -845,7 +932,15 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("--exe", tools["find_gh_poc"].args)
         self.assertTrue(tools["vulnx"].coordinator_managed)
         self.assertTrue(tools["find_gh_poc"].coordinator_managed)
-        self.assertTrue(all(tool.default_selected for tool in tools.values()))
+        self.assertTrue(
+            all(
+                tool.default_selected
+                for tool in tools.values()
+                if tool.tool_id != "passhack"
+            )
+        )
+        self.assertFalse(tools["passhack"].default_selected)
+        self.assertEqual(tools["passhack"].category, "登录面安全审计")
         self.assertFalse(tools["asset_commander"].allow_standalone)
         self.assertFalse(tools["semantic_dirscan"].allow_standalone)
 
