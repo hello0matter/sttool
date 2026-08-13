@@ -149,11 +149,15 @@ class CredentialAuditDialog(tk.Toplevel):
             return
         remaining = self._remaining()
         if getattr(self, "_hover_pause", None) and self._hover_pause.paused:
+            remaining_text = "" if remaining is None else f"，剩余 {remaining} 秒"
             self.countdown_label.configure(
-                text="鼠标位于窗口内，倒计时已暂停；移出窗口后继续。"
+                text=f"鼠标位于窗口内：倒计时已暂停{remaining_text}；移出后继续，"
+                f"到时默认：{_ACTION_TEXT[self.default_action]}。"
             )
         elif remaining is None:
-            self.countdown_label.configure(text="等待人工确认。")
+            self.countdown_label.configure(
+                text=f"默认动作：始终等待人工确认；当前选择为 {_ACTION_TEXT[self.default_action]}。"
+            )
         else:
             self.countdown_label.configure(
                 text=f"{remaining} 秒后按全局默认方式：{_ACTION_TEXT[self.default_action]}。"

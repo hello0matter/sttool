@@ -48,6 +48,7 @@ from .pentest_report import write_pentest_report
 from .vulnerability_intel import generate_vulnerability_intel
 from .workload_approval import (
     create_request,
+    decide_request,
     included_assets,
     read_request,
     resolve_due_request,
@@ -1198,15 +1199,38 @@ def agent_workload_gate(
         state.pop("workload_approval", None)
         state["agent_consumed_generation"] = bus.generation
         return "rejected"
-    if mode == "automatic" or total < max(threshold, 1):
-        state.pop("workload_approval", None)
-        return "accepted"
     request = read_request(run_dir)
     same_batch = (
         request
         and int(request.get("generation_from") or 0) == consumed_generation + 1
         and int(request.get("generation_to") or 0) == bus.generation
     )
+    if mode == "automatic" or total < max(threshold, 1):
+        if not same_batch or request.get("status") not in {"pending", "decided"}:
+            request = create_request(
+                run_dir,
+                project_name=project_name,
+                run_id=run_id,
+                generation_from=consumed_generation + 1,
+                generation_to=bus.generation,
+                counts=counts,
+                mode="automatic",
+                countdown_seconds=countdown_seconds,
+                assets=snapshot,
+            )
+        else:
+            request = synchronize_request_assets(run_dir, snapshot)
+        if request.get("status") in {"pending", ""}:
+            request = decide_request(
+                run_dir,
+                "accept",
+                "automatic_policy" if mode == "automatic" else "below_threshold",
+            )
+        state["workload_approval"] = request
+        if request.get("decision") == "accept":
+            return "accepted"
+        state["agent_consumed_generation"] = bus.generation
+        return "rejected"
     if not same_batch or request.get("status") not in {"pending", "decided"}:
         request = create_request(
             run_dir,

@@ -24,6 +24,7 @@ from .asset_bus import AssetBus
 from .agent_runtime import (
     agent_shell_pids_for_run,
     agent_terminal_window_name,
+    coordinator_owner_matches,
     invalidate_agent_launch_scripts,
     prepare_one_shot_agent_launch,
     prompt_file_bootstrap,
@@ -878,6 +879,9 @@ class RuntimeManager:
             "st_root": str(self.st_root),
             "project_name": request.project_name.strip(),
             "scope": request.scope.strip(),
+            "processing_scope": (
+                request.asset_processing_scope.strip() or request.scope.strip()
+            ),
             "api_base_url": request.api_base_url.strip().rstrip("/"),
             "model": request.model.strip(),
             "api_key": request.api_key.strip(),
@@ -2131,10 +2135,28 @@ class RuntimeManager:
                 github_token,
             )
             run_dir = Path(state.run_dir).resolve()
+            owner_path = run_dir / "tool_data" / "coordinator" / "owner.json"
+            owner = read_json_file(owner_path)
+            owner_pid = 0
+            if owner and coordinator_owner_matches(owner, run_dir):
+                owner_pid = int(owner.get("pid") or 0)
+                append_activity(
+                    run_dir,
+                    f"正在滚动更新项目协调器真实 owner，PID {owner_pid}；其他工具保持运行。",
+                )
+                terminate_process_tree(owner_pid)
+                for _attempt in range(50):
+                    if not coordinator_owner_matches(owner, run_dir):
+                        break
+                    time.sleep(0.1)
+                if coordinator_owner_matches(owner, run_dir):
+                    raise LaunchError(f"协调器 owner PID {owner_pid} 未能退出")
             retained: list[ProcessRecord] = []
             for process in state.processes:
                 if process.component_id != "project_coordinator":
                     retained.append(process)
+                    continue
+                if process.pid == owner_pid:
                     continue
                 if process_record_alive(process, run_dir):
                     append_activity(
@@ -2147,6 +2169,23 @@ class RuntimeManager:
                         f"协调器 PID {process.pid} 已被其他进程占用，拒绝终止"
                     )
             coordinator = self._launch_coordinator(request, run_dir)
+            if "sttool.project_coordinator" in " ".join(coordinator.command):
+                claimed = False
+                for _attempt in range(50):
+                    replacement_owner = read_json_file(owner_path)
+                    if (
+                        int(replacement_owner.get("pid") or 0) == coordinator.pid
+                        and coordinator_owner_matches(replacement_owner, run_dir)
+                    ):
+                        claimed = True
+                        break
+                    if not process_record_alive(coordinator, run_dir):
+                        break
+                    time.sleep(0.1)
+                if not claimed:
+                    if process_record_alive(coordinator, run_dir):
+                        terminate_process_tree(coordinator.pid)
+                    raise LaunchError("新项目协调器未能取得单实例 owner，滚动更新失败")
             state.processes = [*retained, coordinator]
             state.status = "running"
             state.updated_at = now_text()

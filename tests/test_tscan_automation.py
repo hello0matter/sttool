@@ -29,6 +29,7 @@ from sttool.tscan_automation import (
     read_asset_bundle,
     read_asset_bus_bundle,
     read_asset_bus_generation_range,
+    refresh_stage_batch_scope,
     reconcile_interrupted_stage_retry,
     record_stage_retry,
     retry_batch_due,
@@ -273,6 +274,49 @@ class TscanAutomationTests(unittest.TestCase):
         self.assertEqual(batch["pending_stages"], ["jsfinder"])
         self.assertEqual(batch["retry_count"], 1)
         self.assertNotIn("swagger", batch["retry_attempts"][0]["stages"])
+
+    def test_scope_refresh_filters_existing_batch_and_resets_retries(self) -> None:
+        batch = {
+            "assets": {
+                "ips": [],
+                "domains": ["app.example.com", "unrelated.test"],
+                "endpoints": [],
+                "urls": [
+                    "https://app.example.com/",
+                    "https://unrelated.test/",
+                ],
+            },
+            "result": {
+                "stages": {
+                    "asset_discovery": {"status": "failed"},
+                    "dump_all": {"status": "failed"},
+                }
+            },
+            "pending_stages": ["asset_discovery", "dump_all"],
+            "retry_count": 3,
+            "retry_exhausted_at": "2026-08-08T13:54:18+08:00",
+            "retry_attempts": [{"attempt": 1}],
+        }
+
+        self.assertTrue(
+            refresh_stage_batch_scope([batch], "example.com", now=100.0)
+        )
+
+        self.assertEqual(batch["assets"]["domains"], ["app.example.com"])
+        self.assertEqual(
+            batch["assets"]["urls"], ["https://app.example.com/"]
+        )
+        self.assertEqual(batch["processing_scope"], "example.com")
+        self.assertEqual(
+            batch["pending_stages"], ["asset_discovery", "dump_all"]
+        )
+        self.assertEqual(batch["retry_count"], 0)
+        self.assertEqual(batch["next_retry_at"], 160.0)
+        self.assertEqual(batch["retry_attempts"], [])
+        self.assertNotIn("retry_exhausted_at", batch)
+        self.assertFalse(
+            refresh_stage_batch_scope([batch], "example.com", now=200.0)
+        )
 
     def test_stage_retry_stops_after_limit(self) -> None:
         batch = {

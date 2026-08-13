@@ -62,11 +62,17 @@ def workload_assets(value: dict[str, Any], after_generation: int) -> list[dict[s
         if not isinstance(sources, list):
             source = str(item.get("source") or "")
             sources = [source] if source else []
+        normalized_sources = [str(source) for source in sources if str(source)]
+        # Tscan's subdomain table can contain the enumeration input/candidate
+        # dictionary, not just resolved hosts. Do not turn those uncorroborated
+        # domain-only rows into thousands of AI test targets.
+        if kind == "domain" and set(normalized_sources) == {"tscan"}:
+            continue
         rows.append(
             {
                 "type": kind,
                 "value": asset_value,
-                "sources": [str(source) for source in sources if str(source)],
+                "sources": normalized_sources,
                 "first_generation": generation,
                 "included": True,
             }

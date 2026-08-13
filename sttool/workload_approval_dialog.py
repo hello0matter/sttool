@@ -218,12 +218,15 @@ class WorkloadApprovalDialog(tk.Toplevel):
         if self._closed:
             return
         remaining = self._remaining()
+        default_text = "按当前表格启动" if self.request.get("default_action") == "accept" else "跳过"
         if getattr(self, "_hover_pause", None) and self._hover_pause.paused:
-            self.countdown_label.configure(text="鼠标位于窗口内，倒计时已暂停；移出窗口后继续。")
+            remaining_text = "" if remaining is None else f"，剩余 {remaining} 秒"
+            self.countdown_label.configure(
+                text=f"鼠标位于窗口内：倒计时已暂停{remaining_text}；移出后继续，到时默认{default_text}本次 AI。"
+            )
         elif remaining is None:
-            self.countdown_label.configure(text="等待人工确认；其他工具继续运行。")
+            self.countdown_label.configure(text="默认动作：始终等待人工确认；其他工具继续运行。")
         else:
-            default_text = "按当前表格启动" if self.request.get("default_action") == "accept" else "跳过"
             self.countdown_label.configure(text=f"{remaining} 秒后默认{default_text}本次 AI；其他工具继续运行。")
             if remaining <= 0:
                 self._close_only()
@@ -247,6 +250,10 @@ class WorkloadApprovalDialog(tk.Toplevel):
                 self.request = latest
                 self.rows = [item for item in assets if isinstance(item, dict)]
                 self._render()
+        elif latest:
+            self._hover_pause.resume()
+            self._close_only()
+            return
         self.after(1000, self._refresh_request)
 
     def _submit(self, action: str) -> None:

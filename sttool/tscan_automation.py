@@ -824,6 +824,49 @@ def migrate_stage_batch_retries(
     return changed
 
 
+def refresh_stage_batch_scope(
+    batches: list[object], scope: str, now: float | None = None
+) -> bool:
+    current = time.time() if now is None else now
+    changed = False
+    for value in batches:
+        if not isinstance(value, dict):
+            continue
+        assets = value.get("assets")
+        if not isinstance(assets, dict):
+            continue
+        filtered = filter_assets_by_scope(assets, scope)
+        normalized = {
+            key: list(assets.get(key, []))
+            for key in ("ips", "domains", "endpoints", "urls")
+        }
+        if filtered == normalized and value.get("processing_scope") == scope:
+            continue
+        value["assets"] = filtered
+        value["processing_scope"] = scope
+        result = value.get("result")
+        pending = retryable_stage_names(result) if isinstance(result, dict) else []
+        plan = build_stage_plan("", filtered)
+        pending = [
+            name
+            for name in pending
+            if name not in {"asset_discovery", "subdomain_enumeration"}
+            or plan[
+                "asset_targets" if name == "asset_discovery" else "subdomain_targets"
+            ]
+        ]
+        value["pending_stages"] = pending
+        value["retry_count"] = 0
+        value["next_retry_at"] = (
+            current + STAGE_RETRY_DELAY_SECONDS if pending else 0.0
+        )
+        value["retry_attempts"] = []
+        value.pop("retry_exhausted_at", None)
+        value["scope_refreshed_at"] = now_text()
+        changed = True
+    return changed
+
+
 def root_domains(domains: list[str]) -> list[str]:
     values: list[str] = []
     for domain in domains:
@@ -2530,14 +2573,19 @@ def monitor_tscan_process(
             )
             page = browser.contexts[0].pages[0]
             existing_batches = state.get("stage_batches")
-            if isinstance(existing_batches, list) and migrate_stage_batch_retries(
-                existing_batches, asset_bus, scope
-            ):
-                append_activity(
-                    state_path,
-                    "已为旧版 TscanPlus 批次恢复资产快照和阶段重试状态",
+            if isinstance(existing_batches, list):
+                migrated = migrate_stage_batch_retries(
+                    existing_batches, asset_bus, scope
                 )
-                atomic_json_write(state_path, state)
+                scope_refreshed = refresh_stage_batch_scope(existing_batches, scope)
+                if migrated or scope_refreshed:
+                    detail = (
+                        "已为旧版 TscanPlus 批次恢复资产快照和阶段重试状态"
+                        if migrated
+                        else "已按当前自动处理范围刷新 TscanPlus 历史批次和待重试资产"
+                    )
+                    append_activity(state_path, detail)
+                    atomic_json_write(state_path, state)
             while tscan_process_alive(
                 pid,
                 int(state.get("process_creation_token") or 0),

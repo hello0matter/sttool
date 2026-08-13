@@ -859,7 +859,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertTrue(any(arg.endswith("tscan_automation.py") for arg in tool.args))
         self.assertIn("{target}", tool.args)
         self.assertIn("{project_name}", tool.args)
-        self.assertIn("{scope}", tool.args)
+        self.assertIn("{processing_scope}", tool.args)
         self.assertIn("--asset-state", tool.args)
         self.assertIn("--asset-export", tool.args)
         self.assertNotIn("safe_poc_gui", {item.tool_id for item in default_tools()})
@@ -881,7 +881,7 @@ class RuntimeTests(unittest.TestCase):
         self.assertIn("{run_dir}/tool_data/asset_bus/assets.json", tool.args)
         self.assertIn("--sttool-allow-cidr-expansion", tool.args)
         self.assertIn("{allow_cidr_expansion}", tool.args)
-        self.assertIn("{scope}", tool.args)
+        self.assertIn("{processing_scope}", tool.args)
         self.assertTrue(
             any(path.endswith("asset_workflow.py") for path in tool.required_paths)
         )
@@ -1820,6 +1820,7 @@ class RuntimeTests(unittest.TestCase):
                     request, root / "project", Path(state.run_dir)
                 )
                 self.assertEqual(context["allow_cidr_expansion"], "true")
+                self.assertEqual(context["processing_scope"], "*")
                 self.assertFalse(project["semantic_run_dirsearch"])
                 self.assertEqual(project["semantic_max_rate"], 25)
                 self.assertEqual(project["agent_model"], "gpt-5.6-sol")
@@ -1975,6 +1976,41 @@ class RuntimeTests(unittest.TestCase):
                 self.assertNotIn("", semantic)
             finally:
                 manager.cleanup()
+
+    def test_builtin_asset_tools_use_processing_scope_before_sending_requests(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = {tool.tool_id: tool for tool in default_tools(root)}
+            manager = OfflineRuntimeManager(root, tools.values(), st_root=root)
+            request = LaunchRequest(
+                project_name="scope-test",
+                target="https://app.example.test/",
+                scope="*",
+                provider="codexx",
+                model="summary-model",
+                selected_tools=(),
+                user_prompt="test",
+                authorization_confirmed=True,
+                asset_processing_scope="example.test",
+            )
+            run_dir = root / "run"
+            run_dir.mkdir()
+            context = manager._run_context(request, root, run_dir)
+
+            self.assertEqual(context["scope"], "*")
+            self.assertEqual(context["processing_scope"], "example.test")
+            for tool_id in (
+                "asset_commander",
+                "semantic_dirscan",
+                "tscan_plus",
+                "passhack",
+            ):
+                arguments = [manager._format(value, context) for value in tools[tool_id].args]
+                scope_flag = "--sttool-scope" if tool_id in {"asset_commander", "semantic_dirscan"} else "--scope"
+                self.assertEqual(
+                    arguments[arguments.index(scope_flag) + 1],
+                    "example.test",
+                )
 
 
 if __name__ == "__main__":

@@ -11,6 +11,7 @@ from sttool.asset_bus import AssetBus
 from sttool.workload_approval import (
     create_request,
     decide_request,
+    included_assets,
     read_request,
     read_history,
     resolve_due_request,
@@ -23,6 +24,35 @@ from sttool.workload_approval import (
 
 
 class WorkloadApprovalTests(unittest.TestCase):
+    def test_tscan_only_domain_candidates_do_not_enter_agent_workload(self) -> None:
+        value = {
+            "assets": [
+                {
+                    "type": "domain",
+                    "value": "candidate.example.test",
+                    "sources": ["tscan"],
+                    "first_generation": 2,
+                },
+                {
+                    "type": "domain",
+                    "value": "confirmed.example.test",
+                    "sources": ["tscan", "fscan"],
+                    "first_generation": 2,
+                },
+                {
+                    "type": "url",
+                    "value": "https://candidate.example.test/",
+                    "sources": ["tscan"],
+                    "first_generation": 2,
+                },
+            ]
+        }
+
+        self.assertEqual(
+            [item["value"] for item in workload_assets(value, 1)],
+            ["confirmed.example.test", "https://candidate.example.test/"],
+        )
+
     def _run_dir(self, temporary: str) -> Path:
         run_dir = Path(temporary)
         (run_dir / "tool_data" / "coordinator").mkdir(parents=True)
@@ -305,6 +335,11 @@ class AgentWorkloadGateTests(unittest.TestCase):
                 ),
                 "accepted",
             )
+            automatic = read_request(run_dir)
+            self.assertEqual(automatic["decision"], "accept")
+            self.assertEqual(automatic["decided_by"], "automatic_policy")
+            self.assertEqual(len(included_assets(automatic)), 3)
+            (run_dir / "tool_data" / "coordinator" / "workload_approval.json").unlink()
             self.assertEqual(
                 agent_workload_gate(
                     run_dir, {}, bus, consumed_generation=0, mode="manual", countdown_seconds=10,
@@ -312,6 +347,10 @@ class AgentWorkloadGateTests(unittest.TestCase):
                 ),
                 "accepted",
             )
+            small = read_request(run_dir)
+            self.assertEqual(small["decision"], "accept")
+            self.assertEqual(small["decided_by"], "below_threshold")
+            self.assertEqual(len(included_assets(small)), 3)
 
     def test_gate_skips_when_scope_refresh_removes_all_approved_assets(self) -> None:
         from sttool.project_coordinator import agent_workload_gate

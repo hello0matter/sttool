@@ -72,32 +72,31 @@ class HoverCountdownPause:
         self.window = window
         self.on_change = on_change
         self.paused = False
-        window.bind("<Enter>", self._entered, add="+")
-        window.bind("<Leave>", self._left, add="+")
+        self._job: str | None = window.after(200, self._poll_pointer)
 
-    def _entered(self, _event: tk.Event[tk.Misc]) -> None:
-        if self.paused:
+    def _poll_pointer(self) -> None:
+        if not self.window.winfo_exists():
             return
-        self.paused = True
-        self.on_change(True)
-
-    def _left(self, _event: tk.Event[tk.Misc]) -> None:
-        self.window.after_idle(self._resume_if_outside)
-
-    def _resume_if_outside(self) -> None:
-        if not self.paused or not self.window.winfo_exists():
-            return
-        widget = self.window.winfo_containing(
-            self.window.winfo_pointerx(), self.window.winfo_pointery()
+        pointer_x = self.window.winfo_pointerx()
+        pointer_y = self.window.winfo_pointery()
+        left = self.window.winfo_rootx()
+        top = self.window.winfo_rooty()
+        inside = (
+            left <= pointer_x < left + self.window.winfo_width()
+            and top <= pointer_y < top + self.window.winfo_height()
         )
-        while widget is not None:
-            if widget == self.window:
-                return
-            widget = widget.master
-        self.paused = False
-        self.on_change(False)
+        if inside != self.paused:
+            self.paused = inside
+            self.on_change(inside)
+        self._job = self.window.after(200, self._poll_pointer)
 
     def resume(self) -> None:
+        if self._job is not None:
+            try:
+                self.window.after_cancel(self._job)
+            except tk.TclError:
+                pass
+            self._job = None
         if self.paused:
             self.paused = False
             self.on_change(False)

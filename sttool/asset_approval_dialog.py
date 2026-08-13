@@ -377,8 +377,11 @@ class AssetApprovalDialog(tk.Toplevel):
             return
         seconds = self._seconds_remaining()
         if getattr(self, "_hover_pause", None) and self._hover_pause.paused:
+            checked_count = sum(self.checked.values())
+            remaining_text = "" if seconds is None else f"，剩余 {seconds} 秒"
             self.countdown_label.configure(
-                text="鼠标位于窗口内，倒计时已暂停；移出窗口后继续。"
+                text=f"鼠标位于窗口内：倒计时已暂停{remaining_text}；移出后继续，"
+                f"到时默认加入 {checked_count} 个、排除 {len(self.checked) - checked_count} 个主机。"
             )
         elif seconds is None:
             self.countdown_label.configure(text="当前策略：始终等待人工确认，不会自动加入。")
