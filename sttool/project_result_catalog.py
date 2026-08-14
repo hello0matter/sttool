@@ -94,6 +94,33 @@ def _semantic_summary(path: Path) -> dict[str, object]:
     return value if isinstance(value, dict) else {}
 
 
+def read_result_text(path: Path) -> str:
+    """Read tool output while tolerating common Windows text encodings."""
+    try:
+        raw = path.read_bytes()
+    except OSError:
+        raise
+    for encoding in ("utf-8-sig", "utf-8", "gb18030", "utf-16"):
+        try:
+            return raw.decode(encoding)
+        except UnicodeDecodeError:
+            continue
+    return raw.decode("utf-8", errors="replace")
+
+
+def result_encoding_warning(text: str) -> str:
+    """Return a short warning when the source visibly contains lost text."""
+    suspicious_lines = sum(
+        1 for line in text.splitlines() if line.count("?") >= 4
+    )
+    if suspicious_lines >= 2 or text.count("\ufffd") >= 2:
+        return (
+            "提示：该成果文件包含大量问号或替换字符，可能在生成时发生编码损坏；"
+            "下方内容仅供参考，请点击“打开原始文件”核对。"
+        )
+    return ""
+
+
 def project_result_sources(run_dir: Path) -> list[ProjectResultSource]:
     sources: list[ProjectResultSource] = []
     seen: set[Path] = set()
@@ -471,22 +498,25 @@ def preview_result_source(source: ProjectResultSource) -> str:
     if source.preview_kind == "tscan":
         return _preview_tscan(source)
     try:
-        text = source.path.read_text(encoding="utf-8", errors="replace")
+        text = read_result_text(source.path)
     except OSError as exc:
         return f"无法读取该成果：{exc}"
+    warning = result_encoding_warning(text)
     if source.preview_kind == "markdown":
-        return readable_markdown(text)
-    if source.preview_kind == "fscan":
-        return _preview_fscan(source, text)
-    if source.preview_kind == "nuclei":
-        return _preview_nuclei(source, text)
-    if source.preview_kind == "dirsearch":
-        return _preview_dirsearch(source, text)
-    if source.preview_kind == "assets":
-        return _preview_assets(source, text)
-    if source.preview_kind == "semantic":
-        return _preview_semantic(source, text)
-    return "\n".join(_source_header(source) + _clean_lines(text))
+        preview = readable_markdown(text)
+    elif source.preview_kind == "fscan":
+        preview = _preview_fscan(source, text)
+    elif source.preview_kind == "nuclei":
+        preview = _preview_nuclei(source, text)
+    elif source.preview_kind == "dirsearch":
+        preview = _preview_dirsearch(source, text)
+    elif source.preview_kind == "assets":
+        preview = _preview_assets(source, text)
+    elif source.preview_kind == "semantic":
+        preview = _preview_semantic(source, text)
+    else:
+        preview = "\n".join(_source_header(source) + _clean_lines(text))
+    return f"{warning}\n\n{preview}" if warning else preview
 
 
 def result_target_label(source: ProjectResultSource) -> str:

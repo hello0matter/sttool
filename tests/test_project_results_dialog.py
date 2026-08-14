@@ -18,10 +18,19 @@ from sttool.project_result_catalog import (
     preview_result_source,
     project_result_sources,
     readable_markdown,
+    read_result_text,
+    result_encoding_warning,
 )
 
 
 class ProjectResultsDialogTests(unittest.TestCase):
+    def test_result_text_supports_gb18030_and_warns_on_lost_text(self) -> None:
+        with TemporaryDirectory() as temporary:
+            path = Path(temporary) / "result.txt"
+            path.write_bytes("中文结果\n".encode("gb18030"))
+            self.assertEqual(read_result_text(path), "中文结果\n")
+            self.assertIn("编码损坏", result_encoding_warning("????\n????\n"))
+
     def _state(self, run_dir: Path, status: str = "running") -> RunState:
         return RunState(
             run_id="20260802-1",
