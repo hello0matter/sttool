@@ -9,6 +9,28 @@ import tkinter as tk
 from .asset_bus import atomic_json_write, read_json
 
 
+def countdown_remaining_seconds(
+    item: dict[str, object],
+    *,
+    deadline_field: str = "decision_deadline_at",
+    now: datetime | None = None,
+) -> int | None:
+    deadline_text = str(item.get(deadline_field) or "")
+    if not deadline_text:
+        return None
+    try:
+        deadline = datetime.fromisoformat(deadline_text)
+        paused_at = str(item.get("countdown_paused_at") or "")
+        reference = datetime.fromisoformat(paused_at) if paused_at else (now or datetime.now().astimezone())
+        if deadline.tzinfo is None:
+            deadline = deadline.astimezone()
+        if reference.tzinfo is None:
+            reference = reference.astimezone()
+    except ValueError:
+        return 0
+    return max(0, int((deadline - reference).total_seconds()))
+
+
 def _shift_deadline(item: dict[str, object], elapsed: timedelta) -> None:
     deadline_text = str(item.get("decision_deadline_at") or "")
     if not deadline_text:
@@ -102,4 +124,8 @@ class HoverCountdownPause:
             self.on_change(False)
 
 
-__all__ = ["HoverCountdownPause", "set_countdown_paused"]
+__all__ = [
+    "HoverCountdownPause",
+    "countdown_remaining_seconds",
+    "set_countdown_paused",
+]

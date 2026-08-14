@@ -6,10 +6,22 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 
 from sttool.asset_bus import atomic_json_write, read_json
-from sttool.countdown_pause import set_countdown_paused
+from sttool.countdown_pause import countdown_remaining_seconds, set_countdown_paused
 
 
 class CountdownPauseTests(unittest.TestCase):
+    def test_remaining_seconds_stays_frozen_while_paused(self) -> None:
+        now = datetime.now().astimezone().replace(microsecond=0)
+        item = {
+            "decision_deadline_at": (now + timedelta(seconds=20)).isoformat(),
+            "countdown_paused_at": now.isoformat(),
+        }
+
+        self.assertEqual(
+            countdown_remaining_seconds(item, now=now + timedelta(seconds=10)),
+            20,
+        )
+
     def test_single_request_pause_is_persisted_and_deadline_is_shifted(self) -> None:
         with TemporaryDirectory() as temporary:
             path = Path(temporary) / "request.json"

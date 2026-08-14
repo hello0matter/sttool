@@ -1,14 +1,16 @@
 from __future__ import annotations
 
-import time
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import filedialog, ttk
 from typing import Callable
 
 from .credential_audit import append_decisions
-from .countdown_pause import HoverCountdownPause, set_countdown_paused
+from .countdown_pause import (
+    HoverCountdownPause,
+    countdown_remaining_seconds,
+    set_countdown_paused,
+)
 
 
 _ACTION_TEXT = {
@@ -135,14 +137,12 @@ class CredentialAuditDialog(tk.Toplevel):
             pass
 
     def _remaining(self) -> int | None:
-        deadlines = [str(item.get("decision_deadline_at") or "") for item in self.candidates]
-        deadlines = [item for item in deadlines if item]
-        if not deadlines:
-            return None
-        try:
-            return max(0, int(datetime.fromisoformat(min(deadlines)).timestamp() - time.time()))
-        except (TypeError, ValueError, OSError):
-            return 0
+        remaining = [
+            seconds
+            for item in self.candidates
+            if (seconds := countdown_remaining_seconds(item)) is not None
+        ]
+        return min(remaining) if remaining else None
 
     def _tick_countdown(self) -> None:
         if self._closed:

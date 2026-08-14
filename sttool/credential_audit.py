@@ -17,13 +17,12 @@ _LOGIN_MARKERS = (
     "login",
     "signin",
     "sign-in",
-    "auth",
-    "admin",
-    "manager",
-    "console",
+    "logon",
     "后台",
     "登录",
 )
+_LOGIN_ROUTE_NAMES = {"auth", "authenticate", "oauth", "sso"}
+_ADMIN_ENTRY_NAMES = {"admin", "manager", "console"}
 _STATIC_SUFFIXES = {
     ".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
     ".ico", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".gz",
@@ -46,8 +45,16 @@ def normalize_login_candidate(value: str) -> str:
     path = parsed.path or "/"
     if Path(path).suffix.lower() in _STATIC_SUFFIXES:
         return ""
+    segments = [item.casefold() for item in path.split("/") if item]
+    route_names = {
+        Path(segment).stem.strip("-_.")
+        for segment in segments
+    }
     haystack = f"{path}?{parsed.query}".casefold()
-    if not any(marker in haystack for marker in _LOGIN_MARKERS):
+    has_login_marker = any(marker in haystack for marker in _LOGIN_MARKERS)
+    has_login_route = bool(route_names & _LOGIN_ROUTE_NAMES)
+    is_admin_entry = bool(segments) and Path(segments[-1]).stem in _ADMIN_ENTRY_NAMES
+    if not (has_login_marker or has_login_route or is_admin_entry):
         return ""
     normalized_path = path.rstrip("/") or "/"
     return urlunsplit(
@@ -94,6 +101,18 @@ def discover_login_candidates(
     previous_policy = value.get("policy")
     policy_changed = previous_policy != policy
     changed = policy_changed
+    for item in by_id.values():
+        if (
+            item.get("status") in {"pending", "approved_agent"}
+            and not normalize_login_candidate(str(item.get("url") or ""))
+        ):
+            item.update(
+                status="saved",
+                action="save_only",
+                decision_source="candidate_filter_tightened",
+                decided_at=now_text(),
+            )
+            changed = True
     if not enabled:
         for item in by_id.values():
             if item.get("status") in {"pending", "approved_agent"}:

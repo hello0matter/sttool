@@ -1570,6 +1570,45 @@ class RuntimeTests(unittest.TestCase):
             finally:
                 manager.cleanup()
 
+    def test_recover_can_enable_passhack_from_current_project_configuration(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            passhack = ToolDefinition(
+                tool_id="passhack",
+                name="PassHack",
+                category="test",
+                description="test",
+                executable=sys.executable,
+                cwd="{run_dir}/passhack",
+                restart_on_recovery=True,
+            )
+            manager = OfflineRuntimeManager(root, [passhack], st_root=root)
+            request = LaunchRequest(
+                project_name="passhack-recover",
+                target="https://example.com",
+                scope="example.com",
+                provider="codexx",
+                model="gpt-5.5",
+                selected_tools=(),
+                user_prompt="",
+                authorization_confirmed=True,
+            )
+            state = manager.start(request)
+
+            recovered = manager.recover(
+                state,
+                authorization_confirmed=True,
+                selected_tools=("passhack",),
+            )
+            try:
+                self.assertEqual(recovered.selected_tools, ["passhack"])
+                self.assertEqual(
+                    recovered.recovery_history[-1]["components"],
+                    ["passhack", "project_coordinator"],
+                )
+            finally:
+                manager.cleanup()
+
     def test_recover_requires_current_authorization(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

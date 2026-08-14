@@ -1,15 +1,17 @@
 from __future__ import annotations
 
 import ipaddress
-import time
 import tkinter as tk
-from datetime import datetime
 from pathlib import Path
 from tkinter import ttk
 from typing import Callable
 
 from .workload_approval import decide_request, read_request, update_asset_inclusion
-from .countdown_pause import HoverCountdownPause, set_countdown_paused
+from .countdown_pause import (
+    HoverCountdownPause,
+    countdown_remaining_seconds,
+    set_countdown_paused,
+)
 
 
 TYPE_LABELS = {"": "全部类型", "ip": "IP", "domain": "域名", "endpoint": "端点", "url": "URL"}
@@ -206,13 +208,7 @@ class WorkloadApprovalDialog(tk.Toplevel):
             pass
 
     def _remaining(self) -> int | None:
-        deadline = str(self.request.get("decision_deadline_at") or "")
-        if not deadline:
-            return None
-        try:
-            return max(0, int(datetime.fromisoformat(deadline).timestamp() - time.time()))
-        except (TypeError, ValueError, OSError):
-            return 0
+        return countdown_remaining_seconds(self.request)
 
     def _tick_countdown(self) -> None:
         if self._closed:

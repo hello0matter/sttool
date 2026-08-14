@@ -14,6 +14,7 @@ import time
 
 import psutil
 from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable
@@ -1646,6 +1647,7 @@ class RuntimeManager:
         api_key: str = "",
         agent_api_key: str = "",
         github_token: str = "",
+        selected_tools: tuple[str, ...] | None = None,
     ) -> RunState:
         with self._launch_lock():
             run_dir = Path(state.run_dir).resolve()
@@ -1653,6 +1655,9 @@ class RuntimeManager:
             request, skipped_tools = self._request_for_state(
                 state, authorization_confirmed, api_key, agent_api_key, github_token
             )
+            previous_selected_tools = set(request.selected_tools)
+            if selected_tools is not None:
+                request = replace(request, selected_tools=selected_tools)
             if api_base_url is not None or model is not None:
                 request = LaunchRequest(
                     project_name=request.project_name,
@@ -1794,6 +1799,23 @@ class RuntimeManager:
                 for process in state.processes
                 if process_record_alive(process, run_dir)
             }
+            passhack_changed = (
+                ("passhack" in previous_selected_tools)
+                != ("passhack" in request.selected_tools)
+            )
+            if passhack_changed and "project_coordinator" in active_components:
+                coordinator = next(
+                    process
+                    for process in state.processes
+                    if process.component_id == "project_coordinator"
+                    and process_record_alive(process, run_dir)
+                )
+                append_activity(
+                    run_dir,
+                    "PassHack 选择已变更，正在重新加载自动调度器配置。",
+                )
+                terminate_process_tree(coordinator.pid)
+                active_components.discard("project_coordinator")
             recoverable = [
                 tool
                 for tool in selected

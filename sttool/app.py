@@ -1141,6 +1141,13 @@ class LauncherApp(tk.Tk):
             return
         self._busy = True
         self.recover_button.state(["disabled"])
+        selected_tools = None
+        if self._loaded_run_config_key == self._state_key(state):
+            selected_tools = tuple(
+                tool_id
+                for tool_id, variable in self.tool_vars.items()
+                if variable.get()
+            )
 
         def worker() -> None:
             try:
@@ -1152,6 +1159,7 @@ class LauncherApp(tk.Tk):
                     api_key=self.api_key,
                     agent_api_key=self._agent_settings_for_provider(state.provider)[3],
                     github_token=self.github_token,
+                    selected_tools=selected_tools,
                 )
             except LaunchError as exc:
                 error = str(exc)

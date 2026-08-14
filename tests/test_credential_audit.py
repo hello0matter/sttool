@@ -25,6 +25,14 @@ class CredentialAuditTests(unittest.TestCase):
         )
         self.assertEqual(normalize_login_candidate("https://example.com/login.js"), "")
         self.assertEqual(normalize_login_candidate("https://example.com/dashboard"), "")
+        self.assertEqual(
+            normalize_login_candidate("https://example.com/admin/payment.aspx"),
+            "",
+        )
+        self.assertEqual(
+            normalize_login_candidate("https://example.com/admin"),
+            "https://example.com/admin",
+        )
 
     def test_user_decision_preserves_usernames_and_wordlist(self) -> None:
         with TemporaryDirectory() as temporary:
