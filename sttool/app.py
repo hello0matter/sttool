@@ -66,6 +66,7 @@ class LauncherApp(tk.Tk):
         self.tool_store = tool_store
         self.tool_vars: dict[str, tk.BooleanVar] = {}
         self.run_states: dict[str, RunState] = {}
+        self._loaded_run_config_key = ""
         self._busy = False
         self._asset_approval_dialogs: dict[str, AssetApprovalDialog] = {}
         self._asset_approval_snooze_until: dict[str, float] = {}
@@ -219,7 +220,7 @@ class LauncherApp(tk.Tk):
         self.launch_tab = ttk.Frame(self.notebook, padding=16, style="Panel.TFrame")
         self.runs_tab = ttk.Frame(self.notebook, padding=16, style="Panel.TFrame")
         self.tools_tab = ttk.Frame(self.notebook, padding=16, style="Panel.TFrame")
-        self.notebook.add(self.launch_tab, text="项目启动")
+        self.notebook.add(self.launch_tab, text="项目配置")
         self.notebook.add(self.runs_tab, text="运行实例")
         self.notebook.add(self.tools_tab, text="工具清单")
         self._build_launch_tab()
@@ -470,6 +471,7 @@ class LauncherApp(tk.Tk):
         self.run_tree.tag_configure("running", foreground=ACCENT)
         self.run_tree.tag_configure("failed", foreground=DANGER)
         self.run_tree.bind("<Double-1>", lambda _event: self._open_run_log())
+        self.run_tree.bind("<<TreeviewSelect>>", self._run_selection_changed)
 
     def _build_tools_tab(self) -> None:
         self.tools_tab.columnconfigure(0, weight=1)
@@ -1088,6 +1090,31 @@ class LauncherApp(tk.Tk):
     def _selected_state(self) -> RunState | None:
         selected = self.run_tree.selection()
         return self.run_states.get(selected[0]) if selected else None
+
+    def _run_selection_changed(self, _event=None) -> None:
+        """Load the selected run's saved project configuration into the form."""
+        state = self._selected_state()
+        if state is None:
+            return
+
+        key = self._state_key(state)
+        if getattr(self, "_loaded_run_config_key", "") == key:
+            return
+
+        path = Path(state.run_dir) / "project.json"
+        try:
+            value = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            return
+        if not isinstance(value, dict):
+            return
+
+        self._apply_project_value(value)
+        self._loaded_run_config_key = key
+        self.launch_status.configure(
+            text=f"当前配置来自实例：{state.project_name} / {state.run_id}",
+            foreground=MUTED,
+        )
 
     def _recover_selected_run(self) -> None:
         if self._busy:
