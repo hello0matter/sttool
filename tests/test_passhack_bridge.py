@@ -38,6 +38,32 @@ class PasshackBridgeTests(TestCase):
         self.assertIn("--candidates", tool.args)
         self.assertIn("--target", tool.args)
 
+    def test_session_uses_http_fallback_and_skips_empty_header(self) -> None:
+        module = load_bridge()
+        session = module.requests.Session()
+        with (
+            patch.dict(
+                module.os.environ,
+                {
+                    "STTOOL_TOOL_PROXY_URL": "socks5h://127.0.0.1:7891",
+                    "STTOOL_TOOL_HTTP_FALLBACK_PROXY_URL": "http://127.0.0.1:7891",
+                    "STTOOL_HTTP_HEADER_NAME": "flag",
+                    "STTOOL_HTTP_HEADER_VALUE": "",
+                },
+                clear=False,
+            ),
+            patch.object(module, "socks5_available", return_value=False),
+        ):
+            module.configure_session(session)
+        self.assertEqual(
+            session.proxies,
+            {
+                "http": "http://127.0.0.1:7891",
+                "https": "http://127.0.0.1:7891",
+            },
+        )
+        self.assertNotIn("flag", session.headers)
+
     def test_cidr_scope_allows_matching_ip_only(self) -> None:
         module = load_bridge()
 

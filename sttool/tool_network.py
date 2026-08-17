@@ -58,16 +58,28 @@ def load_tool_network(app_dir: Path) -> dict[str, object]:
     return normalize_tool_network(value.get("tool_network") if isinstance(value, dict) else None)
 
 
-def proxy_url(settings: dict[str, object]) -> str:
+def _proxy_host(settings: dict[str, object]) -> tuple[dict[str, object], str]:
     normalized = normalize_tool_network(settings)
+    host = str(normalized["host"])
+    if ":" in host and not host.startswith("["):
+        host = f"[{host}]"
+    return normalized, host
+
+
+def proxy_url(settings: dict[str, object]) -> str:
+    normalized, host = _proxy_host(settings)
     mode = str(normalized["mode"])
     if mode == "direct":
         return ""
     scheme = "socks5h" if mode == "socks5" else "http"
-    host = str(normalized["host"])
-    if ":" in host and not host.startswith("["):
-        host = f"[{host}]"
     return f"{scheme}://{host}:{int(normalized['port'])}"
+
+
+def http_fallback_proxy_url(settings: dict[str, object]) -> str:
+    normalized, host = _proxy_host(settings)
+    if str(normalized["mode"]) == "direct":
+        return ""
+    return f"http://{host}:{int(normalized['port'])}"
 
 
 def tool_environment(
@@ -79,12 +91,20 @@ def tool_environment(
         environment.pop(key, None)
     normalized = normalize_tool_network(settings)
     url = proxy_url(normalized)
+    fallback_url = http_fallback_proxy_url(normalized)
     if url:
-        environment["HTTP_PROXY"] = url
-        environment["HTTPS_PROXY"] = url
-        environment["ALL_PROXY"] = url
+        if str(normalized["mode"]) == "socks5":
+            # Generic tools often understand HTTP_PROXY but not SOCKS URLs.
+            environment["HTTP_PROXY"] = fallback_url
+            environment["HTTPS_PROXY"] = fallback_url
+            environment["ALL_PROXY"] = url
+        else:
+            environment["HTTP_PROXY"] = url
+            environment["HTTPS_PROXY"] = url
+            environment["ALL_PROXY"] = url
     environment["STTOOL_TOOL_NETWORK_MODE"] = str(normalized["mode"])
     environment["STTOOL_TOOL_PROXY_URL"] = url
+    environment["STTOOL_TOOL_HTTP_FALLBACK_PROXY_URL"] = fallback_url
     environment["STTOOL_HTTP_HEADER_NAME"] = str(normalized["header_name"])
     environment["STTOOL_HTTP_HEADER_VALUE"] = str(normalized["header_value"])
     return environment
@@ -116,9 +136,19 @@ def settings_from_environment() -> dict[str, object]:
     )
 
 
+def _socks5_available() -> bool:
+    try:
+        __import__("socks")
+    except ImportError:
+        return False
+    return True
+
+
 def apply_session_network(session: object) -> None:
     settings = settings_from_environment()
     url = proxy_url(settings)
+    if str(settings["mode"]) == "socks5" and not _socks5_available():
+        url = http_fallback_proxy_url(settings)
     if url and hasattr(session, "proxies"):
         session.proxies.update({"http": url, "https": url})
     header_name = str(settings["header_name"])
@@ -129,7 +159,11 @@ def apply_session_network(session: object) -> None:
 
 def cli_network_args(tool: str) -> list[str]:
     settings = settings_from_environment()
-    url = proxy_url(settings)
+    url = (
+        http_fallback_proxy_url(settings)
+        if tool == "dirsearch" and str(settings["mode"]) == "socks5"
+        else proxy_url(settings)
+    )
     name = str(settings["header_name"])
     value = str(settings["header_value"])
     args: list[str] = []
@@ -159,6 +193,7 @@ __all__ = [
     "DEFAULT_TOOL_NETWORK",
     "apply_session_network",
     "cli_network_args",
+    "http_fallback_proxy_url",
     "load_tool_network",
     "normalize_tool_network",
     "proxy_url",

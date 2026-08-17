@@ -34,7 +34,7 @@ ASSET_APPROVAL_LABELS = {
 TOOL_NETWORK_MODE_LABELS = {
     "direct": "直连",
     "http": "HTTP 代理",
-    "socks5": "SOCKS5（远程 DNS）",
+    "socks5": "SOCKS5 优先（兼容 HTTP 降级）",
 }
 
 
@@ -526,7 +526,8 @@ class AISettingsDialog(tk.Toplevel):
             text=(
                 "只影响 STTool 启动的扫描/取证工具，不修改 Windows 系统代理，也不修改 "
                 "Codex、Codexx 或 Claude CLI。直连会清除子进程继承的代理环境；"
-                "SOCKS5 使用远程 DNS。已经运行的外部工具不会被强制重启，恢复项目或下一轮工具进程会使用新设置。"
+                "SOCKS5 使用远程 DNS；对不支持 SOCKS5 的工具，STTool 会在同一地址和端口尝试 HTTP 代理兼容模式。"
+                "已经运行的外部工具不会被强制重启，恢复项目或下一轮工具进程会使用新设置。"
             ),
             wraplength=700,
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 16))
@@ -550,7 +551,8 @@ class AISettingsDialog(tk.Toplevel):
         ttk.Label(
             tab,
             text=(
-                "例如名称 flag、值 xiaoxiong。PassHack、nuclei 和 STTool 原生 HTTP 会直接使用；"
+                "名称或值任意一项留空时，不会附加任何请求头。例如名称 flag、值 xiaoxiong。"
+                "PassHack、nuclei 和 STTool 原生 HTTP 会直接使用；"
                 "其他 GUI/闭源工具若不支持自定义请求头，应让它们经过可注入该请求头的中间代理。"
                 "原始端口扫描（如 fscan 的 TCP 探测）不属于 HTTP，代理和请求头不会作用于该部分。"
             ),
