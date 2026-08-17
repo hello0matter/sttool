@@ -29,7 +29,13 @@ from .project_results_dialog import ProjectResultsDialog
 from .project_access_dialog import ProjectAccessDialog
 from .project_scope_dialog import ProjectScopeDialog
 from .run_log_dialog import RunLogDialog, component_summary_status
-from .runtime import LaunchError, RuntimeManager, project_name_is_url, safe_project_name
+from .runtime import (
+    LaunchError,
+    RuntimeManager,
+    project_authorization_confirmed,
+    project_name_is_url,
+    safe_project_name,
+)
 from .secret_store import (
     SecretStoreError,
     load_secret_values,
@@ -39,6 +45,7 @@ from .secret_store import (
 from .tool_details import ToolDetailsDialog
 from .tool_editor import ToolEditorDialog
 from .tool_store import ToolStore
+from .tool_network import normalize_tool_network
 from .workflow_settings import (
     normalize_workflow_settings,
     normalized_reasoning_effort,
@@ -113,6 +120,9 @@ class LauncherApp(tk.Tk):
         )
         self.workflow_settings = normalize_workflow_settings(
             launcher_settings.get("workflow")
+        )
+        self.tool_network_settings = normalize_tool_network(
+            launcher_settings.get("tool_network")
         )
         self.secret_load_error = ""
         try:
@@ -252,6 +262,7 @@ class LauncherApp(tk.Tk):
         self.target_var = tk.StringVar()
         self.provider_var = tk.StringVar(value="codexx")
         self.auth_var = tk.BooleanVar(value=False)
+        self.target_var.trace_add("write", self._target_changed)
         self.launch_scope = ""
         self.launch_processing_scope = ""
         self.scope_summary_var = tk.StringVar(value="尚未设置授权范围")
@@ -1479,7 +1490,11 @@ class LauncherApp(tk.Tk):
             variable.set(tool_id in selected)
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
-        self.auth_var.set(False)
+        self.auth_var.set(project_authorization_confirmed(value))
+
+    def _target_changed(self, *_args: object) -> None:
+        if self.auth_var.get():
+            self.auth_var.set(False)
 
     def _edit_launch_scope(self) -> None:
         dialog = ProjectScopeDialog(
@@ -1491,8 +1506,12 @@ class LauncherApp(tk.Tk):
         self.wait_window(dialog)
         if dialog.result is None:
             return
-        self.launch_scope = dialog.result["scope"]
-        self.launch_processing_scope = dialog.result["asset_processing_scope"]
+        scope = dialog.result["scope"]
+        processing_scope = dialog.result["asset_processing_scope"]
+        if scope != self.launch_scope or processing_scope != self.launch_processing_scope:
+            self.auth_var.set(False)
+        self.launch_scope = scope
+        self.launch_processing_scope = processing_scope
         self._refresh_scope_summary()
 
     def _refresh_scope_summary(self) -> None:
@@ -1546,6 +1565,7 @@ class LauncherApp(tk.Tk):
             claude_api_key=self.claude_api_key,
             github_token=self.github_token,
             workflow_settings=self.workflow_settings,
+            tool_network_settings=self.tool_network_settings,
         )
         self.wait_window(dialog)
         if dialog.result is None:
@@ -1580,6 +1600,9 @@ class LauncherApp(tk.Tk):
         )
         self.claude_agent_base_url = str(dialog.result["claude_agent_base_url"])
         self.workflow_settings = normalize_workflow_settings(dialog.result["workflow"])
+        self.tool_network_settings = normalize_tool_network(
+            dialog.result.get("tool_network")
+        )
         self._save_launcher_settings()
         try:
             updated = self._apply_global_workflow_settings()
@@ -1595,7 +1618,8 @@ class LauncherApp(tk.Tk):
             (
                 f"工作流设置已同步到 {updated} 个现有运行实例。\n\n"
                 "弹窗策略、倒计时和自动调度参数已热更新；"
-                "已经启动的外部扫描进程和 AI 会话不会被强制重启。"
+                "已经启动的外部扫描进程和 AI 会话不会被强制重启。\n"
+                "工具代理与附加请求头将在恢复项目、下一轮增量任务或新启动工具时生效。"
             ),
             parent=self,
         )
@@ -1616,6 +1640,7 @@ class LauncherApp(tk.Tk):
             "claude_reasoning_effort": self.claude_reasoning_effort,
             "claude_agent_base_url": self.claude_agent_base_url,
             "workflow": self.workflow_settings,
+            "tool_network": self.tool_network_settings,
             "last_project": self.project_var.get().strip(),
         }
         temporary = self.launcher_settings_path.with_suffix(".json.tmp")
@@ -1650,6 +1675,7 @@ class LauncherApp(tk.Tk):
             api_base_url=self.api_base_url_var.get(),
             model=self.default_model,
             agent_profiles=self._global_agent_profiles(),
+            tool_network=self.tool_network_settings,
         )
         self._roll_forward_legacy_coordinators(states)
         self.run_states = {self._state_key(state): state for state in states}

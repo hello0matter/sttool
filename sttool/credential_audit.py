@@ -26,7 +26,8 @@ _ADMIN_ENTRY_NAMES = {"admin", "manager", "console"}
 _STATIC_SUFFIXES = {
     ".js", ".css", ".map", ".png", ".jpg", ".jpeg", ".gif", ".svg",
     ".ico", ".woff", ".woff2", ".ttf", ".eot", ".pdf", ".zip", ".gz",
-    ".7z", ".rar", ".mp3", ".mp4", ".webm",
+    ".7z", ".rar", ".mp3", ".mp4", ".webm", ".log", ".txt", ".xml",
+    ".json", ".yaml", ".yml", ".sql", ".bak",
 }
 
 
@@ -46,14 +47,21 @@ def normalize_login_candidate(value: str) -> str:
     if Path(path).suffix.lower() in _STATIC_SUFFIXES:
         return ""
     segments = [item.casefold() for item in path.split("/") if item]
+    if any(Path(segment).suffix.lower() in _STATIC_SUFFIXES for segment in segments[:-1]):
+        return ""
     route_names = {
         Path(segment).stem.strip("-_.")
         for segment in segments
     }
-    haystack = f"{path}?{parsed.query}".casefold()
+    haystack = path.casefold()
     has_login_marker = any(marker in haystack for marker in _LOGIN_MARKERS)
     has_login_route = bool(route_names & _LOGIN_ROUTE_NAMES)
-    is_admin_entry = bool(segments) and Path(segments[-1]).stem in _ADMIN_ENTRY_NAMES
+    last_segment = Path(segments[-1]) if segments else None
+    is_admin_entry = bool(
+        last_segment
+        and not last_segment.suffix
+        and last_segment.name in _ADMIN_ENTRY_NAMES
+    )
     if not (has_login_marker or has_login_route or is_admin_entry):
         return ""
     normalized_path = path.rstrip("/") or "/"

@@ -66,6 +66,7 @@ from .runtime import (
     process_record_alive,
     terminate_agent_process_tree,
 )
+from .tool_network import normalize_tool_network, tool_environment
 from .workflow_settings import normalize_workflow_settings
 
 
@@ -1340,6 +1341,10 @@ def apply_hot_workflow_settings(
         args.agent_model = str(agent.get("agent_model") or "")
         args.reasoning_effort = str(agent.get("reasoning_effort") or "")
         args.agent_base_url = str(agent.get("agent_base_url") or "")
+    network = normalize_tool_network(value.get("tool_network"))
+    environment = tool_environment(network, dict(os.environ))
+    os.environ.clear()
+    os.environ.update(environment)
     return workflow
 
 
@@ -1591,9 +1596,12 @@ def main() -> int:
                     "incremental_nuclei": bool(args.nuclei_exe),
                 }
                 state["hot_settings_applied_at"] = now_text()
+                network = normalize_tool_network(hot_settings.get("tool_network"))
+                state["tool_network"] = network
                 append_activity(
                     run_dir,
-                    "自动调度器已应用全局工作流热更新；现有外部进程保持运行。",
+                    "自动调度器已应用全局工作流和工具网络热更新；"
+                    "现有外部进程保持运行，后续增量进程使用新网络设置。",
                 )
             hot_settings_marker = current_hot_marker
         tools = selected_tools(run_dir)

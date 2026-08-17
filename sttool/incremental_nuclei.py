@@ -4,6 +4,7 @@ import subprocess
 from pathlib import Path
 
 from .asset_bus import AssetBus, now_text, target_assets
+from .tool_network import cli_network_args
 from .runtime import (
     CREATE_NEW_PROCESS_GROUP,
     CREATE_NO_WINDOW,
@@ -44,6 +45,7 @@ def build_incremental_nuclei_command(
         "-l",
         str(target_file),
         "-silent",
+        *cli_network_args("nuclei"),
         "-o",
         str(output_file),
     ]

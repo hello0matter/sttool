@@ -686,6 +686,51 @@ class RunLogDialogTests(unittest.TestCase):
                 run_dir / "results" / "find_gh_poc.json", sources["results"]
             )
 
+    def test_passhack_paths_and_runtime_are_human_readable(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = run_dir / "tool_data" / "passhack" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps(
+                    {
+                        "status": "running",
+                        "stage": "processing",
+                        "detail": "正在检查登录入口",
+                        "current_target": "https://example.test/login",
+                        "processed": 3,
+                        "result_total": 5,
+                        "approved_waiting": 2,
+                        "requeued_scope_skips": 4,
+                        "counts": {
+                            "completed": 2,
+                            "weak_password_found": 1,
+                            "stopped_defense": 1,
+                            "skipped_scope": 0,
+                            "error": 1,
+                        },
+                    },
+                    ensure_ascii=False,
+                ),
+                encoding="utf-8",
+            )
+
+            sources = component_paths(run_dir, "passhack", "PassHack 登录面审计")
+            self.assertIn(state_path, sources["states"])
+            self.assertIn(
+                run_dir / "tool_data" / "passhack" / "passhack.log",
+                sources["logs"],
+            )
+            status, stage, detail = component_runtime(run_dir, "passhack")
+            self.assertEqual((status, stage), ("running", "processing"))
+            self.assertIn("已处理 3 条", detail)
+            self.assertIn("当前目标 https://example.test/login", detail)
+            rendered = render_component_state(state_path, "passhack")
+            self.assertIn("PassHack 后台登录面审计", rendered)
+            self.assertIn("发现弱口令：1 条", rendered)
+            self.assertIn("范围修复后重新排队：4 条", rendered)
+
+
 
 if __name__ == "__main__":
     unittest.main()

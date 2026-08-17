@@ -20,6 +20,8 @@ from urllib.request import urlopen
 import psutil
 from playwright.sync_api import Locator, Page, sync_playwright
 
+from sttool.tool_network import webview_proxy_argument
+
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
 POLICY_PATH = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
@@ -937,9 +939,16 @@ def append_activity(state_path: Path, message: str) -> None:
 
 def webview_environment(port: int, run_dir: Path) -> dict[str, str]:
     environment = os.environ.copy()
-    arguments = (
-        f"--remote-debugging-port={port} "
-        "--remote-allow-origins=* --force-renderer-accessibility"
+    proxy_argument = webview_proxy_argument()
+    arguments = " ".join(
+        item
+        for item in (
+            f"--remote-debugging-port={port}",
+            "--remote-allow-origins=*",
+            "--force-renderer-accessibility",
+            proxy_argument,
+        )
+        if item
     )
     environment["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"] = arguments
     environment["WEBVIEW2_USER_DATA_FOLDER"] = str(

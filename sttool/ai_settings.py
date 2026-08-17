@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import socket
 import threading
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
@@ -7,6 +8,7 @@ from urllib.parse import urlsplit
 
 from .agent_connection_test import test_agent_connection
 from .models import DEFAULT_API_BASE_URL
+from .tool_network import normalize_tool_network
 from .workflow_settings import (
     WORK_MODE_LABELS,
     normalize_workflow_settings,
@@ -28,6 +30,13 @@ ASSET_APPROVAL_LABELS = {
     "countdown_reject": "弹窗提醒，倒计时后自动排除",
     "manual": "始终等待人工确认（不自动处理）",
 }
+
+TOOL_NETWORK_MODE_LABELS = {
+    "direct": "直连",
+    "http": "HTTP 代理",
+    "socks5": "SOCKS5（远程 DNS）",
+}
+
 
 CREDENTIAL_AUDIT_LABELS = {
     "save_only": "仅保存待办，不自动验证",
@@ -54,6 +63,7 @@ class AISettingsDialog(tk.Toplevel):
         claude_api_key: str = "",
         github_token: str = "",
         workflow_settings: dict[str, object] | None = None,
+        tool_network_settings: dict[str, object] | None = None,
     ) -> None:
         super().__init__(parent)
         self.result: dict[str, object] | None = None
@@ -69,6 +79,7 @@ class AISettingsDialog(tk.Toplevel):
         self.protocol("WM_DELETE_WINDOW", self.destroy)
 
         workflow = normalize_workflow_settings(workflow_settings)
+        tool_network = normalize_tool_network(tool_network_settings)
         self.api_base_url_var = tk.StringVar(value=api_base_url or DEFAULT_API_BASE_URL)
         self.model_var = tk.StringVar(value=model or "gpt-5.5")
         self.api_key_var = tk.StringVar(value=api_key)
@@ -175,6 +186,13 @@ class AISettingsDialog(tk.Toplevel):
         self.credential_audit_stop_on_defense_var = tk.BooleanVar(
             value=bool(workflow["credential_audit_stop_on_defense"])
         )
+        self.tool_network_mode_var = tk.StringVar(
+            value=TOOL_NETWORK_MODE_LABELS[str(tool_network["mode"])]
+        )
+        self.tool_proxy_host_var = tk.StringVar(value=str(tool_network["host"]))
+        self.tool_proxy_port_var = tk.IntVar(value=int(tool_network["port"]))
+        self.tool_header_name_var = tk.StringVar(value=str(tool_network["header_name"]))
+        self.tool_header_value_var = tk.StringVar(value=str(tool_network["header_value"]))
 
         content = ttk.Frame(self, padding=16)
         content.pack(fill="both", expand=True)
@@ -184,6 +202,7 @@ class AISettingsDialog(tk.Toplevel):
         self._build_agent_tab(notebook, "claude")
         self._build_shared_ai_tab(notebook)
         self._build_vulnerability_intel_tab(notebook)
+        self._build_tool_network_tab(notebook)
         self._build_workflow_tab(notebook)
 
         actions = ttk.Frame(content)
@@ -495,6 +514,65 @@ class AISettingsDialog(tk.Toplevel):
             tab,
             text="留空时该阶段会显示“等待配置”，不会把整个项目判定为失败。",
         ).grid(row=3, column=0, sticky="w", pady=(12, 0))
+
+    def _build_tool_network_tab(self, notebook: ttk.Notebook) -> None:
+        tab = self._add_scrollable_tab(notebook, "工具网络")
+        tab.columnconfigure(1, weight=1)
+        ttk.Label(
+            tab,
+            text=(
+                "只影响 STTool 启动的扫描/取证工具，不修改 Windows 系统代理，也不修改 "
+                "Codex、Codexx 或 Claude CLI。直连会清除子进程继承的代理环境；"
+                "SOCKS5 使用远程 DNS。已经运行的外部工具不会被强制重启，恢复项目或下一轮工具进程会使用新设置。"
+            ),
+            wraplength=700,
+        ).grid(row=0, column=0, columnspan=3, sticky="w", pady=(0, 16))
+        ttk.Label(tab, text="网络模式").grid(row=1, column=0, sticky="w", padx=(0, 12), pady=5)
+        ttk.Combobox(
+            tab,
+            textvariable=self.tool_network_mode_var,
+            values=tuple(TOOL_NETWORK_MODE_LABELS.values()),
+            state="readonly",
+        ).grid(row=1, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Label(tab, text="代理地址").grid(row=2, column=0, sticky="w", padx=(0, 12), pady=5)
+        ttk.Entry(tab, textvariable=self.tool_proxy_host_var).grid(row=2, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Label(tab, text="代理端口").grid(row=3, column=0, sticky="w", padx=(0, 12), pady=5)
+        ttk.Spinbox(tab, from_=1, to=65535, textvariable=self.tool_proxy_port_var, width=10).grid(row=3, column=1, sticky="w", pady=5)
+        ttk.Button(tab, text="测试代理端口", command=self._test_tool_proxy).grid(row=3, column=2, sticky="e", pady=5)
+        ttk.Separator(tab).grid(row=4, column=0, columnspan=3, sticky="ew", pady=14)
+        ttk.Label(tab, text="附加请求头名称").grid(row=5, column=0, sticky="w", padx=(0, 12), pady=5)
+        ttk.Entry(tab, textvariable=self.tool_header_name_var).grid(row=5, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Label(tab, text="附加请求头值").grid(row=6, column=0, sticky="w", padx=(0, 12), pady=5)
+        ttk.Entry(tab, textvariable=self.tool_header_value_var).grid(row=6, column=1, columnspan=2, sticky="ew", pady=5)
+        ttk.Label(
+            tab,
+            text=(
+                "例如名称 flag、值 xiaoxiong。PassHack、nuclei 和 STTool 原生 HTTP 会直接使用；"
+                "其他 GUI/闭源工具若不支持自定义请求头，应让它们经过可注入该请求头的中间代理。"
+                "原始端口扫描（如 fscan 的 TCP 探测）不属于 HTTP，代理和请求头不会作用于该部分。"
+            ),
+            wraplength=700,
+        ).grid(row=7, column=0, columnspan=3, sticky="w", pady=(12, 0))
+
+    def _test_tool_proxy(self) -> None:
+        reverse = {label: mode for mode, label in TOOL_NETWORK_MODE_LABELS.items()}
+        mode = reverse.get(self.tool_network_mode_var.get(), "direct")
+        if mode == "direct":
+            messagebox.showinfo("工具网络", "当前为直连模式，不需要测试代理端口。", parent=self)
+            return
+        host = self.tool_proxy_host_var.get().strip()
+        try:
+            port = int(self.tool_proxy_port_var.get())
+            with socket.create_connection((host, port), timeout=3):
+                pass
+        except (OSError, TypeError, ValueError) as exc:
+            messagebox.showerror("工具网络", f"代理端口连接失败：{exc}", parent=self)
+            return
+        messagebox.showinfo(
+            "工具网络",
+            f"已连接 {host}:{port}。这只确认端口可达，不代表上游线路和请求头注入一定成功。",
+            parent=self,
+        )
 
     def _build_workflow_tab(self, notebook: ttk.Notebook) -> None:
         tab = self._add_scrollable_tab(notebook, "调度方式")
@@ -890,6 +968,20 @@ class AISettingsDialog(tk.Toplevel):
         if not model:
             messagebox.showerror("STTool 全局设置", "工具协作模型不能为空", parent=self)
             return
+        network_reverse = {
+            label: mode for mode, label in TOOL_NETWORK_MODE_LABELS.items()
+        }
+        tool_network = normalize_tool_network(
+            {
+                "mode": network_reverse.get(
+                    self.tool_network_mode_var.get(), "direct"
+                ),
+                "host": self.tool_proxy_host_var.get(),
+                "port": self.tool_proxy_port_var.get(),
+                "header_name": self.tool_header_name_var.get(),
+                "header_value": self.tool_header_value_var.get(),
+            }
+        )
         reverse = {label: mode for mode, label in WORK_MODE_LABELS.items()}
         workflow = normalize_workflow_settings(
             {
@@ -953,5 +1045,6 @@ class AISettingsDialog(tk.Toplevel):
             "claude_api_key": self.claude_api_key_var.get().strip(),
             "github_token": self.github_token_var.get().strip(),
             "workflow": workflow,
+            "tool_network": tool_network,
         }
         self.destroy()

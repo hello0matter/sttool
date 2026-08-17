@@ -262,6 +262,14 @@ def component_paths(
             "logs": [own_log if own_log.is_file() else component_activity],
             "results": [workdir / "state.json"],
         }
+    if component_id == "passhack":
+        workdir = run_dir / "tool_data" / "passhack"
+        return {
+            "workdir": workdir,
+            "states": [workdir / "state.json"],
+            "logs": [workdir / "passhack.log", component_activity],
+            "results": [run_dir / "results" / "passhack.json"],
+        }
     if component_id == "project_coordinator":
         workdir = run_dir / "tool_data" / "coordinator"
         return {
@@ -347,6 +355,10 @@ def human_status(value: object) -> str:
         "skipped_no_token": "未配置 GitHub Token",
         "unavailable": "不可用",
         "completed_with_errors": "完成（有错误）",
+        "waiting_candidates": "等待登录入口",
+        "processing": "正在验证",
+        "weak_password_found": "发现弱口令",
+        "stopped_defense": "触发防护后停止",
     }.get(text, text or "\u672a\u77e5")
 
 
@@ -429,6 +441,37 @@ def render_component_state(path: Path, component_id: str) -> str:
         ).strip()
         if error:
             lines.append(f"错误摘要：{error[:1000]}")
+        return "\n".join(lines)
+    if component_id == "passhack":
+        counts = state.get("counts")
+        counts = counts if isinstance(counts, dict) else {}
+        lines.extend(
+            [
+                "【PassHack 后台登录面审计】",
+                f"状态：{human_status(state.get('status'))}",
+                f"阶段：{human_status(state.get('stage'))}",
+                f"说明：{state.get('detail') or '-'}",
+                f"当前目标：{state.get('current_target') or '等待新入口'}",
+                f"本进程已处理：{int(state.get('processed') or 0)} 条",
+                f"累计结果：{int(state.get('result_total') or 0)} 条",
+                f"待处理批准项：{int(state.get('approved_waiting') or 0)} 条",
+                f"有效检查：{int(counts.get('completed') or 0)} 条",
+                f"发现弱口令：{int(counts.get('weak_password_found') or 0)} 条",
+                f"触发防护停止：{int(counts.get('stopped_defense') or 0)} 条",
+                f"范围跳过：{int(counts.get('skipped_scope') or 0)} 条",
+                f"失败：{int(counts.get('error') or 0)} 条",
+                f"范围修复后重新排队：{int(state.get('requeued_scope_skips') or 0)} 条",
+                f"更新时间：{state.get('updated_at') or '-'}",
+            ]
+        )
+        last_result = state.get("last_result")
+        if isinstance(last_result, dict):
+            lines.append(
+                "最近结果："
+                f"{human_status(last_result.get('status'))}；"
+                f"{last_result.get('url') or '-'}；"
+                f"{last_result.get('result') or last_result.get('error') or '-'}"
+            )
         return "\n".join(lines)
     if component_id == "semantic_dirscan":
         if path.name == "sttool_bridge_state.json":
@@ -661,6 +704,27 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             str(state.get("stage") or ""),
             str(state.get("detail") or state.get("error") or ""),
         )
+    if component_id == "passhack":
+        state = load_json(run_dir / "tool_data" / "passhack" / "state.json")
+        status = str(state.get("status") or "pending")
+        stage = str(state.get("stage") or "waiting_candidates")
+        counts = state.get("counts")
+        counts = counts if isinstance(counts, dict) else {}
+        current = str(state.get("current_target") or "").strip()
+        detail = str(state.get("detail") or "").strip()
+        summary = (
+            f"已处理 {int(state.get('processed') or 0)} 条，"
+            f"有效检查 {int(counts.get('completed') or 0)} 条，"
+            f"弱口令 {int(counts.get('weak_password_found') or 0)} 条，"
+            f"防护停止 {int(counts.get('stopped_defense') or 0)} 条，"
+            f"范围跳过 {int(counts.get('skipped_scope') or 0)} 条，"
+            f"失败 {int(counts.get('error') or 0)} 条"
+        )
+        if current:
+            summary += f"；当前目标 {current}"
+        elif detail:
+            summary += f"；{detail}"
+        return status, stage, summary
     if component_id == "project_coordinator":
         state = load_json(run_dir / "tool_data" / "coordinator" / "state.json")
         detail = str(

@@ -40,6 +40,7 @@ from .models import (
 )
 from .global_settings_sync import apply_global_settings_to_runs
 from .registry import DEFAULT_ST_ROOT, availability
+from .tool_network import cli_network_args, load_tool_network, tool_environment
 from .workflow_settings import normalize_workflow_settings, normalized_reasoning_effort
 
 
@@ -50,6 +51,11 @@ CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 
 class LaunchError(RuntimeError):
     pass
+
+
+def project_authorization_confirmed(value: dict[str, object]) -> bool:
+    """Return the persisted project authorization decision, defaulting legacy files to false."""
+    return value.get("authorization_confirmed") is True
 
 
 def agent_cli_arguments(
@@ -555,7 +561,7 @@ class RuntimeManager:
         self, request: LaunchRequest, *, last_run_id: str = ""
     ) -> dict[str, object]:
         return {
-            "schema_version": 7,
+            "schema_version": 8,
             "name": request.project_name.strip(),
             "target": request.target.strip(),
             "scope": request.scope.strip(),
@@ -604,6 +610,7 @@ class RuntimeManager:
             "credential_audit_stop_on_defense": request.credential_audit_stop_on_defense,
             "selected_tools": list(request.selected_tools),
             "user_prompt": request.user_prompt,
+            "authorization_confirmed": request.authorization_confirmed,
             "last_run_id": last_run_id,
             "updated_at": now_text(),
         }
@@ -932,12 +939,18 @@ class RuntimeManager:
         environment: dict[str, str] | None = None,
     ) -> ProcessRecord:
         flags = CREATE_NEW_PROCESS_GROUP | (CREATE_NEW_CONSOLE if new_console else 0)
+        base_environment = {**os.environ, **(environment or {})}
+        process_environment = (
+            base_environment
+            if component_id == "ai_agent"
+            else tool_environment(load_tool_network(self.app_dir), base_environment)
+        )
         process = subprocess.Popen(
             [executable, *args],
             cwd=cwd,
             creationflags=flags,
             close_fds=True,
-            env={**os.environ, **(environment or {})},
+            env=process_environment,
         )
         return ProcessRecord(
             component_id=component_id,
@@ -1020,7 +1033,8 @@ class RuntimeManager:
                 item
                 for item in (self._format(arg, tool_context) for arg in tool.args)
                 if item
-            ],
+            ]
+            + cli_network_args(tool.tool_id),
             self._format(tool.cwd, tool_context),
             tool.new_console,
             environment,
@@ -2077,6 +2091,7 @@ class RuntimeManager:
         api_base_url: str = "",
         model: str = "",
         agent_profiles: dict[str, dict[str, str]] | None = None,
+        tool_network: dict[str, object] | None = None,
     ) -> list[RunState]:
         return apply_global_settings_to_runs(
             self.projects_dir,
@@ -2085,6 +2100,7 @@ class RuntimeManager:
             api_base_url=api_base_url,
             model=model,
             agent_profiles=agent_profiles,
+            tool_network=tool_network,
         )
 
     def update_project_scopes(

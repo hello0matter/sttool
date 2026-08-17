@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import json
 import os
@@ -24,6 +24,7 @@ from sttool.runtime import (
     pid_alive,
     process_creation_token,
     process_record_alive,
+    project_authorization_confirmed,
     read_json_file,
     reconcile_component_state,
     safe_project_name,
@@ -477,14 +478,18 @@ class RuntimeTests(unittest.TestCase):
                 model="gpt-5.5",
                 selected_tools=("passhack",),
                 user_prompt="saved only",
-                authorization_confirmed=False,
+                authorization_confirmed=True,
                 asset_processing_scope="example.test",
             )
 
             path = manager.save_project(request)
             saved = json.loads(path.read_text(encoding="utf-8"))
 
+            self.assertEqual(saved["schema_version"], 8)
             self.assertEqual(saved["selected_tools"], ["passhack"])
+            self.assertTrue(saved["authorization_confirmed"])
+            self.assertTrue(project_authorization_confirmed(saved))
+            self.assertFalse(project_authorization_confirmed({"name": "legacy"}))
             self.assertEqual(saved["last_run_id"], "existing-run")
             self.assertEqual(saved["asset_processing_scope"], "example.test")
             self.assertFalse((project_dir / "runs").exists())
@@ -1885,7 +1890,7 @@ class RuntimeTests(unittest.TestCase):
                 project = json.loads(
                     (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(project["schema_version"], 7)
+                self.assertEqual(project["schema_version"], 8)
                 self.assertEqual(project["fscan_port_threads"], 321)
                 self.assertEqual(project["semantic_threads"], 17)
                 self.assertEqual(project["semantic_max_depth"], 4)

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, ttk
@@ -13,11 +14,25 @@ from .countdown_pause import (
 )
 
 
-_ACTION_TEXT = {
+_AGENT_ACTION_TEXT = {
     "save_only": "仅保存待办，不执行口令验证",
     "agent_default_dictionary": "交给 Agent：使用默认字典",
-    "agent_social_dictionary": "交给 Agent：生成社工字典",
+    "agent_social_dictionary": "交给 Agent：生成目标相关字典",
 }
+_PASSHACK_ACTION_TEXT = {
+    "save_only": "仅保存待办，不执行口令验证",
+    "agent_default_dictionary": "交给 PassHack：使用默认字典",
+    "agent_social_dictionary": "交给 PassHack：生成目标相关字典",
+}
+
+
+def passhack_enabled(run_dir: Path) -> bool:
+    try:
+        value = json.loads((run_dir / "run.json").read_text(encoding="utf-8-sig"))
+    except (OSError, ValueError, TypeError, json.JSONDecodeError):
+        return False
+    selected = value.get("selected_tools") if isinstance(value, dict) else []
+    return isinstance(selected, list) and "passhack" in selected
 
 
 class CredentialAuditDialog(tk.Toplevel):
@@ -36,10 +51,14 @@ class CredentialAuditDialog(tk.Toplevel):
         self.candidates = candidates
         self.on_close = on_close
         self._closed = False
+        self.passhack_enabled = passhack_enabled(run_dir)
+        self.action_text = (
+            _PASSHACK_ACTION_TEXT if self.passhack_enabled else _AGENT_ACTION_TEXT
+        )
         self.default_action = str(candidates[0].get("default_action") or "save_only")
-        if self.default_action not in _ACTION_TEXT:
+        if self.default_action not in self.action_text:
             self.default_action = "save_only"
-        self.action_var = tk.StringVar(value=_ACTION_TEXT[self.default_action])
+        self.action_var = tk.StringVar(value=self.action_text[self.default_action])
         self.usernames_var = tk.StringVar()
         self.wordlist_var = tk.StringVar(
             value=str(candidates[0].get("wordlist_path") or "")
@@ -86,7 +105,7 @@ class CredentialAuditDialog(tk.Toplevel):
         ttk.Combobox(
             form,
             textvariable=self.action_var,
-            values=tuple(_ACTION_TEXT.values()),
+            values=tuple(self.action_text.values()),
             state="readonly",
         ).grid(row=0, column=1, columnspan=2, sticky="ew", padx=(14, 0), pady=4)
         ttk.Label(form, text="候选用户名").grid(row=1, column=0, sticky="w", pady=4)
@@ -101,8 +120,13 @@ class CredentialAuditDialog(tk.Toplevel):
         ttk.Label(
             body,
             text=(
-                "用户名可用逗号、分号或空格分隔。Agent 会先识别真实登录请求，再调用 Burp MCP/Skill；"
-                "遇到验证码、HTTP 429 或锁定提示立即停止，成功口令不会写入报告和日志。"
+                "用户名可用逗号、分号或空格分隔。"
+                + (
+                    "PassHack 将在后台识别真实登录表单并按批准策略做受限字典验证；"
+                    if self.passhack_enabled
+                    else "Agent 会识别真实登录请求，并使用已配置的安全测试能力处理；"
+                )
+                + "遇到验证码、HTTP 429 或锁定提示立即停止，成功口令不会写入报告和日志。"
             ),
             wraplength=800,
         ).pack(anchor="w", fill="x", pady=(10, 0))
@@ -152,15 +176,15 @@ class CredentialAuditDialog(tk.Toplevel):
             remaining_text = "" if remaining is None else f"，剩余 {remaining} 秒"
             self.countdown_label.configure(
                 text=f"鼠标位于窗口内：倒计时已暂停{remaining_text}；移出后继续，"
-                f"到时默认：{_ACTION_TEXT[self.default_action]}。"
+                f"到时默认：{self.action_text[self.default_action]}。"
             )
         elif remaining is None:
             self.countdown_label.configure(
-                text=f"默认动作：始终等待人工确认；当前选择为 {_ACTION_TEXT[self.default_action]}。"
+                text=f"默认动作：始终等待人工确认；当前选择为 {self.action_text[self.default_action]}。"
             )
         else:
             self.countdown_label.configure(
-                text=f"{remaining} 秒后按全局默认方式：{_ACTION_TEXT[self.default_action]}。"
+                text=f"{remaining} 秒后按全局默认方式：{self.action_text[self.default_action]}。"
             )
             if remaining <= 0:
                 self._close_only()
@@ -182,7 +206,7 @@ class CredentialAuditDialog(tk.Toplevel):
             ]
 
     def _submit_selected(self) -> None:
-        reverse = {label: action for action, label in _ACTION_TEXT.items()}
+        reverse = {label: action for action, label in self.action_text.items()}
         self._submit(reverse.get(self.action_var.get(), "save_only"))
 
     def _submit_default(self) -> None:
@@ -219,4 +243,4 @@ class CredentialAuditDialog(tk.Toplevel):
         self.destroy()
 
 
-__all__ = ["CredentialAuditDialog"]
+__all__ = ["CredentialAuditDialog", "passhack_enabled"]
