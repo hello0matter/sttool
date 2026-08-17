@@ -1300,6 +1300,7 @@ _HOT_WORKFLOW_ARGUMENTS = {
     "workload_popup_topmost": "workload_popup_topmost",
     "asset_processing_scope": "asset_processing_scope",
     "credential_audit_enabled": "credential_audit_enabled",
+    "credential_audit_project_override": "credential_audit_project_override",
     "credential_audit_default_action": "credential_audit_default_action",
     "credential_audit_countdown_seconds": "credential_audit_countdown_seconds",
     "credential_audit_wordlist_path": "credential_audit_wordlist_path",
@@ -1397,6 +1398,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--workload-popup-topmost", type=parse_bool, default=True)
     parser.add_argument("--asset-processing-scope", default="")
     parser.add_argument("--credential-audit-enabled", type=parse_bool, default=True)
+    parser.add_argument(
+        "--credential-audit-project-override", type=parse_bool, default=False
+    )
     parser.add_argument(
         "--credential-audit-default-action",
         choices=("save_only", "agent_default_dictionary", "agent_social_dictionary"),
@@ -1542,6 +1546,7 @@ def main() -> int:
             "workload_popup_topmost": args.workload_popup_topmost,
             "asset_processing_scope": args.asset_processing_scope,
             "credential_audit_enabled": args.credential_audit_enabled,
+            "credential_audit_project_override": args.credential_audit_project_override,
             "credential_audit_default_action": args.credential_audit_default_action,
             "credential_audit_countdown_seconds": max(args.credential_audit_countdown_seconds, 3),
             "credential_audit_wordlist_path": args.credential_audit_wordlist_path,
@@ -2174,6 +2179,7 @@ def main() -> int:
         quiet = time.monotonic() - last_new >= max(args.settle_seconds, 1)
         credential_workflow = {
             "credential_audit_enabled": args.credential_audit_enabled,
+            "credential_audit_project_override": args.credential_audit_project_override,
             "credential_audit_default_action": args.credential_audit_default_action,
             "credential_audit_countdown_seconds": args.credential_audit_countdown_seconds,
             "credential_audit_wordlist_path": args.credential_audit_wordlist_path,

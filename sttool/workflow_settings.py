@@ -9,6 +9,7 @@ REASONING_EFFORTS: Final = ("", "low", "medium", "high", "xhigh")
 CREDENTIAL_AUDIT_DEFAULTS: Final = {
     "asset_processing_scope": "",
     "credential_audit_enabled": True,
+    "credential_audit_project_override": False,
     "credential_audit_default_action": "save_only",
     "credential_audit_countdown_seconds": 20,
     "credential_audit_popup_enabled": True,
@@ -206,6 +207,7 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
         "workload_popup_enabled",
         "workload_popup_topmost",
         "credential_audit_enabled",
+        "credential_audit_project_override",
         "credential_audit_popup_enabled",
         "credential_audit_popup_topmost",
         "credential_audit_stop_on_defense",

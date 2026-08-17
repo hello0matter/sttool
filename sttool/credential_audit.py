@@ -94,6 +94,9 @@ def discover_login_candidates(
     countdown = max(int(workflow.get("credential_audit_countdown_seconds") or 20), 3)
     policy = {
         "enabled": enabled,
+        "project_override": bool(
+            workflow.get("credential_audit_project_override", False)
+        ),
         "default_action": default_action,
         "countdown_seconds": countdown,
         "wordlist_path": str(workflow.get("credential_audit_wordlist_path") or ""),

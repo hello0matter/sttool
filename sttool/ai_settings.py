@@ -157,6 +157,9 @@ class AISettingsDialog(tk.Toplevel):
         self.credential_audit_enabled_var = tk.BooleanVar(
             value=bool(workflow["credential_audit_enabled"])
         )
+        self.credential_audit_project_override_var = tk.BooleanVar(
+            value=bool(workflow["credential_audit_project_override"])
+        )
         self.credential_audit_default_action_var = tk.StringVar(
             value=CREDENTIAL_AUDIT_LABELS[
                 str(workflow["credential_audit_default_action"])
@@ -732,59 +735,64 @@ class AISettingsDialog(tk.Toplevel):
             text="发现获准 URL 中的登录入口时创建安全检测待办",
             variable=self.credential_audit_enabled_var,
         ).grid(row=0, column=0, columnspan=3, sticky="w", pady=3)
+        ttk.Checkbutton(
+            credential,
+            text="使用本项目参数覆盖 PassHack GUI 默认配置",
+            variable=self.credential_audit_project_override_var,
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=3)
         ttk.Label(credential, text="倒计时后的默认处理").grid(
-            row=1, column=0, sticky="w", pady=4
+            row=2, column=0, sticky="w", pady=4
         )
         ttk.Combobox(
             credential,
             textvariable=self.credential_audit_default_action_var,
             values=tuple(CREDENTIAL_AUDIT_LABELS.values()),
             state="readonly",
-        ).grid(row=1, column=1, columnspan=2, sticky="ew", padx=(16, 0), pady=4)
+        ).grid(row=2, column=1, columnspan=2, sticky="ew", padx=(16, 0), pady=4)
         self._spin_field(
-            credential, 2, "确认弹窗倒计时（秒）", self.credential_audit_countdown_var, 3, 3600
+            credential, 3, "确认弹窗倒计时（秒）", self.credential_audit_countdown_var, 3, 3600
         )
         ttk.Checkbutton(
             credential,
             text="发现登录入口时显示醒目弹窗",
             variable=self.credential_audit_popup_enabled_var,
-        ).grid(row=3, column=0, columnspan=3, sticky="w", pady=3)
+        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=3)
         ttk.Checkbutton(
             credential,
             text="登录入口确认弹窗置顶并响铃提醒",
             variable=self.credential_audit_popup_topmost_var,
-        ).grid(row=4, column=0, columnspan=3, sticky="w", pady=3)
+        ).grid(row=5, column=0, columnspan=3, sticky="w", pady=3)
         ttk.Label(credential, text="基础字典路径（可选）").grid(
-            row=5, column=0, sticky="w", pady=4
+            row=6, column=0, sticky="w", pady=4
         )
         ttk.Entry(credential, textvariable=self.credential_audit_wordlist_var).grid(
-            row=5, column=1, sticky="ew", padx=(16, 8), pady=4
+            row=6, column=1, sticky="ew", padx=(16, 8), pady=4
         )
         ttk.Button(
             credential, text="浏览...", command=self._browse_credential_wordlist
-        ).grid(row=5, column=2, pady=4)
+        ).grid(row=6, column=2, pady=4)
         self._spin_field(
-            credential, 6, "每账号最大尝试数", self.credential_audit_max_attempts_var, 1, 1000
+            credential, 7, "每账号最大尝试数", self.credential_audit_max_attempts_var, 1, 1000
         )
         self._spin_field(
-            credential, 7, "每分钟最大请求数", self.credential_audit_requests_per_minute_var, 1, 600
+            credential, 8, "每分钟最大请求数", self.credential_audit_requests_per_minute_var, 1, 600
         )
         self._spin_field(
-            credential, 8, "并发数", self.credential_audit_concurrency_var, 1, 20
+            credential, 9, "并发数", self.credential_audit_concurrency_var, 1, 20
         )
         ttk.Checkbutton(
             credential,
             text="遇到验证码、HTTP 429 或账号锁定提示立即停止",
             variable=self.credential_audit_stop_on_defense_var,
-        ).grid(row=9, column=0, columnspan=3, sticky="w", pady=3)
+        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=3)
         ttk.Label(
             credential,
             text=(
-                "Web 登录不会直接交给 Tscan 服务口令模块。Agent 会先识别真实请求，再优先调用 Burp MCP/Skill；"
-                "全新安装默认仅保存待办，避免无人值守时触发账号锁定。"
+                "默认读取 PassHack GUI 保存的 STTool 默认配置；勾选项目覆盖后，才使用本页字典、尝试数和速率。"
+                "新配置从后台处理下一条登录入口开始生效，不会中断正在发送的一次请求。"
             ),
             wraplength=680,
-        ).grid(row=10, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         scan = ttk.LabelFrame(tab, text="扫描工具参数（按工作模式预设）", padding=12)
         scan.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
@@ -899,6 +907,9 @@ class AISettingsDialog(tk.Toplevel):
         self.workload_popup_enabled_var.set(bool(preset["workload_popup_enabled"]))
         self.workload_popup_topmost_var.set(bool(preset["workload_popup_topmost"]))
         self.credential_audit_enabled_var.set(bool(preset["credential_audit_enabled"]))
+        self.credential_audit_project_override_var.set(
+            bool(preset["credential_audit_project_override"])
+        )
         self.credential_audit_default_action_var.set(
             CREDENTIAL_AUDIT_LABELS[str(preset["credential_audit_default_action"])]
         )
@@ -1016,6 +1027,9 @@ class AISettingsDialog(tk.Toplevel):
                 "workload_popup_enabled": self.workload_popup_enabled_var.get(),
                 "workload_popup_topmost": self.workload_popup_topmost_var.get(),
                 "credential_audit_enabled": self.credential_audit_enabled_var.get(),
+                "credential_audit_project_override": (
+                    self.credential_audit_project_override_var.get()
+                ),
                 "credential_audit_default_action": {
                     label: action for action, label in CREDENTIAL_AUDIT_LABELS.items()
                 }.get(self.credential_audit_default_action_var.get(), "save_only"),

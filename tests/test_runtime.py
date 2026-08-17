@@ -480,14 +480,16 @@ class RuntimeTests(unittest.TestCase):
                 user_prompt="saved only",
                 authorization_confirmed=True,
                 asset_processing_scope="example.test",
+                credential_audit_project_override=True,
             )
 
             path = manager.save_project(request)
             saved = json.loads(path.read_text(encoding="utf-8"))
 
-            self.assertEqual(saved["schema_version"], 8)
+            self.assertEqual(saved["schema_version"], 9)
             self.assertEqual(saved["selected_tools"], ["passhack"])
             self.assertTrue(saved["authorization_confirmed"])
+            self.assertTrue(saved["credential_audit_project_override"])
             self.assertTrue(project_authorization_confirmed(saved))
             self.assertFalse(project_authorization_confirmed({"name": "legacy"}))
             self.assertEqual(saved["last_run_id"], "existing-run")
@@ -1890,7 +1892,7 @@ class RuntimeTests(unittest.TestCase):
                 project = json.loads(
                     (Path(state.run_dir) / "project.json").read_text(encoding="utf-8")
                 )
-                self.assertEqual(project["schema_version"], 8)
+                self.assertEqual(project["schema_version"], 9)
                 self.assertEqual(project["fscan_port_threads"], 321)
                 self.assertEqual(project["semantic_threads"], 17)
                 self.assertEqual(project["semantic_max_depth"], 4)

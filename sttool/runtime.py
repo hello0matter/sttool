@@ -561,7 +561,7 @@ class RuntimeManager:
         self, request: LaunchRequest, *, last_run_id: str = ""
     ) -> dict[str, object]:
         return {
-            "schema_version": 8,
+            "schema_version": 9,
             "name": request.project_name.strip(),
             "target": request.target.strip(),
             "scope": request.scope.strip(),
@@ -599,6 +599,7 @@ class RuntimeManager:
             "workload_popup_topmost": request.workload_popup_topmost,
             "asset_processing_scope": request.asset_processing_scope,
             "credential_audit_enabled": request.credential_audit_enabled,
+            "credential_audit_project_override": request.credential_audit_project_override,
             "credential_audit_default_action": request.credential_audit_default_action,
             "credential_audit_countdown_seconds": request.credential_audit_countdown_seconds,
             "credential_audit_popup_enabled": request.credential_audit_popup_enabled,
@@ -1318,6 +1319,8 @@ class RuntimeManager:
                 request.asset_processing_scope,
                 "--credential-audit-enabled",
                 str(request.credential_audit_enabled).lower(),
+                "--credential-audit-project-override",
+                str(request.credential_audit_project_override).lower(),
                 "--credential-audit-default-action",
                 request.credential_audit_default_action,
                 "--credential-audit-countdown-seconds",
@@ -1493,6 +1496,12 @@ class RuntimeManager:
                     value.get("asset_processing_scope", state.asset_processing_scope)
                 ),
                 credential_audit_enabled=bool(value.get("credential_audit_enabled", state.credential_audit_enabled)),
+                credential_audit_project_override=bool(
+                    value.get(
+                        "credential_audit_project_override",
+                        state.credential_audit_project_override,
+                    )
+                ),
                 credential_audit_default_action=str(value.get("credential_audit_default_action", state.credential_audit_default_action)),
                 credential_audit_countdown_seconds=int(value.get("credential_audit_countdown_seconds", state.credential_audit_countdown_seconds)),
                 credential_audit_popup_enabled=bool(value.get("credential_audit_popup_enabled", state.credential_audit_popup_enabled)),
@@ -1561,6 +1570,7 @@ class RuntimeManager:
                 workload_popup_topmost=request.workload_popup_topmost,
                 asset_processing_scope=request.asset_processing_scope,
                 credential_audit_enabled=request.credential_audit_enabled,
+                credential_audit_project_override=request.credential_audit_project_override,
                 credential_audit_default_action=request.credential_audit_default_action,
                 credential_audit_countdown_seconds=request.credential_audit_countdown_seconds,
                 credential_audit_popup_enabled=request.credential_audit_popup_enabled,
@@ -1719,6 +1729,7 @@ class RuntimeManager:
                     workload_popup_topmost=request.workload_popup_topmost,
                     asset_processing_scope=request.asset_processing_scope,
                     credential_audit_enabled=request.credential_audit_enabled,
+                    credential_audit_project_override=request.credential_audit_project_override,
                     credential_audit_default_action=request.credential_audit_default_action,
                     credential_audit_countdown_seconds=request.credential_audit_countdown_seconds,
                     credential_audit_popup_enabled=request.credential_audit_popup_enabled,
@@ -1777,6 +1788,7 @@ class RuntimeManager:
                 workload_popup_topmost=request.workload_popup_topmost,
                 asset_processing_scope=request.asset_processing_scope,
                 credential_audit_enabled=request.credential_audit_enabled,
+                credential_audit_project_override=request.credential_audit_project_override,
                 credential_audit_default_action=request.credential_audit_default_action,
                 credential_audit_countdown_seconds=request.credential_audit_countdown_seconds,
                 credential_audit_popup_enabled=request.credential_audit_popup_enabled,
@@ -1921,6 +1933,9 @@ class RuntimeManager:
             state.workload_popup_topmost = request.workload_popup_topmost
             state.asset_processing_scope = request.asset_processing_scope
             state.credential_audit_enabled = request.credential_audit_enabled
+            state.credential_audit_project_override = (
+                request.credential_audit_project_override
+            )
             state.credential_audit_default_action = request.credential_audit_default_action
             state.credential_audit_countdown_seconds = request.credential_audit_countdown_seconds
             state.credential_audit_popup_enabled = request.credential_audit_popup_enabled

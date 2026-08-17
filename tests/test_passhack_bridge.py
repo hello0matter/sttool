@@ -64,7 +64,11 @@ class PasshackBridgeTests(TestCase):
             candidates.write_text(
                 json.dumps(
                     {
-                        "policy": {"max_attempts": 2, "requests_per_minute": 60000},
+                        "policy": {
+                            "project_override": True,
+                            "max_attempts": 2,
+                            "requests_per_minute": 60000,
+                        },
                         "candidates": [
                             {
                                 "id": "one",
@@ -118,6 +122,7 @@ class PasshackBridgeTests(TestCase):
                 json.dumps(
                     {
                         "policy": {
+                            "project_override": True,
                             "max_attempts": 5,
                             "requests_per_minute": 60000,
                             "stop_on_defense": True,
@@ -153,6 +158,67 @@ class PasshackBridgeTests(TestCase):
 
             self.assertEqual(result["status"], "stopped_defense")
             self.assertEqual(submit.call_count, 1)
+
+
+    def test_gui_defaults_are_hot_loaded_until_project_override_is_enabled(self) -> None:
+        module = load_bridge()
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            defaults = root / "sttool_defaults.json"
+            candidates = root / "credential_audit.json"
+            defaults.write_text(
+                json.dumps(
+                    {
+                        "brute_enabled": True,
+                        "max_attempts": 3,
+                        "requests_per_minute": 12,
+                        "concurrency": 2,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            candidates.write_text(
+                json.dumps(
+                    {
+                        "policy": {
+                            "project_override": False,
+                            "max_attempts": 9,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            with patch.dict(
+                module.os.environ,
+                {"PASSHACK_STTOOL_DEFAULTS_PATH": str(defaults)},
+                clear=False,
+            ):
+                policy, summary = module.effective_policy(candidates)
+                self.assertEqual(policy["max_attempts"], 3)
+                self.assertEqual(summary["source"], "PassHack GUI ????")
+
+                defaults.write_text(
+                    json.dumps({"brute_enabled": True, "max_attempts": 4}),
+                    encoding="utf-8",
+                )
+                policy, _summary = module.effective_policy(candidates)
+                self.assertEqual(policy["max_attempts"], 4)
+
+                candidates.write_text(
+                    json.dumps(
+                        {
+                            "policy": {
+                                "project_override": True,
+                                "max_attempts": 9,
+                                "requests_per_minute": 20,
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+                policy, summary = module.effective_policy(candidates)
+                self.assertEqual(policy["max_attempts"], 9)
+                self.assertEqual(summary["source"], "STTool ????")
 
     def test_requeues_previous_scope_skips_but_not_filter_rejections(self) -> None:
         module = load_bridge()

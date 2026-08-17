@@ -464,6 +464,21 @@ def render_component_state(path: Path, component_id: str) -> str:
                 f"更新时间：{state.get('updated_at') or '-'}",
             ]
         )
+        effective_config = state.get("effective_config")
+        if isinstance(effective_config, dict):
+            lines.extend(
+                [
+                    "??????????",
+                    f"?????{effective_config.get('source') or '-'}",
+                    f"??????{'??' if effective_config.get('brute_enabled', True) else '??'}",
+                    f"????????{int(effective_config.get('max_attempts') or 10)} ?",
+                    f"????????{int(effective_config.get('requests_per_minute') or 10)} ?",
+                    f"?????{int(effective_config.get('concurrency') or 1)}",
+                    f"?????????{'?' if effective_config.get('stop_on_defense', True) else '?'}",
+                    f"?????{effective_config.get('username_wordlist_path') or 'PassHack ????'}",
+                    f"?????{effective_config.get('wordlist_path') or 'PassHack ????'}",
+                ]
+            )
         last_result = state.get("last_result")
         if isinstance(last_result, dict):
             lines.append(
@@ -720,6 +735,9 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
             f"范围跳过 {int(counts.get('skipped_scope') or 0)} 条，"
             f"失败 {int(counts.get('error') or 0)} 条"
         )
+        effective_config = state.get("effective_config")
+        if isinstance(effective_config, dict) and effective_config.get("source"):
+            summary += f"??? {effective_config['source']}"
         if current:
             summary += f"；当前目标 {current}"
         elif detail:

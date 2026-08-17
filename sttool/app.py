@@ -837,6 +837,9 @@ class LauncherApp(tk.Tk):
             credential_audit_enabled=bool(
                 self.workflow_settings["credential_audit_enabled"]
             ),
+            credential_audit_project_override=bool(
+                self.workflow_settings["credential_audit_project_override"]
+            ),
             credential_audit_default_action=str(
                 self.workflow_settings["credential_audit_default_action"]
             ),

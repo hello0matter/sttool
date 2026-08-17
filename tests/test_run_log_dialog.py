@@ -702,6 +702,14 @@ class RunLogDialogTests(unittest.TestCase):
                         "result_total": 5,
                         "approved_waiting": 2,
                         "requeued_scope_skips": 4,
+                        "effective_config": {
+                            "source": "PassHack GUI ????",
+                            "brute_enabled": True,
+                            "max_attempts": 6,
+                            "requests_per_minute": 12,
+                            "concurrency": 2,
+                            "stop_on_defense": True,
+                        },
                         "counts": {
                             "completed": 2,
                             "weak_password_found": 1,
