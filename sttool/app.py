@@ -262,6 +262,9 @@ class LauncherApp(tk.Tk):
         self.target_var = tk.StringVar()
         self.provider_var = tk.StringVar(value="codexx")
         self.auth_var = tk.BooleanVar(value=False)
+        self.auth_text_var = tk.StringVar()
+        self.auth_var.trace_add("write", self._authorization_changed)
+        self._authorization_changed()
         self.target_var.trace_add("write", self._target_changed)
         self.launch_scope = ""
         self.launch_processing_scope = ""
@@ -317,7 +320,7 @@ class LauncherApp(tk.Tk):
         left.rowconfigure(7, weight=1)
         ttk.Checkbutton(
             left,
-            text="我确认已获得上述范围的安全测试授权",
+            textvariable=self.auth_text_var,
             variable=self.auth_var,
         ).grid(row=8, column=0, sticky="w")
 
@@ -1492,6 +1495,7 @@ class LauncherApp(tk.Tk):
                 f"配置已保存到：\n{path}\n\n"
                 "工具勾选和参数将在以后新建实例时使用。"
                 "当前运行实例不会因此自动启动或停止工具。"
+                f"授权确认状态：{'已保存' if request.authorization_confirmed else '未确认'}。"
             ),
             parent=self,
         )
@@ -1555,6 +1559,13 @@ class LauncherApp(tk.Tk):
         self.prompt_text.delete("1.0", "end")
         self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
         self.auth_var.set(project_authorization_confirmed(value))
+
+    def _authorization_changed(self, *_args: object) -> None:
+        if self.auth_var.get():
+            text = "已确认获得上述范围的安全测试授权（会随项目配置保存）"
+        else:
+            text = "尚未确认安全测试授权（启动前必须确认）"
+        self.auth_text_var.set(text)
 
     def _target_changed(self, *_args: object) -> None:
         if self.auth_var.get():

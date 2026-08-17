@@ -138,6 +138,33 @@ class RuntimeTests(unittest.TestCase):
             self.assertFalse(process_record_alive(foreign, temporary))
             self.assertEqual(foreign.creation_token, 0)
 
+    def test_spawn_captures_background_component_output(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manager = RuntimeManager(root, [], st_root=root)
+            log_path = root / "component_logs" / "test.log"
+
+            def fake_popen(*_args, **kwargs):
+                stream = kwargs["stdout"]
+                stream.write(b"startup diagnostic\n")
+                stream.flush()
+                return type("SpawnedProcess", (), {"pid": os.getpid()})()
+
+            with patch("sttool.runtime.subprocess.Popen", side_effect=fake_popen):
+                manager._spawn(
+                    "test_component",
+                    "Test component",
+                    sys.executable,
+                    [],
+                    str(root),
+                    False,
+                    {"_STTOOL_COMPONENT_LOG_PATH": str(log_path)},
+                )
+            self.assertIn(
+                "startup diagnostic",
+                log_path.read_text(encoding="utf-8"),
+            )
+
     def test_stop_does_not_terminate_pid_owned_by_another_run(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)
@@ -1738,6 +1765,11 @@ class RuntimeTests(unittest.TestCase):
                     manager.spawn_environments["project_coordinator"],
                     {
                         "PYTHONPATH": str(root.resolve()),
+                        "_STTOOL_COMPONENT_LOG_PATH": str(
+                            Path(state.run_dir)
+                            / "component_logs"
+                            / "project_coordinator.log"
+                        ),
                         "OPENAI_BASE_URL": "https://gateway.example/v1",
                         "OPENAI_MODEL": "gpt-5.5",
                         "OPENAI_API_KEY": "sk-runtime-only",
@@ -1750,6 +1782,9 @@ class RuntimeTests(unittest.TestCase):
                         "OPENAI_BASE_URL": "https://gateway.example/v1",
                         "OPENAI_MODEL": "gpt-5.5",
                         "OPENAI_API_KEY": "sk-runtime-only",
+                        "_STTOOL_COMPONENT_LOG_PATH": str(
+                            Path(state.run_dir) / "component_logs" / "dummy.log"
+                        ),
                     },
                 )
                 activity = (Path(state.run_dir) / "activity.log").read_text(

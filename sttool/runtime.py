@@ -941,18 +941,32 @@ class RuntimeManager:
     ) -> ProcessRecord:
         flags = CREATE_NEW_PROCESS_GROUP | (CREATE_NEW_CONSOLE if new_console else 0)
         base_environment = {**os.environ, **(environment or {})}
+        component_log_path = base_environment.pop(
+            "_STTOOL_COMPONENT_LOG_PATH", ""
+        ).strip()
         process_environment = (
             base_environment
             if component_id == "ai_agent"
             else tool_environment(load_tool_network(self.app_dir), base_environment)
         )
-        process = subprocess.Popen(
-            [executable, *args],
-            cwd=cwd,
-            creationflags=flags,
-            close_fds=True,
-            env=process_environment,
-        )
+        log_stream = None
+        if component_log_path:
+            log_path = Path(component_log_path)
+            log_path.parent.mkdir(parents=True, exist_ok=True)
+            log_stream = log_path.open("ab")
+        try:
+            process = subprocess.Popen(
+                [executable, *args],
+                cwd=cwd,
+                creationflags=flags,
+                close_fds=True,
+                env=process_environment,
+                stdout=log_stream,
+                stderr=subprocess.STDOUT if log_stream is not None else None,
+            )
+        finally:
+            if log_stream is not None:
+                log_stream.close()
         return ProcessRecord(
             component_id=component_id,
             name=name,
@@ -1026,6 +1040,9 @@ class RuntimeManager:
             formatted = self._format(value, tool_context)
             if formatted:
                 environment[name] = formatted
+        environment["_STTOOL_COMPONENT_LOG_PATH"] = str(
+            Path(context["run_dir"]) / "component_logs" / f"{tool.tool_id}.log"
+        )
         return self._spawn(
             tool.tool_id,
             tool.name,
@@ -1216,6 +1233,9 @@ class RuntimeManager:
             python = Path(sys.executable)
         environment = {
             "PYTHONPATH": str(self.app_dir),
+            "_STTOOL_COMPONENT_LOG_PATH": str(
+                run_dir / "component_logs" / "project_coordinator.log"
+            ),
             "OPENAI_BASE_URL": request.api_base_url.strip().rstrip("/"),
             "OPENAI_MODEL": request.model.strip(),
         }
@@ -1629,12 +1649,26 @@ class RuntimeManager:
                 atomic_json_write(state_path, state.to_dict())
                 time.sleep(0.8)
                 dead = [
-                    item.name
+                    item
                     for item in started
                     if not process_record_alive(item, run_dir)
                 ]
                 if dead:
-                    raise LaunchError(f"组件启动后立即退出: {', '.join(dead)}")
+                    diagnostics: list[str] = []
+                    for item in dead:
+                        log_path = run_dir / "component_logs" / f"{item.component_id}.log"
+                        try:
+                            log_text = log_path.read_text(
+                                encoding="utf-8", errors="replace"
+                            ).strip()
+                        except OSError:
+                            log_text = ""
+                        if log_text:
+                            diagnostics.append(f"{item.name}: {log_text[-1200:]}")
+                    detail = f"组件启动后立即退出: {', '.join(item.name for item in dead)}"
+                    if diagnostics:
+                        detail += "\n\n启动日志：\n" + "\n\n".join(diagnostics)
+                    raise LaunchError(detail)
                 for item in started:
                     if item.component_id in {"asset_commander", "project_coordinator"}:
                         reconcile_component_state(

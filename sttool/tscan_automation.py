@@ -9,6 +9,7 @@ import shutil
 import socket
 import sqlite3
 import subprocess
+import sys
 import tempfile
 import time
 import winreg
@@ -16,6 +17,9 @@ from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
 from urllib.request import urlopen
+
+if __package__ in {None, ""}:
+    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 import psutil
 from playwright.sync_api import Locator, Page, sync_playwright

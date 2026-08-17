@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 import unittest
 from pathlib import Path
@@ -60,6 +61,22 @@ class ModalPage:
 
 
 class TscanAutomationTests(unittest.TestCase):
+    def test_script_help_runs_outside_repository_working_directory(self) -> None:
+        script = Path(__file__).resolve().parents[1] / "sttool" / "tscan_automation.py"
+        with TemporaryDirectory() as temporary:
+            environment = dict(os.environ)
+            environment.pop("PYTHONPATH", None)
+            result = subprocess.run(
+                [sys.executable, str(script), "--help"],
+                cwd=temporary,
+                capture_output=True,
+                text=True,
+                timeout=15,
+                env=environment,
+                check=False,
+            )
+        self.assertEqual(result.returncode, 0, result.stderr)
+
     def test_interrupted_retry_preserves_successes_and_retries_only_failures(self) -> None:
         state = {
             "active_batch_id": "asset-generation-6-retry-1",
