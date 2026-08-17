@@ -133,7 +133,7 @@ class ProjectCoordinatorTests(unittest.TestCase):
                         "asset_processing_scope": "api.allowed.example",
                     },
                     "agent": {
-                        "provider": "codexx",
+                        "provider": "claude",
                         "agent_model": "hot-model",
                         "reasoning_effort": "high",
                         "agent_base_url": "https://agent.example/v1",
@@ -146,6 +146,7 @@ class ProjectCoordinatorTests(unittest.TestCase):
             self.assertEqual(args.workload_countdown_seconds, 25)
             self.assertEqual(args.poll_seconds, 7)
             self.assertEqual(args.max_agent_batches, 12)
+            self.assertEqual(args.provider, "claude")
             self.assertEqual(args.agent_model, "hot-model")
             self.assertEqual(args.reasoning_effort, "high")
             self.assertEqual(args.agent_base_url, "https://agent.example/v1")

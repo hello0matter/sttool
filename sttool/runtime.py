@@ -38,7 +38,7 @@ from .models import (
     ToolDefinition,
     normalize_provider,
 )
-from .global_settings_sync import apply_global_settings_to_runs
+from .global_settings_sync import apply_global_settings_to_runs, write_hot_settings
 from .registry import DEFAULT_ST_ROOT, availability
 from .tool_network import cli_network_args, load_tool_network, tool_environment
 from .workflow_settings import normalize_workflow_settings, normalized_reasoning_effort
@@ -641,6 +641,89 @@ class RuntimeManager:
             ),
         )
         return path
+
+    def update_project_configuration(
+        self,
+        request: LaunchRequest,
+        *,
+        tool_network: dict[str, object] | None = None,
+    ) -> list[RunState]:
+        """Persist a project snapshot and apply its live-safe fields to existing runs."""
+        self.save_project(request)
+        project_key = safe_project_name(request.project_name)
+        workflow = normalize_workflow_settings(
+            {
+                field: getattr(request, field)
+                for field in normalize_workflow_settings({})
+                if hasattr(request, field)
+            }
+        )
+        updated: list[RunState] = []
+        for state in self.list_runs():
+            if safe_project_name(state.project_name) != project_key:
+                continue
+            run_dir = Path(state.run_dir)
+            scope_changed = (
+                state.scope != request.scope.strip()
+                or state.asset_processing_scope
+                != request.asset_processing_scope.strip()
+            )
+            if scope_changed:
+                self.update_project_scopes(
+                    state,
+                    scope=request.scope,
+                    processing_scope=request.asset_processing_scope,
+                )
+
+            changed_fields: list[str] = []
+            live_values: dict[str, object] = {
+                "scope": request.scope.strip(),
+                "provider": request.provider,
+                "model": request.model.strip(),
+                "selected_tools": list(request.selected_tools),
+                "api_base_url": request.api_base_url.strip().rstrip("/"),
+                "agent_model": request.agent_model.strip(),
+                "reasoning_effort": request.reasoning_effort,
+                "agent_base_url": request.agent_base_url.strip().rstrip("/"),
+                "asset_processing_scope": request.asset_processing_scope.strip(),
+                **workflow,
+            }
+            for field, value in live_values.items():
+                if field not in RunState.__dataclass_fields__:
+                    continue
+                if getattr(state, field) != value:
+                    setattr(state, field, value)
+                    changed_fields.append(field)
+            if changed_fields:
+                state.updated_at = now_text()
+                atomic_json_write(run_dir / "run.json", state.to_dict())
+
+            run_project = self._project_value(
+                replace(
+                    request,
+                    target=state.target,
+                    project_name=state.project_name,
+                ),
+                last_run_id=state.run_id,
+            )
+            atomic_json_write(run_dir / "project.json", run_project)
+            hot = read_json_file(
+                run_dir / "tool_data" / "coordinator" / "hot_settings.json"
+            )
+            write_hot_settings(
+                run_dir,
+                state,
+                workflow,
+                tool_network if tool_network is not None else hot.get("tool_network", {}),
+            )
+            if changed_fields or scope_changed:
+                append_activity(
+                    run_dir,
+                    "项目配置已自动同步；后续任务使用最新范围、工具选择和 AI 设置，"
+                    "已启动的外部进程不会被强制终止。",
+                )
+            updated.append(state)
+        return updated
 
     def _new_standalone_dir(self, tool_id: str) -> tuple[str, Path]:
         runs_dir = self.app_dir / "standalone_runs" / safe_project_name(tool_id)

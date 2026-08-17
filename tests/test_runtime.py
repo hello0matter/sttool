@@ -530,6 +530,78 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(saved["asset_processing_scope"], "example.test")
             self.assertFalse((project_dir / "runs").exists())
 
+    def test_update_project_configuration_persists_and_updates_existing_run(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            tools = [
+                ToolDefinition(
+                    tool_id=tool_id,
+                    name=tool_id,
+                    category="test",
+                    description="test",
+                    executable=sys.executable,
+                )
+                for tool_id in ("fscan", "passhack")
+            ]
+            manager = RuntimeManager(root, tools, st_root=root)
+            run_dir = manager.projects_dir / "demo" / "runs" / "run-1"
+            run_dir.mkdir(parents=True)
+            state = RunState(
+                run_id="run-1",
+                project_name="demo",
+                target="https://original.example/",
+                scope="original.example",
+                provider="codexx",
+                model="old-model",
+                selected_tools=["fscan"],
+                run_dir=str(run_dir),
+                created_at="2026-08-17T00:00:00+08:00",
+                updated_at="2026-08-17T00:00:00+08:00",
+                status="paused",
+            )
+            atomic_json_write(run_dir / "run.json", state.to_dict())
+            atomic_json_write(
+                run_dir / "project.json",
+                {"name": "demo", "target": state.target, "scope": state.scope},
+            )
+            request = LaunchRequest(
+                project_name="demo",
+                target="https://future.example/",
+                scope="allowed.example",
+                provider="claude",
+                model="gpt-5.5",
+                selected_tools=("passhack",),
+                user_prompt="updated prompt",
+                authorization_confirmed=False,
+                agent_model="claude-model",
+                reasoning_effort="high",
+                asset_processing_scope="api.allowed.example",
+            )
+
+            updated = manager.update_project_configuration(request)
+
+            self.assertEqual(len(updated), 1)
+            persisted = read_json_file(run_dir / "run.json")
+            self.assertEqual(persisted["target"], "https://original.example/")
+            self.assertEqual(persisted["scope"], "allowed.example")
+            self.assertEqual(persisted["provider"], "claude")
+            self.assertEqual(persisted["selected_tools"], ["passhack"])
+            run_project = read_json_file(run_dir / "project.json")
+            self.assertEqual(run_project["target"], "https://original.example/")
+            self.assertFalse(run_project["authorization_confirmed"])
+            self.assertEqual(run_project["user_prompt"], "updated prompt")
+            project = manager.load_project("demo")
+            self.assertEqual(project["target"], "https://future.example/")
+            self.assertFalse(project["authorization_confirmed"])
+            hot = read_json_file(
+                run_dir / "tool_data" / "coordinator" / "hot_settings.json"
+            )
+            self.assertEqual(hot["agent"]["provider"], "claude")
+            self.assertEqual(
+                hot["workflow"]["asset_processing_scope"],
+                "api.allowed.example",
+            )
+
     def test_delete_project_stops_its_runs_and_removes_only_its_directory(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

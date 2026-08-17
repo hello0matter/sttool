@@ -56,7 +56,7 @@ def apply_global_settings_to_runs(
                 "已热更新全局设置：" + "、".join(changed_fields) + "。",
             )
 
-        _write_hot_settings(
+        write_hot_settings(
             run_dir, state, global_workflow, normalized_network
         )
         asset_path = run_dir / "tool_data" / "asset_bus" / "assets.json"
@@ -129,7 +129,7 @@ def _global_values_for_state(
     }
 
 
-def _write_hot_settings(
+def write_hot_settings(
     run_dir: Path,
     state: RunState,
     workflow: dict[str, object],
@@ -174,4 +174,4 @@ def _update_json(path: Path, updates: dict[str, object]) -> None:
     atomic_json_write(path, value)
 
 
-__all__ = ["apply_global_settings_to_runs"]
+__all__ = ["apply_global_settings_to_runs", "write_hot_settings"]

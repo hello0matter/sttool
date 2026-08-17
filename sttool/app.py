@@ -75,6 +75,12 @@ class LauncherApp(tk.Tk):
         self.run_states: dict[str, RunState] = {}
         self._loaded_run_config_key = ""
         self._busy = False
+        self._applying_project_value = True
+        self._autosave_after_id: str | None = None
+        self._autosave_revision = 0
+        self._autosave_in_progress = False
+        self._pending_autosave: tuple[int, LaunchRequest] | None = None
+        self._project_save_lock = threading.Lock()
         self._asset_approval_dialogs: dict[str, AssetApprovalDialog] = {}
         self._asset_approval_snooze_until: dict[str, float] = {}
         self._workload_approval_dialogs: dict[str, WorkloadApprovalDialog] = {}
@@ -148,6 +154,8 @@ class LauncherApp(tk.Tk):
         if initial_project and not project_name_is_url(initial_project):
             self.project_var.set(initial_project)
             self._load_project()
+        self._applying_project_value = False
+        self.protocol("WM_DELETE_WINDOW", self._on_close)
         self._load_runs()
         self._refresh_health()
         if self.tool_store.load_error:
@@ -284,6 +292,8 @@ class LauncherApp(tk.Tk):
         )
         self.project_box.grid(row=2, column=0, sticky="ew", pady=(0, 14))
         self.project_box.bind("<<ComboboxSelected>>", lambda _event: self._load_project())
+        self.project_box.bind("<FocusOut>", self._project_name_edited)
+        self.project_box.bind("<Return>", self._project_name_edited)
         self._field(left, 3, "主要目标（URL、域名或 IP）", self.target_var)
         scope_row = ttk.LabelFrame(left, text="项目范围", padding=10)
         scope_row.grid(row=5, column=0, sticky="ew", pady=(0, 14))
@@ -317,6 +327,8 @@ class LauncherApp(tk.Tk):
             font=("Microsoft YaHei UI", 10),
         )
         self.prompt_text.grid(row=7, column=0, sticky="nsew", pady=(0, 12))
+        self.prompt_text.bind("<<Modified>>", self._prompt_changed)
+        self.prompt_text.edit_modified(False)
         left.rowconfigure(7, weight=1)
         ttk.Checkbutton(
             left,
@@ -368,22 +380,17 @@ class LauncherApp(tk.Tk):
 
         action = ttk.Frame(right, style="Panel.TFrame")
         action.grid(row=5, column=0, sticky="ew", pady=(18, 0))
-        for column in range(3):
+        for column in range(2):
             action.columnconfigure(column, weight=1, uniform="launch-actions")
         self.start_button = ttk.Button(
             action, text="启动新实例", style="Accent.TButton", command=self._start
         )
         self.start_button.grid(row=0, column=0, sticky="ew")
         ttk.Button(
-            action,
-            text="保存项目配置",
-            command=self._save_project,
-        ).grid(row=0, column=1, sticky="ew", padx=(10, 0))
-        ttk.Button(
             action, text="打开项目目录", command=self._open_project_dir
-        ).grid(row=0, column=2, sticky="ew", padx=(10, 0))
+        ).grid(row=0, column=1, sticky="ew", padx=(10, 0))
         self.launch_status = ttk.Label(
-            right, text="每次启动都会创建独立运行目录", style="Muted.TLabel"
+            right, text="修改后自动保存，并同步当前项目实例", style="Muted.TLabel"
         )
         self.launch_status.grid(row=6, column=0, sticky="w", pady=(12, 0))
 
@@ -398,6 +405,7 @@ class LauncherApp(tk.Tk):
             available, reason = availability(tool)
             checked = selected.get(tool.tool_id, tool.default_selected) and available
             variable = tk.BooleanVar(value=checked)
+            variable.trace_add("write", self._project_field_changed)
             self.tool_vars[tool.tool_id] = variable
             box = ttk.Checkbutton(self.tool_frame, text=tool.name, variable=variable)
             box.grid(row=index, column=0, sticky="w", pady=3)
@@ -738,6 +746,7 @@ class LauncherApp(tk.Tk):
 
     def _provider_changed(self) -> None:
         self._refresh_health()
+        self._schedule_project_autosave()
 
     def _refresh_health(self) -> None:
         provider = self.provider_var.get()
@@ -884,6 +893,11 @@ class LauncherApp(tk.Tk):
         if self._busy:
             return
         request = self._request()
+        try:
+            self._persist_project_snapshot(request)
+        except (LaunchError, OSError, ValueError) as exc:
+            messagebox.showerror("项目配置", f"自动保存失败，尚未启动：{exc}")
+            return
         self._save_launcher_settings()
         self._busy = True
         self.start_button.state(["disabled"])
@@ -1474,32 +1488,6 @@ class LauncherApp(tk.Tk):
 
         threading.Thread(target=worker, daemon=True).start()
 
-    def _save_project(self) -> None:
-        if self._busy:
-            return
-        request = self._request()
-        try:
-            path = self.manager.save_project(request)
-        except (LaunchError, OSError) as exc:
-            messagebox.showerror("保存项目配置失败", str(exc), parent=self)
-            return
-        self._save_launcher_settings()
-        self.project_box.configure(values=self.manager.list_projects())
-        self.launch_status.configure(
-            text="项目配置已保存；不会启动或改变当前运行中的外部进程",
-            foreground=ACCENT,
-        )
-        messagebox.showinfo(
-            "项目配置已保存",
-            (
-                f"配置已保存到：\n{path}\n\n"
-                "工具勾选和参数将在以后新建实例时使用。"
-                "当前运行实例不会因此自动启动或停止工具。"
-                f"授权确认状态：{'已保存' if request.authorization_confirmed else '未确认'}。"
-            ),
-            parent=self,
-        )
-
     def _scope_update_finished(
         self,
         state: RunState,
@@ -1522,6 +1510,121 @@ class LauncherApp(tk.Tk):
             parent=self,
         )
 
+    def _project_name_edited(self, _event: tk.Event[tk.Misc]) -> None:
+        self._schedule_project_autosave()
+
+    def _project_field_changed(self, *_args: object) -> None:
+        self._schedule_project_autosave()
+
+    def _prompt_changed(self, _event: tk.Event[tk.Misc]) -> None:
+        if not self.prompt_text.edit_modified():
+            return
+        self.prompt_text.edit_modified(False)
+        self._schedule_project_autosave()
+
+    @staticmethod
+    def _autosave_ready(request: LaunchRequest) -> bool:
+        return bool(
+            request.project_name.strip()
+            and not project_name_is_url(request.project_name)
+            and request.target.strip()
+            and request.scope.strip()
+        )
+
+    def _schedule_project_autosave(self) -> None:
+        if self._applying_project_value or not hasattr(self, "launch_status"):
+            return
+        request = self._request()
+        if not self._autosave_ready(request):
+            self.launch_status.configure(
+                text="填写项目名称、主要目标和授权范围后将自动保存",
+                foreground=MUTED,
+            )
+            return
+        self._autosave_revision += 1
+        self._pending_autosave = (self._autosave_revision, request)
+        if self._autosave_after_id is not None:
+            self.after_cancel(self._autosave_after_id)
+        self.launch_status.configure(text="配置有修改，正在自动保存...", foreground=MUTED)
+        self._autosave_after_id = self.after(700, self._begin_project_autosave)
+
+    def _begin_project_autosave(self) -> None:
+        self._autosave_after_id = None
+        if self._autosave_in_progress or self._pending_autosave is None:
+            return
+        revision, request = self._pending_autosave
+        self._autosave_in_progress = True
+
+        def worker() -> None:
+            try:
+                states = self._persist_project_snapshot(request)
+            except (LaunchError, OSError, ValueError) as exc:
+                error = str(exc)
+                states = []
+            else:
+                error = ""
+            self.after(
+                0,
+                lambda: self._project_autosave_finished(
+                    revision, states, error
+                ),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _persist_project_snapshot(self, request: LaunchRequest) -> list[RunState]:
+        with self._project_save_lock:
+            return self.manager.update_project_configuration(
+                request,
+                tool_network=self.tool_network_settings,
+            )
+
+    def _project_autosave_finished(
+        self,
+        revision: int,
+        states: list[RunState],
+        error: str,
+    ) -> None:
+        self._autosave_in_progress = False
+        if states:
+            for state in states:
+                self.run_states[self._state_key(state)] = state
+            self._refresh_runs()
+        if error and revision == self._autosave_revision:
+            self._pending_autosave = None
+            self.launch_status.configure(
+                text=f"自动保存失败：{error}", foreground=DANGER
+            )
+        elif revision == self._autosave_revision:
+            self._pending_autosave = None
+            self._save_launcher_settings()
+            self.project_box.configure(values=self.manager.list_projects())
+            run_text = f"，已同步 {len(states)} 个现有实例" if states else ""
+            target_text = "；目标变更仅用于新实例" if states else ""
+            self.launch_status.configure(
+                text=f"已自动保存{run_text}{target_text}", foreground=ACCENT
+            )
+        if self._pending_autosave is not None:
+            self._autosave_after_id = self.after(100, self._begin_project_autosave)
+
+    def _on_close(self) -> None:
+        if self._autosave_after_id is not None:
+            self.after_cancel(self._autosave_after_id)
+            self._autosave_after_id = None
+        request = self._request()
+        if self._autosave_ready(request):
+            try:
+                self._persist_project_snapshot(request)
+            except (LaunchError, OSError, ValueError) as exc:
+                messagebox.showerror(
+                    "自动保存失败",
+                    f"项目配置尚未可靠写入，窗口未关闭：\n\n{exc}",
+                    parent=self,
+                )
+                return
+        self._save_launcher_settings()
+        self.destroy()
+
     def _open_project_dir(self) -> None:
         name = self.project_var.get().strip()
         if not name:
@@ -1538,27 +1641,35 @@ class LauncherApp(tk.Tk):
         os.startfile(path)
 
     def _apply_project_value(self, value: dict[str, object]) -> None:
-        self.project_var.set(str(value.get("name", self.project_var.get())))
-        self.target_var.set(str(value.get("target", "")))
-        self.launch_scope = str(value.get("scope") or "").strip()
-        self.launch_processing_scope = str(
-            value.get("asset_processing_scope") or ""
-        ).strip()
-        self._refresh_scope_summary()
+        previous = self._applying_project_value
+        self._applying_project_value = True
         try:
-            schema_version = int(value.get("schema_version", 1))
-        except (TypeError, ValueError):
-            schema_version = 1
-        provider = normalize_provider(value.get("provider", "codexx"), schema_version)
-        if provider not in {"codexx", "codex", "claude"}:
-            provider = "codexx"
-        self.provider_var.set(provider)
-        selected = set(value.get("selected_tools", []))
-        for tool_id, variable in self.tool_vars.items():
-            variable.set(tool_id in selected)
-        self.prompt_text.delete("1.0", "end")
-        self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
-        self.auth_var.set(project_authorization_confirmed(value))
+            self.project_var.set(str(value.get("name", self.project_var.get())))
+            self.target_var.set(str(value.get("target", "")))
+            self.launch_scope = str(value.get("scope") or "").strip()
+            self.launch_processing_scope = str(
+                value.get("asset_processing_scope") or ""
+            ).strip()
+            self._refresh_scope_summary()
+            try:
+                schema_version = int(value.get("schema_version", 1))
+            except (TypeError, ValueError):
+                schema_version = 1
+            provider = normalize_provider(
+                value.get("provider", "codexx"), schema_version
+            )
+            if provider not in {"codexx", "codex", "claude"}:
+                provider = "codexx"
+            self.provider_var.set(provider)
+            selected = set(value.get("selected_tools", []))
+            for tool_id, variable in self.tool_vars.items():
+                variable.set(tool_id in selected)
+            self.prompt_text.delete("1.0", "end")
+            self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
+            self.prompt_text.edit_modified(False)
+            self.auth_var.set(project_authorization_confirmed(value))
+        finally:
+            self._applying_project_value = previous
 
     def _authorization_changed(self, *_args: object) -> None:
         if self.auth_var.get():
@@ -1566,10 +1677,12 @@ class LauncherApp(tk.Tk):
         else:
             text = "尚未确认安全测试授权（启动前必须确认）"
         self.auth_text_var.set(text)
+        self._schedule_project_autosave()
 
     def _target_changed(self, *_args: object) -> None:
         if self.auth_var.get():
             self.auth_var.set(False)
+        self._schedule_project_autosave()
 
     def _edit_launch_scope(self) -> None:
         dialog = ProjectScopeDialog(
@@ -1588,6 +1701,7 @@ class LauncherApp(tk.Tk):
         self.launch_scope = scope
         self.launch_processing_scope = processing_scope
         self._refresh_scope_summary()
+        self._schedule_project_autosave()
 
     def _refresh_scope_summary(self) -> None:
         scope_count = len(

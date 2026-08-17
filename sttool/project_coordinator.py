@@ -1336,9 +1336,10 @@ def apply_hot_workflow_settings(
         reset_pending_deadlines=False,
     )
     agent = value.get("agent")
-    if isinstance(agent, dict) and str(agent.get("provider") or "") == str(
-        getattr(args, "provider", "")
-    ):
+    if isinstance(agent, dict):
+        provider = str(agent.get("provider") or "").strip()
+        if provider:
+            args.provider = provider
         args.agent_model = str(agent.get("agent_model") or "")
         args.reasoning_effort = str(agent.get("reasoning_effort") or "")
         args.agent_base_url = str(agent.get("agent_base_url") or "")
