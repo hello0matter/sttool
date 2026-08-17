@@ -17,7 +17,7 @@ from contextlib import contextmanager
 from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
-from typing import Iterable
+from typing import Callable, Iterable
 from urllib.parse import urlsplit
 
 from .activity import append_activity
@@ -2018,7 +2018,21 @@ class RuntimeManager:
         atomic_json_write(Path(state.run_dir) / "run.json", state.to_dict())
         return state
 
-    def stop(self, state: RunState) -> RunState:
+    def stop(
+        self,
+        state: RunState,
+        progress: Callable[[str], None] | None = None,
+    ) -> RunState:
+        def report(message: str) -> None:
+            if progress is None:
+                return
+            try:
+                progress(message)
+            except Exception:
+                # Progress reporting must never prevent a thorough pause.
+                pass
+
+        report(f"正在准备暂停实例 {state.run_id}…")
         append_activity(state.run_dir, "收到暂停实例请求。")
         run_dir = Path(state.run_dir)
         invalidated_scripts = invalidate_agent_launch_scripts(run_dir)
@@ -2027,6 +2041,7 @@ class RuntimeManager:
                 state.run_dir,
                 f"已作废 {invalidated_scripts} 个 AI 启动脚本，防止暂停后被延迟执行。",
             )
+            report(f"已作废 {invalidated_scripts} 个延迟 AI 启动任务。")
         coordinator = read_json_file(
             run_dir / "tool_data" / "coordinator" / "state.json"
         )
@@ -2042,6 +2057,7 @@ class RuntimeManager:
         managed_pids.extend(agent_shell_pids_for_run(run_dir))
         for pid in dict.fromkeys(managed_pids):
             if process_belongs_to_run(pid, run_dir):
+                report(f"正在停止 AI 关联进程（PID {pid}）…")
                 append_activity(state.run_dir, f"正在停止 AI 关联进程树，PID {pid}。")
                 terminate_agent_process_tree(pid)
             elif pid_alive(pid):
@@ -2051,6 +2067,7 @@ class RuntimeManager:
                 )
         for process in reversed(state.processes):
             if process_record_alive(process, run_dir):
+                report(f"正在停止组件：{process.name}…")
                 append_activity(
                     state.run_dir,
                     f"正在停止组件：{process.name}（PID {process.pid}）。",
@@ -2062,6 +2079,7 @@ class RuntimeManager:
                     f"跳过组件 {process.name} 的 PID {process.pid}：PID 已被其他进程占用。",
                 )
             process.status = "stopped"
+            report(f"组件已停止：{process.name}")
             reconcile_component_state(
                 state.run_dir,
                 process.component_id,
@@ -2072,6 +2090,7 @@ class RuntimeManager:
         state.updated_at = now_text()
         atomic_json_write(Path(state.run_dir) / "run.json", state.to_dict())
         append_activity(state.run_dir, "实例已暂停，状态和本地文件均已保留。")
+        report(f"实例 {state.run_id} 已彻底暂停，状态和文件均已保留。")
         return state
 
     def delete_project(self, project_name: str) -> Path:

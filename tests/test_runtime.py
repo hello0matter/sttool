@@ -171,10 +171,17 @@ class RuntimeTests(unittest.TestCase):
             launch_script.write_text("Write-Host 'legacy launch'\n", encoding="utf-8")
             (batch_dir / "launch.token").write_text("token", encoding="ascii")
 
+            progress_messages: list[str] = []
             with patch("sttool.runtime.terminate_process_tree") as terminate:
-                manager.stop(state)
+                manager.stop(state, progress=progress_messages.append)
 
             terminate.assert_not_called()
+            self.assertIn("正在准备暂停实例 run…", progress_messages)
+            self.assertIn("组件已停止：Foreign process", progress_messages)
+            self.assertIn(
+                "实例 run 已彻底暂停，状态和文件均已保留。",
+                progress_messages,
+            )
             self.assertEqual(state.processes[0].status, "stopped")
             self.assertFalse((batch_dir / "launch.token").exists())
             self.assertIn(

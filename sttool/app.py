@@ -438,11 +438,12 @@ class LauncherApp(tk.Tk):
         ttk.Button(actions, text="新实例重跑", command=self._load_selected_as_new).pack(
             side="left", padx=(8, 0)
         )
-        ttk.Button(
+        self.pause_button = ttk.Button(
             actions,
             text="暂停工程",
             command=self._stop_selected_run,
-        ).pack(side="right", padx=(8, 0))
+        )
+        self.pause_button.pack(side="right", padx=(8, 0))
         ttk.Button(
             actions,
             text="删除工程",
@@ -483,6 +484,13 @@ class LauncherApp(tk.Tk):
         self.run_tree.tag_configure("failed", foreground=DANGER)
         self.run_tree.bind("<Double-1>", lambda _event: self._open_run_log())
         self.run_tree.bind("<<TreeviewSelect>>", self._run_selection_changed)
+        self.pause_status_var = tk.StringVar(value="")
+        ttk.Label(
+            self.runs_tab,
+            textvariable=self.pause_status_var,
+            style="Muted.TLabel",
+            wraplength=980,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(8, 0))
 
     def _build_tools_tab(self) -> None:
         self.tools_tab.columnconfigure(0, weight=1)
@@ -1234,6 +1242,8 @@ class LauncherApp(tk.Tk):
         messagebox.showinfo("新实例重跑", detail)
 
     def _stop_selected_run(self) -> None:
+        if self._busy:
+            return
         state = self._selected_state()
         if state is None:
             messagebox.showinfo("暂停工程", "请先选择一个运行实例")
@@ -1253,13 +1263,64 @@ class LauncherApp(tk.Tk):
             (
                 f"确定暂停工程“{state.project_name}”当前运行的 "
                 f"{len(active_states)} 个实例吗？\n\n"
-                "扫描状态、结果、日志和本地文件都会保留，之后可以恢复。"
+                "暂停会在后台彻底停止关联组件、AI 执行器和延迟启动任务。\n"
+                "状态、结果、日志和本地文件都会保留，之后可以恢复。"
             ),
         ):
             return
-        for active_state in active_states:
-            self.manager.stop(active_state)
+        self._busy = True
+        self.pause_button.state(["disabled"])
+        self.pause_status_var.set("正在后台暂停工程；界面仍可使用，请稍候…")
+
+        def report(message: str) -> None:
+            self.after(
+                0,
+                lambda message=message: self.pause_status_var.set(message),
+            )
+
+        def worker() -> None:
+            stopped_states: list[RunState] = []
+            errors: list[str] = []
+            for active_state in active_states:
+                try:
+                    stopped_states.append(
+                        self.manager.stop(active_state, progress=report)
+                    )
+                except Exception as exc:
+                    errors.append(f"实例 {active_state.run_id}：{exc}")
+            self.after(
+                0,
+                lambda: self._pause_finished(stopped_states, errors),
+            )
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _pause_finished(
+        self,
+        stopped_states: list[RunState],
+        errors: list[str],
+    ) -> None:
+        self._busy = False
+        self.pause_button.state(["!disabled"])
+        for state in stopped_states:
+            self.run_states[self._state_key(state)] = state
         self._refresh_runs()
+        if errors:
+            detail = "\n".join(errors)
+            self.pause_status_var.set("暂停流程已结束，但部分实例停止失败。")
+            messagebox.showwarning(
+                "暂停未完全成功",
+                f"以下实例未能完整暂停：\n\n{detail}\n\n请查看项目日志后重试。",
+            )
+            return
+        count = len(stopped_states)
+        self.pause_status_var.set(
+            f"暂停完成：已彻底停止 {count} 个实例；状态、结果和文件均已保留。"
+        )
+        messagebox.showinfo(
+            "暂停完成",
+            f"已在后台彻底暂停 {count} 个实例，STTool 界面不会再因等待进程退出而卡死。",
+        )
 
     def _delete_selected_project(self) -> None:
         if self._busy:
