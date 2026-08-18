@@ -17,6 +17,7 @@ from .workload_approval_dialog import WorkloadApprovalDialog
 from .asset_bus import read_json
 from .asset_settings import AssetCommanderSettingsDialog
 from .help_text import ensure_help_document
+from .global_search_dialog import GlobalSearchDialog
 from .models import (
     DEFAULT_API_BASE_URL,
     LaunchRequest,
@@ -231,6 +232,11 @@ class LauncherApp(tk.Tk):
             header_actions,
             text="全局设置",
             command=self._open_ai_settings,
+        ).pack(side="left", padx=(8, 0))
+        ttk.Button(
+            header_actions,
+            text="全局搜索",
+            command=self._open_global_search,
         ).pack(side="left", padx=(8, 0))
 
         self.notebook = ttk.Notebook(self)
@@ -1816,6 +1822,9 @@ class LauncherApp(tk.Tk):
     def _open_help(self) -> None:
         path = ensure_help_document(self.manager.app_dir)
         os.startfile(path)
+
+    def _open_global_search(self) -> None:
+        GlobalSearchDialog(self)
 
     def _save_launcher_settings(self) -> None:
         value = {
