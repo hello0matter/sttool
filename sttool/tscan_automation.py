@@ -1014,9 +1014,9 @@ def run_elevated_registry_command(command: str) -> None:
             "-ExecutionPolicy",
             "Bypass",
             "-Command",
-            f"Start-Process powershell.exe -Verb RunAs -Wait -PassThru "
-            f"-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}' "
-            "| Select-Object -ExpandProperty ExitCode",
+            f"$p=Start-Process powershell.exe -Verb RunAs -Wait -PassThru "
+            f"-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}'; "
+            "$p.WaitForExit(); $p.ExitCode",
         ],
         capture_output=True,
         text=True,
