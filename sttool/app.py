@@ -77,11 +77,8 @@ class LauncherApp(tk.Tk):
         self._loaded_run_config_key = ""
         self._busy = False
         self._applying_project_value = True
-        self._autosave_after_id: str | None = None
-        self._autosave_revision = 0
-        self._autosave_in_progress = False
-        self._pending_autosave: tuple[int, LaunchRequest] | None = None
         self._project_save_lock = threading.Lock()
+        self._project_dirty = False
         self._asset_approval_dialogs: dict[str, AssetApprovalDialog] = {}
         self._asset_approval_snooze_until: dict[str, float] = {}
         self._workload_approval_dialogs: dict[str, WorkloadApprovalDialog] = {}
@@ -386,17 +383,20 @@ class LauncherApp(tk.Tk):
 
         action = ttk.Frame(right, style="Panel.TFrame")
         action.grid(row=5, column=0, sticky="ew", pady=(18, 0))
-        for column in range(2):
+        for column in range(3):
             action.columnconfigure(column, weight=1, uniform="launch-actions")
         self.start_button = ttk.Button(
             action, text="启动新实例", style="Accent.TButton", command=self._start
         )
         self.start_button.grid(row=0, column=0, sticky="ew")
         ttk.Button(
-            action, text="打开项目目录", command=self._open_project_dir
+            action, text="保存项目配置", command=self._save_project
         ).grid(row=0, column=1, sticky="ew", padx=(10, 0))
+        ttk.Button(
+            action, text="打开项目目录", command=self._open_project_dir
+        ).grid(row=0, column=2, sticky="ew", padx=(10, 0))
         self.launch_status = ttk.Label(
-            right, text="修改后自动保存，并同步当前项目实例", style="Muted.TLabel"
+            right, text="编辑中的修改不会影响运行实例；点击保存后才应用", style="Muted.TLabel"
         )
         self.launch_status.grid(row=6, column=0, sticky="w", pady=(12, 0))
 
@@ -898,12 +898,9 @@ class LauncherApp(tk.Tk):
     def _start(self) -> None:
         if self._busy:
             return
-        request = self._request()
-        try:
-            self._persist_project_snapshot(request)
-        except (LaunchError, OSError, ValueError) as exc:
-            messagebox.showerror("项目配置", f"自动保存失败，尚未启动：{exc}")
+        if not self._save_project(show_message=False):
             return
+        request = self._request()
         self._save_launcher_settings()
         self._busy = True
         self.start_button.state(["disabled"])
@@ -1517,16 +1514,16 @@ class LauncherApp(tk.Tk):
         )
 
     def _project_name_edited(self, _event: tk.Event[tk.Misc]) -> None:
-        self._schedule_project_autosave()
+        self._mark_project_dirty()
 
     def _project_field_changed(self, *_args: object) -> None:
-        self._schedule_project_autosave()
+        self._mark_project_dirty()
 
     def _prompt_changed(self, _event: tk.Event[tk.Misc]) -> None:
         if not self.prompt_text.edit_modified():
             return
         self.prompt_text.edit_modified(False)
-        self._schedule_project_autosave()
+        self._mark_project_dirty()
 
     @staticmethod
     def _autosave_ready(request: LaunchRequest) -> bool:
@@ -1538,45 +1535,46 @@ class LauncherApp(tk.Tk):
         )
 
     def _schedule_project_autosave(self) -> None:
+        self._mark_project_dirty()
+
+    def _mark_project_dirty(self) -> None:
         if self._applying_project_value or not hasattr(self, "launch_status"):
             return
+        self._project_dirty = True
+        self.launch_status.configure(
+            text="有未保存修改；不会影响运行实例，点击“保存项目配置”后应用",
+            foreground=MUTED,
+        )
+
+    def _save_project(self, show_message: bool = True) -> bool:
+        if self._busy:
+            return False
         request = self._request()
         if not self._autosave_ready(request):
-            self.launch_status.configure(
-                text="填写项目名称、主要目标和授权范围后将自动保存",
-                foreground=MUTED,
-            )
-            return
-        self._autosave_revision += 1
-        self._pending_autosave = (self._autosave_revision, request)
-        if self._autosave_after_id is not None:
-            self.after_cancel(self._autosave_after_id)
-        self.launch_status.configure(text="配置有修改，正在自动保存...", foreground=MUTED)
-        self._autosave_after_id = self.after(700, self._begin_project_autosave)
-
-    def _begin_project_autosave(self) -> None:
-        self._autosave_after_id = None
-        if self._autosave_in_progress or self._pending_autosave is None:
-            return
-        revision, request = self._pending_autosave
-        self._autosave_in_progress = True
-
-        def worker() -> None:
-            try:
-                states = self._persist_project_snapshot(request)
-            except (LaunchError, OSError, ValueError) as exc:
-                error = str(exc)
-                states = []
-            else:
-                error = ""
-            self.after(
-                0,
-                lambda: self._project_autosave_finished(
-                    revision, states, error
-                ),
-            )
-
-        threading.Thread(target=worker, daemon=True).start()
+            message = "请先填写项目名称、主要目标和授权范围。"
+            if show_message:
+                messagebox.showwarning("保存项目配置", message, parent=self)
+            self.launch_status.configure(text=message, foreground=DANGER)
+            return False
+        try:
+            states = self._persist_project_snapshot(request)
+        except (LaunchError, OSError, ValueError) as exc:
+            if show_message:
+                messagebox.showerror("保存项目配置失败", str(exc), parent=self)
+            self.launch_status.configure(text=f"保存失败：{exc}", foreground=DANGER)
+            return False
+        self._project_dirty = False
+        self._save_launcher_settings()
+        self.project_box.configure(values=self.manager.list_projects())
+        for state in states:
+            self.run_states[self._state_key(state)] = state
+        if states:
+            self._refresh_runs()
+        detail = f"项目配置已保存，已应用到 {len(states)} 个现有运行实例。"
+        self.launch_status.configure(text=detail, foreground=ACCENT)
+        if show_message:
+            messagebox.showinfo("保存项目配置", detail, parent=self)
+        return True
 
     def _persist_project_snapshot(self, request: LaunchRequest) -> list[RunState]:
         with self._project_save_lock:
@@ -1585,49 +1583,17 @@ class LauncherApp(tk.Tk):
                 tool_network=self.tool_network_settings,
             )
 
-    def _project_autosave_finished(
-        self,
-        revision: int,
-        states: list[RunState],
-        error: str,
-    ) -> None:
-        self._autosave_in_progress = False
-        if states:
-            for state in states:
-                self.run_states[self._state_key(state)] = state
-            self._refresh_runs()
-        if error and revision == self._autosave_revision:
-            self._pending_autosave = None
-            self.launch_status.configure(
-                text=f"自动保存失败：{error}", foreground=DANGER
-            )
-        elif revision == self._autosave_revision:
-            self._pending_autosave = None
-            self._save_launcher_settings()
-            self.project_box.configure(values=self.manager.list_projects())
-            run_text = f"，已同步 {len(states)} 个现有实例" if states else ""
-            target_text = "；目标变更仅用于新实例" if states else ""
-            self.launch_status.configure(
-                text=f"已自动保存{run_text}{target_text}", foreground=ACCENT
-            )
-        if self._pending_autosave is not None:
-            self._autosave_after_id = self.after(100, self._begin_project_autosave)
-
     def _on_close(self) -> None:
-        if self._autosave_after_id is not None:
-            self.after_cancel(self._autosave_after_id)
-            self._autosave_after_id = None
-        request = self._request()
-        if self._autosave_ready(request):
-            try:
-                self._persist_project_snapshot(request)
-            except (LaunchError, OSError, ValueError) as exc:
-                messagebox.showerror(
-                    "自动保存失败",
-                    f"项目配置尚未可靠写入，窗口未关闭：\n\n{exc}",
-                    parent=self,
-                )
-                return
+        if self._project_dirty and not messagebox.askyesno(
+            "未保存项目配置",
+            "当前项目配置有未保存修改。\n\n点击“是”保存并应用，点击“否”直接关闭并丢弃修改？",
+            parent=self,
+        ):
+            self._save_launcher_settings()
+            self.destroy()
+            return
+        if self._project_dirty and not self._save_project(show_message=False):
+            return
         self._save_launcher_settings()
         self.destroy()
 
@@ -1674,6 +1640,7 @@ class LauncherApp(tk.Tk):
             self.prompt_text.insert("1.0", str(value.get("user_prompt", "")))
             self.prompt_text.edit_modified(False)
             self.auth_var.set(project_authorization_confirmed(value))
+            self._project_dirty = False
         finally:
             self._applying_project_value = previous
 
