@@ -12,7 +12,6 @@ import subprocess
 import sys
 import tempfile
 import time
-import winreg
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -28,8 +27,6 @@ from sttool.tool_network import webview_proxy_argument
 
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
-POLICY_PATH = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
-POLICY_NAME = "TscanPlus_Win_Amd64.exe"
 DEFAULT_EXE = Path(r"D:\tmp\anjian\pj\st\TscanPlus_Win_Amd64\TscanPlus_Win_Amd64.exe")
 
 PASSWORD_CRACK = "\u5bc6\u7801\u7834\u89e3"
@@ -992,60 +989,6 @@ def free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
-
-
-class BrowserPolicy:
-    def __init__(self, port: int, executable_name: str = POLICY_NAME) -> None:
-        self.executable_name = executable_name
-        self.value = (
-            f"--remote-debugging-port={port} --remote-allow-origins=* "
-            "--force-renderer-accessibility"
-        )
-        self.entries: list[tuple[int, int, bool, tuple[object, int] | None]] = []
-
-    def __enter__(self) -> "BrowserPolicy":
-        last_error: OSError | None = None
-        view_flags = (winreg.KEY_WOW64_64KEY, winreg.KEY_WOW64_32KEY)
-        for root in (winreg.HKEY_LOCAL_MACHINE, winreg.HKEY_CURRENT_USER):
-            for view_flag in view_flags:
-                access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
-                try:
-                    key = winreg.CreateKeyEx(root, POLICY_PATH, 0, access)
-                except OSError as exc:
-                    last_error = exc
-                    continue
-                try:
-                    try:
-                        previous = winreg.QueryValueEx(key, self.executable_name)
-                        existed = True
-                    except FileNotFoundError:
-                        previous = None
-                        existed = False
-                    winreg.SetValueEx(key, self.executable_name, 0, winreg.REG_SZ, self.value)
-                    self.entries.append((root, view_flag, existed, previous))
-                finally:
-                    winreg.CloseKey(key)
-        if not self.entries:
-            raise RuntimeError(f"cannot configure WebView2 browser arguments: {last_error}")
-        return self
-
-    def __exit__(self, exc_type, exc, traceback) -> None:
-        for root, view_flag, existed, previous in reversed(self.entries):
-            access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
-            try:
-                key = winreg.OpenKey(root, POLICY_PATH, 0, access)
-            except FileNotFoundError:
-                continue
-            try:
-                if existed and previous is not None:
-                    winreg.SetValueEx(key, self.executable_name, 0, previous[1], previous[0])
-                else:
-                    try:
-                        winreg.DeleteValue(key, self.executable_name)
-                    except FileNotFoundError:
-                        pass
-            finally:
-                winreg.CloseKey(key)
 
 
 def wait_for_cdp(port: int, timeout: float = 20.0) -> str:
@@ -2906,37 +2849,36 @@ def main() -> int:
             port = free_local_port()
             state["cdp_port"] = port
             atomic_json_write(state_path, state)
-            with BrowserPolicy(port, exe.name):
-                run_dir = state_path.parents[2]
-                state["cdp_launch"] = {
-                    "method": "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS",
-                    "port": port,
-                    "user_data_folder": str(
-                        run_dir / "tool_data" / "tscan" / "webview2_data"
-                    ),
-                }
-                atomic_json_write(state_path, state)
-                child = subprocess.Popen(
-                    [str(exe)],
-                    cwd=exe.parent,
-                    creationflags=CREATE_NEW_PROCESS_GROUP,
-                    close_fds=True,
-                    env=webview_environment(port, run_dir),
-                )
-                child_pid = child.pid
-                child_creation_token = process_creation_token(child_pid)
-                state.update(
-                    pid=child_pid,
-                    process_creation_token=child_creation_token,
-                    updated_at=now_text(),
-                )
-                update_stage(
-                    state_path,
-                    state,
-                    "waiting_webview2",
-                    f"TscanPlus 已启动，等待 WebView2/CDP 就绪，最长 {int(CDP_START_TIMEOUT_SECONDS)} 秒",
-                )
-                wait_for_cdp(port, timeout=CDP_START_TIMEOUT_SECONDS)
+            run_dir = state_path.parents[2]
+            state["cdp_launch"] = {
+                "method": "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_ENV",
+                "port": port,
+                "user_data_folder": str(
+                    run_dir / "tool_data" / "tscan" / "webview2_data"
+                ),
+            }
+            atomic_json_write(state_path, state)
+            child = subprocess.Popen(
+                [str(exe)],
+                cwd=exe.parent,
+                creationflags=CREATE_NEW_PROCESS_GROUP,
+                close_fds=True,
+                env=webview_environment(port, run_dir),
+            )
+            child_pid = child.pid
+            child_creation_token = process_creation_token(child_pid)
+            state.update(
+                pid=child_pid,
+                process_creation_token=child_creation_token,
+                updated_at=now_text(),
+            )
+            update_stage(
+                state_path,
+                state,
+                "waiting_webview2",
+                f"TscanPlus 已启动，等待 WebView2/CDP 就绪，最长 {int(CDP_START_TIMEOUT_SECONDS)} 秒",
+            )
+            wait_for_cdp(port, timeout=CDP_START_TIMEOUT_SECONDS)
 
         if not state["automation_dispatched"]:
             assets = wait_for_asset_bundle(
