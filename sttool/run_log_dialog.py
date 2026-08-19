@@ -362,6 +362,20 @@ def human_status(value: object) -> str:
     }.get(text, text or "\u672a\u77e5")
 
 
+def human_stage(value: object) -> str:
+    text = str(value or "").strip()
+    return {
+        "process_stopped": "进程已停止",
+        "waiting_candidates": "等待登录入口",
+        "waiting_webview2": "等待 Tscan 页面接管",
+        "result_saved": "结果已保存",
+        "agent_batch": "执行 AI 批次",
+        "waiting_new_assets": "等待新资产",
+        "stopped": "已暂停",
+        "interrupted": "已中断",
+    }.get(text, text or "")
+
+
 def summarize_list(
     lines: list[str],
     label: str,
@@ -468,15 +482,15 @@ def render_component_state(path: Path, component_id: str) -> str:
         if isinstance(effective_config, dict):
             lines.extend(
                 [
-                    "??????????",
-                    f"?????{effective_config.get('source') or '-'}",
-                    f"??????{'??' if effective_config.get('brute_enabled', True) else '??'}",
-                    f"????????{int(effective_config.get('max_attempts') or 10)} ?",
-                    f"????????{int(effective_config.get('requests_per_minute') or 10)} ?",
-                    f"?????{int(effective_config.get('concurrency') or 1)}",
-                    f"?????????{'?' if effective_config.get('stop_on_defense', True) else '?'}",
-                    f"?????{effective_config.get('username_wordlist_path') or 'PassHack ????'}",
-                    f"?????{effective_config.get('wordlist_path') or 'PassHack ????'}",
+                    "【本次生效配置】",
+                    f"配置来源：{effective_config.get('source') or '-'}",
+                    f"弱口令验证：{'开启' if effective_config.get('brute_enabled', True) else '关闭'}",
+                    f"每账号最大尝试数：{int(effective_config.get('max_attempts') or 10)} 次",
+                    f"每分钟最大请求数：{int(effective_config.get('requests_per_minute') or 10)} 次",
+                    f"并发数：{int(effective_config.get('concurrency') or 1)}",
+                    f"遇到防护时停止：{'是' if effective_config.get('stop_on_defense', True) else '否'}",
+                    f"账号字典：{effective_config.get('username_wordlist_path') or 'PassHack 默认字典'}",
+                    f"密码字典：{effective_config.get('wordlist_path') or 'PassHack 默认字典'}",
                 ]
             )
         last_result = state.get("last_result")
@@ -737,7 +751,7 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         )
         effective_config = state.get("effective_config")
         if isinstance(effective_config, dict) and effective_config.get("source"):
-            summary += f"??? {effective_config['source']}"
+            summary += f"；配置来源：{effective_config['source']}"
         if current:
             summary += f"；当前目标 {current}"
         elif detail:
@@ -1026,7 +1040,7 @@ class ComponentLogDialog(tk.Toplevel):
         )
         summary = f"{self.component_name}  |  {status or '等待状态文件'}"
         if stage:
-            summary += f"  |  {stage}"
+            summary += f"  |  {human_stage(stage)}"
         if detail:
             summary += f"  |  {detail}"
         self.summary_var.set(summary)
@@ -1228,7 +1242,7 @@ class RunLogDialog(tk.Toplevel):
                 continue
             value = f"{label}：{status or 'unknown'}"
             if stage:
-                value += f"，当前步骤：{stage}"
+                value += f"，当前步骤：{human_stage(stage)}"
             if detail:
                 value += f"，{detail}"
             lines.append(value)
@@ -1270,7 +1284,7 @@ class RunLogDialog(tk.Toplevel):
                     values=(
                         process.name,
                         self._status_text(status),
-                        stage,
+                        human_stage(stage),
                         detail,
                         process.pid,
                         process.started_at.replace("T", " ")[:19],
@@ -1290,7 +1304,7 @@ class RunLogDialog(tk.Toplevel):
                     values=(
                         component_name,
                         self._status_text(status),
-                        stage,
+                        human_stage(stage),
                         detail,
                         "-",
                         "由自动调度器按资产更新轮次执行",
@@ -1307,7 +1321,7 @@ class RunLogDialog(tk.Toplevel):
                     values=(
                         AI_BATCH_COMPONENT_NAME,
                         self._status_text(status),
-                        stage,
+                        human_stage(stage),
                         detail,
                         "-",
                         "由自动调度器按资产更新轮次启动",

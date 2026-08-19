@@ -925,7 +925,6 @@ class LauncherApp(tk.Tk):
         self.start_button.state(["!disabled"])
         if error:
             self.launch_status.configure(text=error, foreground=DANGER)
-            messagebox.showerror("启动失败", error)
             return
         assert state is not None
         self.run_states[self._state_key(state)] = state
@@ -1163,26 +1162,13 @@ class LauncherApp(tk.Tk):
             return
         state = self._selected_state()
         if state is None:
-            messagebox.showinfo(
-                "恢复实例",
-                "请先选择一个历史或异常结束的运行实例",
-            )
-            return
-        confirmed = messagebox.askyesno(
-            "恢复实例",
-            (
-                f"将在原运行目录恢复 {state.project_name} / {state.run_id}。\n\n"
-                "会重新启动已结束的常驻 GUI 工具和 AI 执行器；"
-                "fscan、nuclei 等一次性任务不会自动重复。\n"
-                "已有结果、断点和工程文件都会保留。\n\n"
-                f"授权范围仍为：{state.scope}\n"
-                "请确认当前授权仍然有效。"
-            ),
-        )
-        if not confirmed:
+            self.pause_status_var.set("请先选择一个历史或异常结束的运行实例。")
             return
         self._busy = True
         self.recover_button.state(["disabled"])
+        self.pause_status_var.set(
+            f"正在恢复实例 {state.run_id}；已有结果、断点和文件会保留…"
+        )
         selected_tools = None
         if self._loaded_run_config_key == self._state_key(state):
             selected_tools = tuple(
@@ -1221,17 +1207,14 @@ class LauncherApp(tk.Tk):
         self._busy = False
         self.recover_button.state(["!disabled"])
         if error:
-            messagebox.showerror("恢复失败", error)
+            self.pause_status_var.set(f"恢复失败：{error}")
             return
         assert state is not None
         self.run_states[self._state_key(state)] = state
         self._refresh_runs()
-        messagebox.showinfo(
-            "恢复完成",
-            (
-                f"实例 {state.run_id} 已在原运行目录恢复，"
-                f"第 {state.recovery_count} 次恢复。"
-            ),
+        self.pause_status_var.set(
+            f"恢复完成：实例 {state.run_id} 已在原运行目录恢复，"
+            f"第 {state.recovery_count} 次恢复。"
         )
 
     def _load_selected_as_new(self) -> None:
@@ -1259,14 +1242,14 @@ class LauncherApp(tk.Tk):
             if legacy_url_name
             else "历史配置已载入。请重新确认授权复选框，再点击“启动完整项目”。"
         )
-        messagebox.showinfo("新实例重跑", detail)
+        self.launch_status.configure(text=detail, foreground=MUTED)
 
     def _stop_selected_run(self) -> None:
         if self._busy:
             return
         state = self._selected_state()
         if state is None:
-            messagebox.showinfo("暂停工程", "请先选择一个运行实例")
+            self.pause_status_var.set("请先选择一个运行实例。")
             return
         project_key = safe_project_name(state.project_name)
         active_states = [
@@ -1276,17 +1259,7 @@ class LauncherApp(tk.Tk):
             and item.status in {"starting", "running"}
         ]
         if not active_states:
-            messagebox.showinfo("暂停工程", "该工程当前没有正在运行的实例")
-            return
-        if not messagebox.askyesno(
-            "暂停工程",
-            (
-                f"确定暂停工程“{state.project_name}”当前运行的 "
-                f"{len(active_states)} 个实例吗？\n\n"
-                "暂停会在后台彻底停止关联组件、AI 执行器和延迟启动任务。\n"
-                "状态、结果、日志和本地文件都会保留，之后可以恢复。"
-            ),
-        ):
+            self.pause_status_var.set("该工程当前没有正在运行的实例。")
             return
         self._busy = True
         self.pause_button.state(["disabled"])
@@ -1326,20 +1299,14 @@ class LauncherApp(tk.Tk):
             self.run_states[self._state_key(state)] = state
         self._refresh_runs()
         if errors:
-            detail = "\n".join(errors)
-            self.pause_status_var.set("暂停流程已结束，但部分实例停止失败。")
-            messagebox.showwarning(
-                "暂停未完全成功",
-                f"以下实例未能完整暂停：\n\n{detail}\n\n请查看项目日志后重试。",
+            self.pause_status_var.set(
+                "暂停流程已结束，但部分实例停止失败；请查看项目日志后重试："
+                + "；".join(errors)
             )
             return
         count = len(stopped_states)
         self.pause_status_var.set(
             f"暂停完成：已彻底停止 {count} 个实例；状态、结果和文件均已保留。"
-        )
-        messagebox.showinfo(
-            "暂停完成",
-            f"已在后台彻底暂停 {count} 个实例，STTool 界面不会再因等待进程退出而卡死。",
         )
 
     def _delete_selected_project(self) -> None:
@@ -1507,10 +1474,9 @@ class LauncherApp(tk.Tk):
             return
         self.run_states[self._state_key(state)] = state
         self._refresh_runs()
-        messagebox.showinfo(
-            "项目范围已更新",
-            "新范围已用于后续资产准入、增量扫描和 AI 执行。已发出的请求无法撤回。",
-            parent=self,
+        self.pause_status_var.set(
+            "项目范围已更新：新范围已用于后续资产准入、增量扫描和 AI 执行；"
+            "已发出的请求无法撤回。"
         )
 
     def _project_name_edited(self, _event: tk.Event[tk.Misc]) -> None:
@@ -1572,8 +1538,6 @@ class LauncherApp(tk.Tk):
             self._refresh_runs()
         detail = f"项目配置已保存，已应用到 {len(states)} 个现有运行实例。"
         self.launch_status.configure(text=detail, foreground=ACCENT)
-        if show_message:
-            messagebox.showinfo("保存项目配置", detail, parent=self)
         return True
 
     def _persist_project_snapshot(self, request: LaunchRequest) -> list[RunState]:

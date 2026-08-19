@@ -390,6 +390,29 @@ class RuntimeTests(unittest.TestCase):
             self.assertEqual(workflow["steps"]["collision"]["status"], "running")
             self.assertEqual(workflow["steps"]["collision"]["detail"], "active")
 
+    def test_reconcile_passhack_marks_stale_state_stopped(self) -> None:
+        with TemporaryDirectory() as temporary:
+            run_dir = Path(temporary)
+            state_path = run_dir / "tool_data" / "passhack" / "state.json"
+            state_path.parent.mkdir(parents=True)
+            state_path.write_text(
+                json.dumps({"status": "running", "stage": "waiting_candidates"}),
+                encoding="utf-8",
+            )
+
+            reconcile_component_state(
+                run_dir,
+                "passhack",
+                "stopped",
+                "instance paused by STTool",
+            )
+
+            state = json.loads(state_path.read_text(encoding="utf-8"))
+            self.assertEqual(state["status"], "stopped")
+            self.assertEqual(state["stage"], "stopped")
+            self.assertEqual(state["detail"], "instance paused by STTool")
+            self.assertEqual(state["process_status"], "stopped")
+
     def test_reconcile_asset_commander_marks_stale_scan_interrupted(self) -> None:
         with TemporaryDirectory() as temporary:
             run_dir = Path(temporary)

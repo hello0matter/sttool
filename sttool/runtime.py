@@ -146,6 +146,7 @@ def reconcile_component_state(
         / "semantic"
         / "sttool_bridge_state.json",
         "tscan_plus": root / "tool_data" / "tscan" / "state.json",
+        "passhack": root / "tool_data" / "passhack" / "state.json",
         "project_coordinator": root / "tool_data" / "coordinator" / "state.json",
     }
     path = state_paths.get(component_id)
