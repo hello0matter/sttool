@@ -14,6 +14,7 @@ from sttool.tscan_automation import (
     awvs_site_targets,
     build_stage_plan,
     CDP_START_TIMEOUT_SECONDS,
+    BrowserPolicy,
     classify_connection_feedback,
     configure_awvs_scan,
     dismiss_blocking_modals,
@@ -45,6 +46,7 @@ from sttool.tscan_automation import (
     target_asset_bundle,
     tscan_process_alive,
     web_fingerprint_targets,
+    webview_environment,
     workflow_assets_ready,
     workflow_completed,
 )
@@ -61,6 +63,34 @@ class ModalPage:
 
 
 class TscanAutomationTests(unittest.TestCase):
+    def test_webview_environment_isolated_per_run(self) -> None:
+        with TemporaryDirectory() as temporary:
+            environment = webview_environment(52041, Path(temporary))
+
+        self.assertIn("--remote-debugging-port=52041", environment["WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS"])
+        self.assertEqual(
+            environment["WEBVIEW2_USER_DATA_FOLDER"],
+            str(Path(temporary) / "tool_data" / "tscan" / "webview2_data"),
+        )
+
+    def test_browser_policy_restores_existing_value_without_elevation(self) -> None:
+        key = MagicMock()
+        with (
+            patch("sttool.tscan_automation.winreg.CreateKeyEx", return_value=key),
+            patch("sttool.tscan_automation.winreg.OpenKey", return_value=key),
+            patch("sttool.tscan_automation.winreg.QueryValueEx", return_value=("old", 1)),
+            patch("sttool.tscan_automation.winreg.SetValueEx") as set_value,
+            patch("sttool.tscan_automation.winreg.CloseKey"),
+        ):
+            with BrowserPolicy(52041, "TscanTest.exe"):
+                pass
+
+        self.assertEqual(set_value.call_count, 2)
+        self.assertEqual(
+            set_value.call_args_list[0].args[3:],
+            (1, "--remote-debugging-port=52041 --remote-allow-origins=* --force-renderer-accessibility"),
+        )
+        self.assertEqual(set_value.call_args_list[1].args[3:], (1, "old"))
     def test_script_help_runs_outside_repository_working_directory(self) -> None:
         script = Path(__file__).resolve().parents[1] / "sttool" / "tscan_automation.py"
         with TemporaryDirectory() as temporary:

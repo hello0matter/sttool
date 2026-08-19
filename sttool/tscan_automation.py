@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import base64
 import ipaddress
 import json
 import os
@@ -12,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import winreg
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -27,6 +29,8 @@ from sttool.tool_network import webview_proxy_argument
 
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+POLICY_PATH = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
+POLICY_NAME = "TscanPlus_Win_Amd64.exe"
 DEFAULT_EXE = Path(r"D:\tmp\anjian\pj\st\TscanPlus_Win_Amd64\TscanPlus_Win_Amd64.exe")
 
 PASSWORD_CRACK = "\u5bc6\u7801\u7834\u89e3"
@@ -924,6 +928,16 @@ def tscan_process_alive(pid: int | None, creation_token: int, executable: Path) 
     return actual_executable == executable.resolve()
 
 
+def terminate_tscan_process_tree(pid: int) -> None:
+    if not process_alive(pid):
+        return
+    subprocess.run(
+        ["taskkill.exe", "/PID", str(pid), "/T", "/F"],
+        capture_output=True,
+        check=False,
+    )
+
+
 def append_activity(state_path: Path, message: str) -> None:
     try:
         run_dir = state_path.parents[2]
@@ -989,6 +1003,132 @@ def free_local_port() -> int:
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.bind(("127.0.0.1", 0))
         return int(sock.getsockname()[1])
+
+
+def run_elevated_registry_command(command: str) -> None:
+    encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
+    result = subprocess.run(
+        [
+            "powershell.exe",
+            "-NoProfile",
+            "-ExecutionPolicy",
+            "Bypass",
+            "-Command",
+            f"Start-Process powershell.exe -Verb RunAs -Wait -PassThru "
+            f"-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}' "
+            "| Select-Object -ExpandProperty ExitCode",
+        ],
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    output = result.stdout.strip().splitlines()
+    exit_code = output[-1].strip() if output else ""
+    if result.returncode != 0 or exit_code != "0":
+        detail = result.stderr.strip() or result.stdout.strip() or "管理员授权失败"
+        raise RuntimeError(f"无法临时配置 WebView2 调试策略：{detail}")
+
+
+class BrowserPolicy:
+    def __init__(self, port: int, executable_name: str = POLICY_NAME) -> None:
+        self.executable_name = executable_name
+        self.value = (
+            f"--remote-debugging-port={port} --remote-allow-origins=* "
+            "--force-renderer-accessibility"
+        )
+        self.entries: list[tuple[int, int, bool, tuple[object, int] | None]] = []
+        self.elevated = False
+        self.elevated_previous: tuple[bool, tuple[object, int] | None] = (False, None)
+        self.elevated_key_existed = False
+
+    def _apply(self, *, elevated: bool) -> None:
+        command_entries: list[str] = []
+        for root, view_flag in ((winreg.HKEY_CURRENT_USER, winreg.KEY_WOW64_64KEY),):
+            access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
+            previous = None
+            existed = False
+            try:
+                key = winreg.CreateKeyEx(root, POLICY_PATH, 0, access)
+                try:
+                    try:
+                        previous = winreg.QueryValueEx(key, self.executable_name)
+                        existed = True
+                    except FileNotFoundError:
+                        pass
+                    winreg.SetValueEx(key, self.executable_name, 0, winreg.REG_SZ, self.value)
+                finally:
+                    winreg.CloseKey(key)
+            except OSError:
+                if not elevated:
+                    raise
+                try:
+                    key = winreg.OpenKey(
+                        root, POLICY_PATH, 0, winreg.KEY_QUERY_VALUE | view_flag
+                    )
+                    self.elevated_key_existed = True
+                    try:
+                        self.elevated_previous = (
+                            True,
+                            winreg.QueryValueEx(key, self.executable_name),
+                        )
+                    finally:
+                        winreg.CloseKey(key)
+                except (FileNotFoundError, OSError):
+                    self.elevated_previous = (False, None)
+                escaped = self.value.replace("'", "''")
+                command_entries.append(
+                    "$p='HKCU:" + POLICY_PATH + "'; "
+                    f"New-Item -Path $p -Force | Out-Null; "
+                    f"New-ItemProperty -Path $p -Name '{self.executable_name}' "
+                    f"-Value '{escaped}' -PropertyType String -Force | Out-Null"
+                )
+                continue
+            self.entries.append((root, view_flag, existed, previous))
+        if command_entries:
+            run_elevated_registry_command("; ".join(command_entries))
+            self.elevated = True
+
+    def __enter__(self) -> "BrowserPolicy":
+        try:
+            self._apply(elevated=False)
+        except OSError:
+            self._apply(elevated=True)
+        return self
+
+    def __exit__(self, exc_type, exc, traceback) -> None:
+        commands: list[str] = []
+        for root, view_flag, existed, previous in reversed(self.entries):
+            access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
+            try:
+                key = winreg.OpenKey(root, POLICY_PATH, 0, access)
+            except OSError:
+                key = None
+            if key is not None:
+                try:
+                    if existed and previous is not None:
+                        winreg.SetValueEx(key, self.executable_name, 0, previous[1], previous[0])
+                    else:
+                        winreg.DeleteValue(key, self.executable_name)
+                finally:
+                    winreg.CloseKey(key)
+        if self.elevated:
+            existed, previous = self.elevated_previous
+            restore = (
+                f"New-ItemProperty -Path $p -Name '{self.executable_name}' "
+                f"-Value '{str(previous[0]).replace(chr(39), chr(39) * 2)}' "
+                "-PropertyType String -Force | Out-Null"
+                if existed and previous is not None
+                else f"Remove-ItemProperty -Path $p -Name '{self.executable_name}' "
+                "-ErrorAction SilentlyContinue"
+            )
+            cleanup = (
+                ""
+                if self.elevated_key_existed
+                else "; if ((Get-Item -Path $p -ErrorAction SilentlyContinue).Property.Count -eq 0) "
+                "{ Remove-Item -Path $p -Force -ErrorAction SilentlyContinue }"
+            )
+            commands.append("$p='HKCU:" + POLICY_PATH + "'; " + restore + cleanup)
+            run_elevated_registry_command("; ".join(commands))
 
 
 def wait_for_cdp(port: int, timeout: float = 20.0) -> str:
@@ -2827,7 +2967,13 @@ def main() -> int:
             try:
                 wait_for_cdp(port, timeout=2.0)
             except RuntimeError:
-                pass
+                append_activity(
+                    state_path,
+                    f"发现旧 TscanPlus 进程 PID {child_pid} 无法接管，先关闭后重新启动",
+                )
+                terminate_tscan_process_tree(child_pid)
+                child_pid = 0
+                child_creation_token = 0
             else:
                 reattached = True
                 state.update(
@@ -2851,34 +2997,48 @@ def main() -> int:
             atomic_json_write(state_path, state)
             run_dir = state_path.parents[2]
             state["cdp_launch"] = {
-                "method": "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_ENV",
+                "method": "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_POLICY",
                 "port": port,
                 "user_data_folder": str(
                     run_dir / "tool_data" / "tscan" / "webview2_data"
                 ),
             }
             atomic_json_write(state_path, state)
-            child = subprocess.Popen(
-                [str(exe)],
-                cwd=exe.parent,
-                creationflags=CREATE_NEW_PROCESS_GROUP,
-                close_fds=True,
-                env=webview_environment(port, run_dir),
-            )
-            child_pid = child.pid
-            child_creation_token = process_creation_token(child_pid)
-            state.update(
-                pid=child_pid,
-                process_creation_token=child_creation_token,
-                updated_at=now_text(),
-            )
-            update_stage(
-                state_path,
-                state,
-                "waiting_webview2",
-                f"TscanPlus 已启动，等待 WebView2/CDP 就绪，最长 {int(CDP_START_TIMEOUT_SECONDS)} 秒",
-            )
-            wait_for_cdp(port, timeout=CDP_START_TIMEOUT_SECONDS)
+            try:
+                with BrowserPolicy(port, exe.name):
+                    child = subprocess.Popen(
+                        [str(exe)],
+                        cwd=exe.parent,
+                        creationflags=CREATE_NEW_PROCESS_GROUP,
+                        close_fds=True,
+                        env=webview_environment(port, run_dir),
+                    )
+                    child_pid = child.pid
+                    child_creation_token = process_creation_token(child_pid)
+                    state.update(
+                        pid=child_pid,
+                        process_creation_token=child_creation_token,
+                        updated_at=now_text(),
+                    )
+                    update_stage(
+                        state_path,
+                        state,
+                        "waiting_webview2",
+                        f"TscanPlus 已启动，等待 WebView2/CDP 就绪，最长 {int(CDP_START_TIMEOUT_SECONDS)} 秒",
+                    )
+                    wait_for_cdp(port, timeout=CDP_START_TIMEOUT_SECONDS)
+            except Exception:
+                if tscan_process_alive(child_pid, child_creation_token, exe):
+                    append_activity(
+                        state_path,
+                        f"TscanPlus 启动或 CDP 接管失败，清理未接管进程 PID {child_pid}",
+                    )
+                    terminate_tscan_process_tree(child_pid)
+                child_pid = 0
+                child_creation_token = 0
+                state.update(pid=None, process_creation_token=0, updated_at=now_text())
+                atomic_json_write(state_path, state)
+                raise
 
         if not state["automation_dispatched"]:
             assets = wait_for_asset_bundle(
