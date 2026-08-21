@@ -1130,6 +1130,13 @@ def run_elevated_registry_command(command: str) -> None:
         )
 
 
+def process_is_admin() -> bool:
+    try:
+        return bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        return False
+
+
 class BrowserPolicy:
     def __init__(
         self,
@@ -1158,6 +1165,7 @@ class BrowserPolicy:
 
     def _apply(self, *, elevated: bool) -> None:
         command_entries: list[str] = []
+        is_admin = process_is_admin()
         # Prefer a per-user policy so normal STTool launches do not require an
         # elevation prompt. WebView2 may use either registry view depending on
         # the installed runtime architecture, so keep both views in sync.
@@ -1213,16 +1221,44 @@ class BrowserPolicy:
                     except (FileNotFoundError, OSError):
                         pass
                     self.elevated_previous[(view_flag, name)] = (existed, previous)
-                    escaped_name = name.replace("'", "''")
-                    escaped_value = self.value.replace("'", "''")
-                    command_entries.append(
-                        f"$base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::{view_name}); "
-                        f"$p=$base.CreateSubKey('{POLICY_PATH}'); "
-                        f"$p.SetValue('{escaped_name}','{escaped_value}',[Microsoft.Win32.RegistryValueKind]::String); "
-                        "$p.Close(); $base.Close(); "
-                        "$cu='HKCU:" + POLICY_PATH + "'; "
-                        f"Remove-ItemProperty -Path $cu -Name '{escaped_name}' -ErrorAction SilentlyContinue"
-                    )
+                    if is_admin:
+                        access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
+                        key = winreg.CreateKeyEx(
+                            winreg.HKEY_LOCAL_MACHINE, POLICY_PATH, 0, access
+                        )
+                        try:
+                            winreg.SetValueEx(key, name, 0, winreg.REG_SZ, self.value)
+                        finally:
+                            winreg.CloseKey(key)
+                        try:
+                            user_key = winreg.OpenKey(
+                                winreg.HKEY_CURRENT_USER,
+                                POLICY_PATH,
+                                0,
+                                winreg.KEY_SET_VALUE | view_flag,
+                            )
+                        except OSError:
+                            user_key = None
+                        if user_key is not None:
+                            try:
+                                winreg.DeleteValue(user_key, name)
+                            except OSError:
+                                pass
+                            finally:
+                                winreg.CloseKey(user_key)
+                    else:
+                        escaped_name = name.replace("'", "''")
+                        escaped_value = self.value.replace("'", "''")
+                        command_entries.append(
+                            f"$base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::{view_name}); "
+                            f"$p=$base.CreateSubKey('{POLICY_PATH}'); "
+                            f"$p.SetValue('{escaped_name}','{escaped_value}',[Microsoft.Win32.RegistryValueKind]::String); "
+                            "$p.Close(); $base.Close(); "
+                            "$cu='HKCU:" + POLICY_PATH + "'; "
+                            f"Remove-ItemProperty -Path $cu -Name '{escaped_name}' -ErrorAction SilentlyContinue"
+                        )
+        if (self.force_machine or elevated) and is_admin:
+            self.elevated = True
         if command_entries:
             run_elevated_registry_command("; ".join(command_entries))
             self.elevated = True
@@ -1250,7 +1286,23 @@ class BrowserPolicy:
                         winreg.DeleteValue(key, name)
                 finally:
                     winreg.CloseKey(key)
-        if self.elevated:
+        if self.elevated and process_is_admin():
+            for (view_flag, name), (existed, previous) in self.elevated_previous.items():
+                access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
+                try:
+                    key = winreg.CreateKeyEx(
+                        winreg.HKEY_LOCAL_MACHINE, POLICY_PATH, 0, access
+                    )
+                    try:
+                        if existed and previous is not None:
+                            winreg.SetValueEx(key, name, 0, previous[1], previous[0])
+                        else:
+                            winreg.DeleteValue(key, name)
+                    finally:
+                        winreg.CloseKey(key)
+                except OSError:
+                    pass
+        elif self.elevated:
             for (view_flag, name), (existed, previous) in self.elevated_previous.items():
                 view_name = "Registry64" if view_flag == winreg.KEY_WOW64_64KEY else "Registry32"
                 restore = (
