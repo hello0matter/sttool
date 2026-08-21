@@ -198,7 +198,18 @@ def _target_box(window: Any) -> Any:
         except Exception:
             continue
         text = _control_text(control).lower()
-        if any(word in text for word in ("目标", "ip", "域名", "url", "地址")):
+        if any(
+            word in text
+            for word in (
+                "目标",
+                "ip",
+                "域名",
+                "url",
+                "地址",
+                "单位",
+                "请输入域名",
+            )
+        ):
             return control
     # WebView2 accessibility trees sometimes expose placeholder-less editors.
     for control in _descendants(window):
@@ -247,7 +258,7 @@ def dispatch_uia_stages(
         (
             "port_scan",
             (("信息收集",),),
-            _normalise_host_targets(assets.get("ips", [])),
+            _normalise_host_targets([*assets.get("ips", []), target]),
             ("查询", "Scan", "开始扫描"),
         ),
         (

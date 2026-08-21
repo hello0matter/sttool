@@ -24,6 +24,12 @@ class TscanUiaTests(unittest.TestCase):
             ["10.17.98.140", "example.test"],
         )
 
+    def test_normalise_host_targets_keeps_project_target_as_fallback(self) -> None:
+        self.assertEqual(
+            _normalise_host_targets(["http://10.17.98.140/"]),
+            ["10.17.98.140"],
+        )
+
     def test_invoke_uses_uia_pattern_without_mouse_input(self) -> None:
         control = MagicMock()
         control.invoke.side_effect = RuntimeError("not available")
