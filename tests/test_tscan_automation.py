@@ -211,6 +211,23 @@ class TscanAutomationTests(unittest.TestCase):
         self.assertIs(automation, old_result)
         self.assertEqual(stages, old_result["stages"])
 
+    def test_incomplete_uia_batch_is_retried_after_wrapper_restart(self) -> None:
+        dispatched, automation, stages = restore_dispatched_automation(
+            {
+                "automation_dispatched": True,
+                "automation": {
+                    "controller": "windows_uia",
+                    "stages": {"port_scan": {"status": "not_started"}},
+                },
+                "stages": {"port_scan": {"status": "not_started"}},
+                "stage_batches": [{"result": {"controller": "windows_uia"}}],
+            }
+        )
+
+        self.assertFalse(dispatched)
+        self.assertIsNone(automation)
+        self.assertEqual(stages, {})
+
     def test_new_tscan_run_still_requires_initial_dispatch(self) -> None:
         self.assertEqual(
             restore_dispatched_automation(

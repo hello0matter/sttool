@@ -751,6 +751,16 @@ def restore_dispatched_automation(
         return dispatched, automation, stages
     dispatched = True
     if isinstance(automation, dict) and isinstance(stages, dict) and stages:
+        controller = str(automation.get("controller") or "")
+        if controller == "windows_uia" and any(
+            isinstance(value, dict)
+            and str(value.get("status") or "") == "not_started"
+            for value in stages.values()
+        ):
+            # UIA may have attached before WebView2's accessibility tree was
+            # hydrated. Do not treat that incomplete submission as a completed
+            # initial batch on recovery; reopen the page and retry it.
+            return False, None, {}
         return dispatched, automation, stages
     for value in reversed(batches):
         if not isinstance(value, dict):
