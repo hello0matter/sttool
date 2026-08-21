@@ -14,6 +14,7 @@ import ctypes
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 
 @dataclass
@@ -42,6 +43,16 @@ def _normalise_targets(values: list[str]) -> list[str]:
         seen.add(value)
         result.append(value)
     return result
+
+
+def _normalise_host_targets(values: list[str]) -> list[str]:
+    hosts: list[str] = []
+    for value in _normalise_targets(values):
+        parsed = urlsplit(value if "://" in value else f"//{value}")
+        host = (parsed.hostname or "").strip(".")
+        if host:
+            hosts.append(host)
+    return _normalise_targets(hosts)
 
 
 def _control_text(control: Any) -> str:
@@ -150,6 +161,35 @@ def _select_tab(window: Any, names: tuple[str, ...]) -> bool:
     return True
 
 
+def _dismiss_welcome(window: Any) -> bool:
+    if _find(window, ("免责声明", "使用许可", "我同意所有条款")) is None:
+        return False
+    agreement = _find(window, ("我同意所有条款",), "CheckBox")
+    if agreement is not None:
+        try:
+            checked = bool(agreement.get_toggle_state())
+        except Exception:
+            checked = True
+        if not checked:
+            try:
+                agreement.toggle()
+            except Exception:
+                _invoke(agreement)
+    confirm = _find(window, ("同意并继续", "确认"), "Button")
+    if confirm is None:
+        return False
+    _invoke(confirm)
+    time.sleep(0.75)
+    return True
+
+
+def _select_path(window: Any, path: tuple[tuple[str, ...], ...]) -> bool:
+    for names in path:
+        if not _select_tab(window, names):
+            return False
+    return True
+
+
 def _target_box(window: Any) -> Any:
     for control in _descendants(window):
         try:
@@ -170,11 +210,17 @@ def _target_box(window: Any) -> Any:
     return None
 
 
-def _stage(window: Any, name: str, tabs: tuple[str, ...], targets: list[str], buttons: tuple[str, ...]) -> UiaStageResult:
+def _stage(
+    window: Any,
+    name: str,
+    path: tuple[tuple[str, ...], ...],
+    targets: list[str],
+    buttons: tuple[str, ...],
+) -> UiaStageResult:
     targets = _normalise_targets(targets)
     if not targets:
         return UiaStageResult(name, "skipped", [], "本轮没有匹配资产")
-    if not _select_tab(window, tabs):
+    if not _select_path(window, path):
         return UiaStageResult(name, "not_started", targets, "未找到对应 Tscan 标签")
     box = _target_box(window)
     if box is None:
@@ -196,14 +242,50 @@ def dispatch_uia_stages(
 ) -> dict[str, Any]:
     """Submit the safe discovery stages through Tscan's accessibility tree."""
     window, was_minimized = _attach(pid, timeout)
+    _dismiss_welcome(window)
     plan = (
-        ("port_scan", ("端口扫描", "IP扫描"), assets.get("ips", []), ("Scan", "开始扫描", "扫描")),
-        ("web_fingerprint", ("Web指纹",), assets.get("urls", []), ("开始", "Scan", "扫描")),
-        ("subdomain_enumeration", ("域名枚举",), assets.get("domains", []), ("开始", "Scan", "扫描")),
-        ("directory_enumeration", ("目录枚举",), assets.get("urls", []), ("开始", "Scan", "扫描")),
-        ("jsfinder", ("JsFinder",), assets.get("urls", []), ("开始", "Scan", "扫描")),
-        ("swagger", ("Swagger",), assets.get("urls", []), ("开始", "Scan", "扫描")),
-        ("waf_detection", ("WAF识别",), assets.get("urls", []), ("开始", "Scan", "扫描")),
+        (
+            "port_scan",
+            (("信息收集",),),
+            _normalise_host_targets(assets.get("ips", [])),
+            ("查询", "Scan", "开始扫描"),
+        ),
+        (
+            "web_fingerprint",
+            (("资产探测",), ("URL指纹识别", "Web指纹", "URL探测")),
+            assets.get("urls", []),
+            ("Scan", "开始", "扫描"),
+        ),
+        (
+            "subdomain_enumeration",
+            (("资产探测",), ("域名探测", "域名枚举")),
+            assets.get("domains", []),
+            ("Start", "开始", "扫描"),
+        ),
+        (
+            "directory_enumeration",
+            (("资产探测",), ("目录扫描", "目录枚举")),
+            assets.get("urls", []),
+            ("Check", "开始", "扫描"),
+        ),
+        (
+            "jsfinder",
+            (("资产探测",), ("JsFinder",)),
+            assets.get("urls", []),
+            ("Check", "开始", "扫描"),
+        ),
+        (
+            "swagger",
+            (("资产探测",), ("Swagger",)),
+            assets.get("urls", []),
+            ("Check", "开始", "扫描"),
+        ),
+        (
+            "waf_detection",
+            (("资产探测",), ("WAF识别", "WAF检测")),
+            assets.get("urls", []),
+            ("Check", "开始", "扫描"),
+        ),
     )
     results: dict[str, dict[str, Any]] = {}
     try:
