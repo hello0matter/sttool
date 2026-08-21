@@ -1022,19 +1022,20 @@ class RuntimeTests(unittest.TestCase):
         )
         self.assertEqual(target_for_asset_scan("192.168.1.0/24"), "192.168.1.0/24")
 
-    def test_tscan_registry_uses_automation_wrapper(self) -> None:
+    def test_tscan_registry_uses_headless_client_adapter(self) -> None:
         tool = next(
             tool
             for tool in default_tools(Path(r"D:\test-st-root"))
             if tool.tool_id == "tscan_plus"
         )
         self.assertTrue(tool.sends_requests)
-        self.assertTrue(any(arg.endswith("tscan_automation.py") for arg in tool.args))
+        self.assertTrue(any(arg.endswith("tscan_client.py") for arg in tool.args))
+        self.assertIn("--client-exe", tool.args)
         self.assertIn("{target}", tool.args)
         self.assertIn("{project_name}", tool.args)
         self.assertIn("{processing_scope}", tool.args)
-        self.assertIn("--asset-state", tool.args)
-        self.assertIn("--asset-export", tool.args)
+        self.assertIn("--asset-bus", tool.args)
+        self.assertIn("{run_dir}/tool_data/asset_bus/assets.json", tool.args)
         self.assertNotIn("safe_poc_gui", {item.tool_id for item in default_tools()})
 
     def test_asset_commander_registry_uses_resumable_source_workflow(self) -> None:

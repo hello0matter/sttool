@@ -16,6 +16,7 @@ BUILTIN_TOOL_IDS = (
     "vulnx",
     "find_gh_poc",
     "tscan_plus",
+    "tscan_client",
     "passhack",
 )
 
@@ -29,6 +30,7 @@ def default_locations(st_root: Path = DEFAULT_ST_ROOT) -> dict[str, str]:
         "vulnx": str(st_root / "vulnx" / "vulnx.exe"),
         "find_gh_poc": str(st_root / "find-gh-poc" / "find-gh-poc.exe"),
         "tscan_plus": str(st_root / "TscanPlus_Win_Amd64" / "TscanPlus_Win_Amd64.exe"),
+        "tscan_client": str(st_root / "TscanClient_Win" / "TscanClient_Win.exe"),
         "passhack": str(st_root / "tmp" / "passhack"),
     }
 
@@ -60,6 +62,7 @@ def default_tools(
     nuclei = Path(resolved_locations["nuclei"])
     vulnx = Path(resolved_locations["vulnx"])
     find_gh_poc = Path(resolved_locations["find_gh_poc"])
+    tscan_client = Path(resolved_locations["tscan_client"])
     tscan = Path(resolved_locations["tscan_plus"])
     tscan_automation = Path(__file__).with_name("tscan_automation.py")
     github_poc_search = Path(__file__).with_name("github_poc_search.py")
@@ -264,13 +267,13 @@ def default_tools(
             tool_id="tscan_plus",
             name="TscanPlus",
             category="综合检测",
-            description="等待资产回传后联动信息收集、资产探测、POC 检测和密码检测",
+            description="后台运行 TscanClient，等待资产回传后联动端口、Web 指纹和 POC 检测",
             default_selected=True,
             executable=_pythonw(),
             args=(
-                str(tscan_automation),
-                "--exe",
-                str(tscan),
+                str(Path(__file__).with_name("tscan_client.py")),
+                "--client-exe",
+                str(tscan_client),
                 "--target",
                 "{target}",
                 "--project",
@@ -279,18 +282,24 @@ def default_tools(
                 "{processing_scope}",
                 "--state",
                 "{run_dir}/tool_data/tscan/state.json",
-                "--asset-state",
-                "{run_dir}/tool_data/asset_commander/workflow_state.json",
-                "--asset-export",
-                "{run_dir}/results/asset_commander_assets.json",
                 "--asset-bus",
                 "{run_dir}/tool_data/asset_bus/assets.json",
             ),
             cwd="{run_dir}",
             sends_requests=True,
-            required_paths=(str(tscan), str(tscan_automation)),
+            required_paths=(str(tscan_client), str(Path(__file__).with_name("tscan_client.py"))),
             restart_on_recovery=True,
             result_paths=("{run_dir}/tool_data/tscan/state.json",),
+            alternate_executable=_pythonw(),
+            alternate_args=(
+                str(tscan_automation), "--exe", str(tscan), "--target", "{target}",
+                "--project", "{project_name}", "--scope", "{processing_scope}",
+                "--state", "{run_dir}/tool_data/tscan/state.json",
+                "--asset-state", "{run_dir}/tool_data/asset_commander/workflow_state.json",
+                "--asset-export", "{run_dir}/results/asset_commander_assets.json",
+                "--asset-bus", "{run_dir}/tool_data/asset_bus/assets.json",
+            ),
+            alternate_required_paths=(str(tscan), str(tscan_automation)),
         ),
         ToolDefinition(
             tool_id="passhack",

@@ -446,6 +446,8 @@ class RuntimeManager:
             raise LaunchError("请填写目标")
         if not request.scope.strip():
             raise LaunchError("请填写授权范围")
+        if request.tscan_backend not in {"cli", "gui"}:
+            raise LaunchError("Tscan 执行方式无效")
         if not request.authorization_confirmed:
             raise LaunchError("必须确认已获得该目标的测试授权")
         parsed_api_url = urlsplit(request.api_base_url.strip())
@@ -499,6 +501,14 @@ class RuntimeManager:
             if tool is None:
                 raise LaunchError(f"未知工具: {tool_id}")
             available, reason = availability(tool)
+            if tool.tool_id == "tscan_plus" and request.tscan_backend == "gui":
+                gui_tool = replace(
+                    tool,
+                    executable=tool.alternate_executable or tool.executable,
+                    args=tool.alternate_args or tool.args,
+                    required_paths=tool.alternate_required_paths or tool.required_paths,
+                )
+                available, reason = availability(gui_tool)
             if not available:
                 raise LaunchError(f"{tool.name}: {reason}")
             selected.append(tool)
@@ -573,6 +583,7 @@ class RuntimeManager:
             "reasoning_effort": request.reasoning_effort,
             "agent_base_url": request.agent_base_url.strip().rstrip("/"),
             "work_mode": request.work_mode,
+            "tscan_backend": request.tscan_backend,
             "auto_agent": request.auto_agent,
             "wait_for_asset_commander": request.wait_for_asset_commander,
             "wait_for_fscan": request.wait_for_fscan,
@@ -1074,6 +1085,7 @@ class RuntimeManager:
             "source_dir": str(self.app_dir),
             "st_root": str(self.st_root),
             "project_name": request.project_name.strip(),
+            "tscan_backend": request.tscan_backend,
             "scope": request.scope.strip(),
             "processing_scope": (
                 request.asset_processing_scope.strip() or request.scope.strip()
@@ -1104,13 +1116,21 @@ class RuntimeManager:
         context: dict[str, str],
         preserve_existing: bool = False,
     ) -> ProcessRecord:
-        executable = self._format(tool.executable, context)
+        launch_tool = tool
+        if tool.tool_id == "tscan_plus" and context.get("tscan_backend") == "gui":
+            launch_tool = replace(
+                tool,
+                executable=tool.alternate_executable or tool.executable,
+                args=tool.alternate_args or tool.args,
+                required_paths=tool.alternate_required_paths or tool.required_paths,
+            )
+        executable = self._format(launch_tool.executable, context)
         tool_context = {
             **context,
             "tool_dir": str(Path(executable).parent),
         }
         environment = self._prepare_tool(
-            tool, tool_context, preserve_existing=preserve_existing
+            launch_tool, tool_context, preserve_existing=preserve_existing
         )
         if tool.uses_shared_ai:
             for name, value in (
@@ -1120,7 +1140,7 @@ class RuntimeManager:
             ):
                 if value:
                     environment[name] = value
-        for name, value in tool.environment:
+        for name, value in launch_tool.environment:
             formatted = self._format(value, tool_context)
             if formatted:
                 environment[name] = formatted
@@ -1133,12 +1153,12 @@ class RuntimeManager:
             executable,
             [
                 item
-                for item in (self._format(arg, tool_context) for arg in tool.args)
+                for item in (self._format(arg, tool_context) for arg in launch_tool.args)
                 if item
             ]
             + cli_network_args(tool.tool_id),
-            self._format(tool.cwd, tool_context),
-            tool.new_console,
+            self._format(launch_tool.cwd, tool_context),
+            launch_tool.new_console,
             environment,
         )
 
@@ -1510,6 +1530,7 @@ class RuntimeManager:
                 agent_api_key=agent_api_key,
                 github_token=github_token,
                 work_mode=str(value.get("work_mode", state.work_mode)),
+                tscan_backend=str(value.get("tscan_backend", state.tscan_backend)),
                 auto_agent=bool(value.get("auto_agent", state.auto_agent)),
                 wait_for_asset_commander=bool(
                     value.get(
@@ -1647,6 +1668,7 @@ class RuntimeManager:
                 reasoning_effort=request.reasoning_effort,
                 agent_base_url=request.agent_base_url.strip().rstrip("/"),
                 work_mode=request.work_mode,
+                tscan_backend=request.tscan_backend,
                 auto_agent=request.auto_agent,
                 wait_for_asset_commander=request.wait_for_asset_commander,
                 wait_for_fscan=request.wait_for_fscan,
@@ -1820,6 +1842,7 @@ class RuntimeManager:
                     agent_api_key=agent_api_key,
                     github_token=github_token,
                     work_mode=request.work_mode,
+                    tscan_backend=request.tscan_backend,
                     auto_agent=request.auto_agent,
                     wait_for_asset_commander=request.wait_for_asset_commander,
                     wait_for_fscan=request.wait_for_fscan,
@@ -1879,6 +1902,7 @@ class RuntimeManager:
                 agent_api_key=agent_api_key,
                 github_token=github_token,
                 work_mode=request.work_mode,
+                tscan_backend=request.tscan_backend,
                 auto_agent=request.auto_agent,
                 wait_for_asset_commander=request.wait_for_asset_commander,
                 wait_for_fscan=request.wait_for_fscan,

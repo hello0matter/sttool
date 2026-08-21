@@ -26,6 +26,8 @@ TUPLE_FIELDS = {
     "secret_env",
     "environment",
     "result_paths",
+    "alternate_args",
+    "alternate_required_paths",
 }
 TOOL_FIELDS = {item.name for item in fields(ToolDefinition)}
 ASSET_COLLISION_DEFAULTS = {

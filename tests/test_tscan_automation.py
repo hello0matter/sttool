@@ -26,6 +26,7 @@ from sttool.tscan_automation import (
     migrate_stage_batch_retries,
     normalize_poc_urls,
     password_targets,
+    prepare_cdp_executable,
     prepare_tscan_workspace,
     process_creation_token,
     read_asset_bundle,
@@ -85,12 +86,53 @@ class TscanAutomationTests(unittest.TestCase):
             with BrowserPolicy(52041, "TscanTest.exe"):
                 pass
 
-        self.assertEqual(set_value.call_count, 2)
+        self.assertEqual(set_value.call_count, 4)
         self.assertEqual(
             set_value.call_args_list[0].args[3:],
             (1, "--remote-debugging-port=52041 --remote-allow-origins=* --force-renderer-accessibility"),
         )
-        self.assertEqual(set_value.call_args_list[1].args[3:], (1, "old"))
+        self.assertEqual(
+            set_value.call_args_list[1].args[3:],
+            (1, "--remote-debugging-port=52041 --remote-allow-origins=* --force-renderer-accessibility"),
+        )
+        self.assertEqual(set_value.call_args_list[2].args[3:], (1, "old"))
+        self.assertEqual(set_value.call_args_list[3].args[3:], (1, "old"))
+
+    def test_browser_policy_force_machine_covers_clone_and_original_names(self) -> None:
+        with patch(
+            "sttool.tscan_automation.run_elevated_registry_command"
+        ) as run_elevated:
+            with BrowserPolicy(
+                52042,
+                "TscanClone.exe",
+                force_machine=True,
+                additional_executable_names=("TscanOriginal.exe",),
+            ):
+                pass
+
+        self.assertEqual(run_elevated.call_count, 2)
+        self.assertIn("RegistryHive]::LocalMachine", run_elevated.call_args_list[0].args[0])
+        self.assertIn("HKCU:", run_elevated.call_args_list[0].args[0])
+        self.assertIn("Remove-ItemProperty", run_elevated.call_args_list[0].args[0])
+        self.assertIn("TscanClone.exe", run_elevated.call_args_list[0].args[0])
+        self.assertIn("TscanOriginal.exe", run_elevated.call_args_list[0].args[0])
+
+    def test_elevated_registry_command_uses_hidden_noninteractive_powershell(self) -> None:
+        completed = MagicMock(returncode=0, stdout="0\n", stderr="")
+        with (
+            patch("sttool.tscan_automation.subprocess.run", return_value=completed) as run,
+            patch("sttool.tscan_automation.ctypes.windll.shell32.IsUserAnAdmin", return_value=1),
+        ):
+            from sttool.tscan_automation import run_elevated_registry_command
+
+            run_elevated_registry_command("Write-Output ok")
+
+        command = run.call_args.args[0]
+        self.assertIn("-WindowStyle", command)
+        self.assertIn("Hidden", command)
+        self.assertIn("-NonInteractive", command)
+        self.assertEqual(run.call_args.kwargs["creationflags"], 0x08000000)
+
     def test_script_help_runs_outside_repository_working_directory(self) -> None:
         script = Path(__file__).resolve().parents[1] / "sttool" / "tscan_automation.py"
         with TemporaryDirectory() as temporary:
@@ -106,6 +148,17 @@ class TscanAutomationTests(unittest.TestCase):
                 check=False,
             )
         self.assertEqual(result.returncode, 0, result.stderr)
+
+    def test_prepare_cdp_executable_uses_new_policy_identity(self) -> None:
+        with TemporaryDirectory() as temporary:
+            source = Path(temporary) / "TscanPlus_run.exe"
+            source.write_bytes(b"tscan")
+
+            result = prepare_cdp_executable(source)
+
+            self.assertEqual(result.name, "TscanPlus_run_cdp.exe")
+            self.assertEqual(result.read_bytes(), b"tscan")
+            self.assertEqual(prepare_cdp_executable(result), result)
 
     def test_interrupted_retry_preserves_successes_and_retries_only_failures(self) -> None:
         state = {

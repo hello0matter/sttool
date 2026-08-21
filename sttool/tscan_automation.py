@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import ctypes
 import ipaddress
 import json
 import os
@@ -14,6 +15,7 @@ import sys
 import tempfile
 import time
 import winreg
+from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 from urllib.parse import urlsplit
@@ -29,6 +31,7 @@ from sttool.tool_network import webview_proxy_argument
 
 
 CREATE_NEW_PROCESS_GROUP = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0x08000000)
 POLICY_PATH = r"Software\Policies\Microsoft\Edge\WebView2\AdditionalBrowserArguments"
 POLICY_NAME = "TscanPlus_Win_Amd64.exe"
 DEFAULT_EXE = Path(r"D:\tmp\anjian\pj\st\TscanPlus_Win_Amd64\TscanPlus_Win_Amd64.exe")
@@ -202,6 +205,21 @@ def prepare_tscan_workspace(source_exe: Path, state_path: Path) -> Path:
         sanitize_tscan_database(database)
         initialized.write_text(now_text() + "\n", encoding="utf-8")
     return runtime_exe
+
+
+def prepare_cdp_executable(exe: Path) -> Path:
+    """Use a policy-clean executable identity for WebView2 CDP launches.
+
+    Older STTool builds could leave an HKCU WebView2 policy owned by an
+    elevated Administrators token. WebView2 policies are keyed by the host EXE
+    name, so a dedicated alias avoids an inaccessible stale value without
+    changing registry ACLs or touching another application's policy.
+    """
+    if exe.stem.endswith("_cdp"):
+        return exe
+    cdp_exe = exe.with_name(f"{exe.stem}_cdp{exe.suffix}")
+    _copy_or_link(exe, cdp_exe)
+    return cdp_exe
 
 
 def now_text() -> str:
@@ -938,6 +956,28 @@ def terminate_tscan_process_tree(pid: int) -> None:
     )
 
 
+def webview_process_diagnostics(pid: int, port: int) -> list[str]:
+    """Return short local diagnostics for a failed WebView2 attachment."""
+    lines: list[str] = []
+    try:
+        root = psutil.Process(pid)
+        processes = [root, *root.children(recursive=True)]
+    except (psutil.Error, OSError, ValueError):
+        return lines
+    for process in processes:
+        try:
+            command = " ".join(process.cmdline())
+        except (psutil.Error, OSError, ValueError):
+            continue
+        if process.name().lower().startswith("msedgewebview2"):
+            lines.append(f"PID {process.pid}: {command[:500]}")
+    if lines:
+        if not any("--remote-debugging-port=" in line for line in lines):
+            lines.append("WebView2 子进程未带 --remote-debugging-port 参数；需要计算机级 WebView2 策略")
+        return lines
+    return [f"未发现 WebView2 子进程（目标端口 {port}）"]
+
+
 def append_activity(state_path: Path, message: str) -> None:
     try:
         run_dir = state_path.parents[2]
@@ -1006,84 +1046,183 @@ def free_local_port() -> int:
 
 
 def run_elevated_registry_command(command: str) -> None:
-    encoded = base64.b64encode(command.encode("utf-16le")).decode("ascii")
-    result = subprocess.run(
-        [
-            "powershell.exe",
-            "-NoProfile",
-            "-ExecutionPolicy",
-            "Bypass",
-            "-Command",
-            f"$p=Start-Process powershell.exe -Verb RunAs -Wait -PassThru "
-            f"-ArgumentList '-NoProfile','-ExecutionPolicy','Bypass','-EncodedCommand','{encoded}'; "
-            "$p.WaitForExit(); $p.ExitCode",
-        ],
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    output = result.stdout.strip().splitlines()
-    exit_code = output[-1].strip() if output else ""
-    if result.returncode != 0 or exit_code != "0":
-        detail = result.stderr.strip() or result.stdout.strip() or "管理员授权失败"
-        raise RuntimeError(f"无法临时配置 WebView2 调试策略：{detail}")
+    encoded = base64.b64encode(
+        ("$ErrorActionPreference='Stop'; " + command).encode("utf-16le")
+    ).decode("ascii")
+    powershell_args = [
+        "-NoProfile",
+        "-NonInteractive",
+        "-WindowStyle",
+        "Hidden",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-EncodedCommand",
+        encoded,
+    ]
+    try:
+        is_admin = bool(ctypes.windll.shell32.IsUserAnAdmin())
+    except (AttributeError, OSError):
+        is_admin = False
+    if is_admin:
+        result = subprocess.run(
+            ["powershell.exe", *powershell_args],
+            capture_output=True,
+            text=True,
+            creationflags=CREATE_NO_WINDOW,
+            check=False,
+        )
+        exit_code = result.returncode
+    else:
+        class ShellExecuteInfo(ctypes.Structure):
+            _fields_ = [
+                ("cbSize", wintypes.DWORD),
+                ("fMask", wintypes.ULONG),
+                ("hwnd", wintypes.HWND),
+                ("lpVerb", wintypes.LPCWSTR),
+                ("lpFile", wintypes.LPCWSTR),
+                ("lpParameters", wintypes.LPCWSTR),
+                ("lpDirectory", wintypes.LPCWSTR),
+                ("nShow", ctypes.c_int),
+                ("hInstApp", wintypes.HINSTANCE),
+                ("lpIDList", wintypes.LPVOID),
+                ("lpClass", wintypes.LPCWSTR),
+                ("hkeyClass", wintypes.HKEY),
+                ("dwHotKey", wintypes.DWORD),
+                ("hIcon", wintypes.HANDLE),
+                ("hProcess", wintypes.HANDLE),
+            ]
+
+        info = ShellExecuteInfo()
+        info.cbSize = ctypes.sizeof(info)
+        info.fMask = 0x00000040  # SEE_MASK_NOCLOSEPROCESS
+        info.lpVerb = "runas"
+        info.lpFile = "powershell.exe"
+        info.lpParameters = " ".join(
+            f'"{item}"' if " " in item else item for item in powershell_args
+        )
+        info.nShow = 0  # SW_HIDE
+        shell_execute = ctypes.windll.shell32.ShellExecuteExW
+        shell_execute.argtypes = [ctypes.POINTER(ShellExecuteInfo)]
+        shell_execute.restype = wintypes.BOOL
+        if not shell_execute(ctypes.byref(info)):
+            error = ctypes.get_last_error()
+            exit_code = 1223 if error == 1223 else error or 1
+        else:
+            ctypes.windll.kernel32.WaitForSingleObject(info.hProcess, 0xFFFFFFFF)
+            code = wintypes.DWORD()
+            if ctypes.windll.kernel32.GetExitCodeProcess(
+                info.hProcess, ctypes.byref(code)
+            ):
+                exit_code = int(code.value)
+            else:
+                exit_code = 1
+            ctypes.windll.kernel32.CloseHandle(info.hProcess)
+        result = None
+    if (result is not None and result.returncode != 0) or exit_code != 0:
+        detail = (
+            result.stderr.strip() or result.stdout.strip() if result is not None else ""
+        )
+        if exit_code == 1223:
+            detail = "用户取消了管理员授权"
+        raise RuntimeError(
+            f"无法临时配置 WebView2 调试策略：退出码 {exit_code}"
+            + (f"；{detail}" if detail else "")
+        )
 
 
 class BrowserPolicy:
-    def __init__(self, port: int, executable_name: str = POLICY_NAME) -> None:
-        self.executable_name = executable_name
+    def __init__(
+        self,
+        port: int,
+        executable_name: str = POLICY_NAME,
+        *,
+        force_machine: bool = False,
+        additional_executable_names: tuple[str, ...] = (),
+    ) -> None:
+        names = (executable_name, *additional_executable_names)
+        self.executable_names = tuple(dict.fromkeys(name for name in names if name))
+        self.executable_name = self.executable_names[0]
+        self.force_machine = force_machine
         self.value = (
             f"--remote-debugging-port={port} --remote-allow-origins=* "
             "--force-renderer-accessibility"
         )
-        self.entries: list[tuple[int, int, bool, tuple[object, int] | None]] = []
+        self.entries: list[
+            tuple[int, int, str, bool, tuple[object, int] | None]
+        ] = []
         self.elevated = False
-        self.elevated_previous: tuple[bool, tuple[object, int] | None] = (False, None)
-        self.elevated_key_existed = False
+        self.elevated_previous: dict[
+            tuple[int, str], tuple[bool, tuple[object, int] | None]
+        ] = {}
+        self.elevated_key_existed: set[int] = set()
 
     def _apply(self, *, elevated: bool) -> None:
         command_entries: list[str] = []
-        for root, view_flag in ((winreg.HKEY_CURRENT_USER, winreg.KEY_WOW64_64KEY),):
+        # Prefer a per-user policy so normal STTool launches do not require an
+        # elevation prompt. WebView2 may use either registry view depending on
+        # the installed runtime architecture, so keep both views in sync.
+        roots = () if self.force_machine else (
+            (winreg.HKEY_CURRENT_USER, winreg.KEY_WOW64_64KEY),
+            (winreg.HKEY_CURRENT_USER, winreg.KEY_WOW64_32KEY),
+        )
+        for root, view_flag in roots:
             access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
-            previous = None
-            existed = False
-            try:
-                key = winreg.CreateKeyEx(root, POLICY_PATH, 0, access)
+            for name in self.executable_names:
+                previous = None
+                existed = False
                 try:
+                    key = winreg.CreateKeyEx(root, POLICY_PATH, 0, access)
                     try:
-                        previous = winreg.QueryValueEx(key, self.executable_name)
-                        existed = True
-                    except FileNotFoundError:
-                        pass
-                    winreg.SetValueEx(key, self.executable_name, 0, winreg.REG_SZ, self.value)
-                finally:
-                    winreg.CloseKey(key)
-            except OSError:
-                if not elevated:
-                    raise
-                try:
-                    key = winreg.OpenKey(
-                        root, POLICY_PATH, 0, winreg.KEY_QUERY_VALUE | view_flag
-                    )
-                    self.elevated_key_existed = True
-                    try:
-                        self.elevated_previous = (
-                            True,
-                            winreg.QueryValueEx(key, self.executable_name),
-                        )
+                        try:
+                            previous = winreg.QueryValueEx(key, name)
+                            existed = True
+                        except FileNotFoundError:
+                            pass
+                        winreg.SetValueEx(key, name, 0, winreg.REG_SZ, self.value)
                     finally:
                         winreg.CloseKey(key)
-                except (FileNotFoundError, OSError):
-                    self.elevated_previous = (False, None)
-                escaped = self.value.replace("'", "''")
-                command_entries.append(
-                    "$p='HKCU:" + POLICY_PATH + "'; "
-                    f"New-Item -Path $p -Force | Out-Null; "
-                    f"New-ItemProperty -Path $p -Name '{self.executable_name}' "
-                    f"-Value '{escaped}' -PropertyType String -Force | Out-Null"
-                )
-                continue
-            self.entries.append((root, view_flag, existed, previous))
+                except OSError:
+                    if not elevated:
+                        raise
+                else:
+                    self.entries.append((root, view_flag, name, existed, previous))
+
+        if self.force_machine or elevated:
+            for view_flag, view_name in (
+                (winreg.KEY_WOW64_64KEY, "Registry64"),
+                (winreg.KEY_WOW64_32KEY, "Registry32"),
+            ):
+                for name in self.executable_names:
+                    previous: tuple[object, int] | None = None
+                    existed = False
+                    try:
+                        key = winreg.OpenKey(
+                            winreg.HKEY_LOCAL_MACHINE,
+                            POLICY_PATH,
+                            0,
+                            winreg.KEY_QUERY_VALUE | view_flag,
+                        )
+                        self.elevated_key_existed.add(view_flag)
+                        try:
+                            previous = winreg.QueryValueEx(key, name)
+                            existed = True
+                        except FileNotFoundError:
+                            pass
+                        finally:
+                            winreg.CloseKey(key)
+                    except (FileNotFoundError, OSError):
+                        pass
+                    self.elevated_previous[(view_flag, name)] = (existed, previous)
+                    escaped_name = name.replace("'", "''")
+                    escaped_value = self.value.replace("'", "''")
+                    command_entries.append(
+                        f"$base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::{view_name}); "
+                        f"$p=$base.CreateSubKey('{POLICY_PATH}'); "
+                        f"$p.SetValue('{escaped_name}','{escaped_value}',[Microsoft.Win32.RegistryValueKind]::String); "
+                        "$p.Close(); $base.Close(); "
+                        "$cu='HKCU:" + POLICY_PATH + "'; "
+                        f"Remove-ItemProperty -Path $cu -Name '{escaped_name}' -ErrorAction SilentlyContinue"
+                    )
         if command_entries:
             run_elevated_registry_command("; ".join(command_entries))
             self.elevated = True
@@ -1097,7 +1236,7 @@ class BrowserPolicy:
 
     def __exit__(self, exc_type, exc, traceback) -> None:
         commands: list[str] = []
-        for root, view_flag, existed, previous in reversed(self.entries):
+        for root, view_flag, name, existed, previous in reversed(self.entries):
             access = winreg.KEY_QUERY_VALUE | winreg.KEY_SET_VALUE | view_flag
             try:
                 key = winreg.OpenKey(root, POLICY_PATH, 0, access)
@@ -1106,28 +1245,22 @@ class BrowserPolicy:
             if key is not None:
                 try:
                     if existed and previous is not None:
-                        winreg.SetValueEx(key, self.executable_name, 0, previous[1], previous[0])
+                        winreg.SetValueEx(key, name, 0, previous[1], previous[0])
                     else:
-                        winreg.DeleteValue(key, self.executable_name)
+                        winreg.DeleteValue(key, name)
                 finally:
                     winreg.CloseKey(key)
         if self.elevated:
-            existed, previous = self.elevated_previous
-            restore = (
-                f"New-ItemProperty -Path $p -Name '{self.executable_name}' "
-                f"-Value '{str(previous[0]).replace(chr(39), chr(39) * 2)}' "
-                "-PropertyType String -Force | Out-Null"
-                if existed and previous is not None
-                else f"Remove-ItemProperty -Path $p -Name '{self.executable_name}' "
-                "-ErrorAction SilentlyContinue"
-            )
-            cleanup = (
-                ""
-                if self.elevated_key_existed
-                else "; if ((Get-Item -Path $p -ErrorAction SilentlyContinue).Property.Count -eq 0) "
-                "{ Remove-Item -Path $p -Force -ErrorAction SilentlyContinue }"
-            )
-            commands.append("$p='HKCU:" + POLICY_PATH + "'; " + restore + cleanup)
+            for (view_flag, name), (existed, previous) in self.elevated_previous.items():
+                view_name = "Registry64" if view_flag == winreg.KEY_WOW64_64KEY else "Registry32"
+                restore = (
+                    f"$base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::{view_name}); "
+                    f"$p=$base.CreateSubKey('{POLICY_PATH}'); "
+                    f"$p.SetValue('{name.replace(chr(39), chr(39) * 2)}','{str(previous[0]).replace(chr(39), chr(39) * 2)}',[Microsoft.Win32.RegistryValueKind]::String); $p.Close(); $base.Close()"
+                    if existed and previous is not None
+                    else f"$base=[Microsoft.Win32.RegistryKey]::OpenBaseKey([Microsoft.Win32.RegistryHive]::LocalMachine,[Microsoft.Win32.RegistryView]::{view_name}); $p=$base.OpenSubKey('{POLICY_PATH}', $true); if($p){{ $p.DeleteValue('{name.replace(chr(39), chr(39) * 2)}',$false); $p.Close() }}; $base.Close()"
+                )
+                commands.append(restore)
             run_elevated_registry_command("; ".join(commands))
 
 
@@ -2401,6 +2534,25 @@ def automate(
         )
         return result
 
+
+def automate_uia(
+    pid: int,
+    target: str,
+    assets: dict[str, list[str]],
+    state_path: Path,
+) -> dict[str, object]:
+    from sttool.tscan_uia import dispatch_uia_stages
+
+    append_activity(state_path, "TscanPlus：CDP 不可用，自动切换 Windows UIA 后台控制")
+    result = dispatch_uia_stages(pid, target, assets)
+    submitted = sum(
+        1
+        for value in result["stages"].values()
+        if isinstance(value, dict) and value.get("status") == "submitted"
+    )
+    append_activity(state_path, f"TscanPlus：Windows UIA 已自动提交 {submitted} 个阶段")
+    return result
+
 def asset_commander_selected(state_path: Path) -> bool:
     try:
         run_state = read_json(state_path.parents[2] / "run.json")
@@ -2887,6 +3039,68 @@ def monitor_tscan_process(
         atomic_json_write(state_path, state)
         append_activity(state_path, str(state["detail"]))
         return 1
+
+
+def monitor_uia_process(
+    pid: int,
+    state_path: Path,
+    state: dict[str, object],
+    target: str,
+    scope: str,
+    asset_bus: Path,
+    start_scan: bool,
+) -> int:
+    """Monitor a UIA-controlled Tscan and dispatch only new asset generations."""
+    from sttool.tscan_uia import dispatch_uia_stages
+
+    while tscan_process_alive(
+        pid,
+        int(state.get("process_creation_token") or 0),
+        Path(str(state.get("exe") or "")),
+    ):
+        consumed = int(state.get("asset_bus_generation") or 0)
+        generation, delta = read_asset_bus_bundle(asset_bus, after_generation=consumed)
+        delta = filter_assets_by_scope(delta, scope)
+        if generation > consumed and any(delta.values()):
+            append_activity(
+                state_path,
+                "TscanPlus(UIA) 检测到新增资产，提交增量批次："
+                f"{len(delta['ips'])} IP / {len(delta['domains'])} 域名 / "
+                f"{len(delta['endpoints'])} 端点 / {len(delta['urls'])} URL",
+            )
+            try:
+                result = dispatch_uia_stages(pid, target, delta)
+            except Exception as exc:
+                append_activity(state_path, f"TscanPlus(UIA) 增量提交失败：{exc}")
+            else:
+                batches = state.get("stage_batches")
+                if not isinstance(batches, list):
+                    batches = []
+                    state["stage_batches"] = batches
+                batch_id = f"uia-asset-generation-{generation}"
+                stages = result.get("stages", {})
+                batches.append(
+                    {
+                        "batch_id": batch_id,
+                        "generation_from": consumed + 1,
+                        "generation_to": generation,
+                        "assets": delta,
+                        "stages": stages,
+                        "controller": "windows_uia",
+                    }
+                )
+                state.update(
+                    asset_bus_generation=generation,
+                    automation=result,
+                    stages=stages,
+                    status="running",
+                    stage="monitoring",
+                    detail="TscanPlus 正在通过 Windows UIA 后台运行",
+                    updated_at=now_text(),
+                )
+                atomic_json_write(state_path, state)
+        time.sleep(5.0)
+    return 0
     return monitor_process(child, pid, state)
 
 def parse_args() -> argparse.Namespace:
@@ -2926,6 +3140,10 @@ def main() -> int:
         exe = prepare_tscan_workspace(source_exe, state_path)
     else:
         exe = source_exe
+    if exe.is_file() and not tscan_process_alive(
+        child_pid, child_creation_token, previous_exe
+    ):
+        exe = prepare_cdp_executable(exe)
     state: dict[str, object] = {
         "schema_version": 2,
         "status": "starting",
@@ -2962,6 +3180,7 @@ def main() -> int:
     child: subprocess.Popen[bytes] | None = None
     port = int(previous.get("cdp_port") or 0)
     reattached = False
+    cdp_available = False
     try:
         if tscan_process_alive(child_pid, child_creation_token, previous_exe) and port:
             try:
@@ -2969,13 +3188,17 @@ def main() -> int:
             except RuntimeError:
                 append_activity(
                     state_path,
-                    f"发现旧 TscanPlus 进程 PID {child_pid} 无法接管，先关闭后重新启动",
+                    f"发现旧 TscanPlus 进程 PID {child_pid} 无 CDP，保留进程并准备切换 Windows UIA",
                 )
-                terminate_tscan_process_tree(child_pid)
-                child_pid = 0
-                child_creation_token = 0
+                reattached = True
+                state.update(
+                    pid=child_pid,
+                    process_creation_token=child_creation_token,
+                    cdp_port=port,
+                )
             else:
                 reattached = True
+                cdp_available = True
                 state.update(
                     pid=child_pid,
                     process_creation_token=child_creation_token,
@@ -2997,15 +3220,20 @@ def main() -> int:
             atomic_json_write(state_path, state)
             run_dir = state_path.parents[2]
             state["cdp_launch"] = {
-                "method": "WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS_POLICY",
+                "method": "WEBVIEW2_MACHINE_POLICY_TEMPORARY",
                 "port": port,
                 "user_data_folder": str(
                     run_dir / "tool_data" / "tscan" / "webview2_data"
                 ),
+                "policy_names": [exe.name],
             }
             atomic_json_write(state_path, state)
             try:
-                with BrowserPolicy(port, exe.name):
+                with BrowserPolicy(
+                    port,
+                    exe.name,
+                    force_machine=True,
+                ):
                     child = subprocess.Popen(
                         [str(exe)],
                         cwd=exe.parent,
@@ -3027,18 +3255,41 @@ def main() -> int:
                         f"TscanPlus 已启动，等待 WebView2/CDP 就绪，最长 {int(CDP_START_TIMEOUT_SECONDS)} 秒",
                     )
                     wait_for_cdp(port, timeout=CDP_START_TIMEOUT_SECONDS)
-            except Exception:
+                    cdp_available = True
+            except Exception as exc:
                 if tscan_process_alive(child_pid, child_creation_token, exe):
-                    append_activity(
-                        state_path,
-                        f"TscanPlus 启动或 CDP 接管失败，清理未接管进程 PID {child_pid}",
+                    diagnostics = webview_process_diagnostics(child_pid, port)
+                    detail = (
+                        "TscanPlus CDP 未连接，将自动切换 Windows UIA；窗口进程保留。"
+                        f"原因：{exc}"
                     )
-                    terminate_tscan_process_tree(child_pid)
-                child_pid = 0
-                child_creation_token = 0
-                state.update(pid=None, process_creation_token=0, updated_at=now_text())
-                atomic_json_write(state_path, state)
-                raise
+                    state.update(
+                        status="starting",
+                        stage="cdp_unavailable",
+                        detail=detail,
+                        error=str(exc),
+                        webview_diagnostics=diagnostics,
+                        updated_at=now_text(),
+                    )
+                    atomic_json_write(state_path, state)
+                    append_activity(state_path, detail)
+                    for line in diagnostics:
+                        append_activity(state_path, "WebView2 启动诊断：" + line)
+                    cdp_available = False
+                else:
+                    child_pid = 0
+                    child_creation_token = 0
+                    state.update(
+                        pid=None,
+                        process_creation_token=0,
+                        status="failed",
+                        stage="process_exit",
+                        detail="TscanPlus 进程在自动控制连接前退出",
+                        error=str(exc),
+                        updated_at=now_text(),
+                    )
+                    atomic_json_write(state_path, state)
+                    raise
 
         if not state["automation_dispatched"]:
             assets = wait_for_asset_bundle(
@@ -3060,14 +3311,22 @@ def main() -> int:
                 )
                 atomic_json_write(state_path, state)
                 return 0
-            automation = automate(
-                port,
-                args.target,
-                assets,
-                not args.prepare_only,
-                state_path,
-                state,
-            )
+            if cdp_available:
+                automation = automate(
+                    port,
+                    args.target,
+                    assets,
+                    not args.prepare_only,
+                    state_path,
+                    state,
+                )
+            else:
+                automation = automate_uia(
+                    child_pid,
+                    args.target,
+                    assets,
+                    state_path,
+                )
             bus_generation, _bus_bundle = read_asset_bus_bundle(
                 args.asset_bus.resolve(), args.target
             )
@@ -3118,17 +3377,28 @@ def main() -> int:
         if args.prepare_only:
             detail = "TscanPlus 核心扫描阶段已完成界面准备，未点击扫描按钮"
         update_stage(state_path, state, "running", detail)
-        exit_code = monitor_tscan_process(
-            child,
-            child_pid,
-            port,
-            state_path,
-            state,
-            args.target,
-            args.scope,
-            args.asset_bus.resolve(),
-            not args.prepare_only,
-        )
+        if cdp_available:
+            exit_code = monitor_tscan_process(
+                child,
+                child_pid,
+                port,
+                state_path,
+                state,
+                args.target,
+                args.scope,
+                args.asset_bus.resolve(),
+                not args.prepare_only,
+            )
+        else:
+            exit_code = monitor_uia_process(
+                child_pid,
+                state_path,
+                state,
+                args.target,
+                args.scope,
+                args.asset_bus.resolve(),
+                not args.prepare_only,
+            )
         if exit_code == 0:
             state.update(status="completed", updated_at=now_text(), exit_code=0)
         else:

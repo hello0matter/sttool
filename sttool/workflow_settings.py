@@ -4,6 +4,7 @@ from typing import Final
 
 
 DEFAULT_WORK_MODE: Final = "balanced"
+TSCAN_BACKEND_DEFAULT: Final = "gui"
 REASONING_EFFORTS: Final = ("", "low", "medium", "high", "xhigh")
 
 CREDENTIAL_AUDIT_DEFAULTS: Final = {
@@ -192,6 +193,10 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
         requested_mode if requested_mode in WORK_MODE_PRESETS else DEFAULT_WORK_MODE
     )
     result = work_mode_defaults(base_mode)
+    backend = str(source.get("tscan_backend") or TSCAN_BACKEND_DEFAULT).strip().lower()
+    result["tscan_backend"] = (
+        backend if backend in {"cli", "gui"} else TSCAN_BACKEND_DEFAULT
+    )
 
     bool_fields = (
         "auto_agent",

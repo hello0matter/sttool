@@ -22,6 +22,24 @@
 
 ## STTool 默认自动化流程
 
+当前默认入口使用同版本的 `TscanClient` 命令行后端；也可以在全局设置的“调度方式”页切换为
+`GUI 自动化`。不再依赖 TscanPlus
+图形版的 WebView2/CDP 或鼠标点击。TscanClient 没有可视化窗口，也没有
+TscanPlus 页面里的右键菜单；STTool 自己的成果页、右键 AI、资产准入、
+暂停恢复和全局搜索仍然正常保留。
+
+后台 TscanClient 目前由 STTool 分批调用 `port`、`url`、`poc` 三个阶段：
+
+- 每个获准资产总线代次单独保存到 `tool_data/tscan/client/batch-*/`；
+- 每轮有独立的 `port.txt`、`url.txt`、`poc.txt` 和日志，成果页会逐轮显示；
+- 目录和 JS 继续由现有 AI 路径发现工具处理，避免重复扫描；
+- 密码审计继续由 PassHack/凭据审批链处理，不会因为切换 CLI 自动爆破；
+- 代理从 STTool 工具网络设置传入 TscanClient 的 `-proxy` 参数。
+
+如果需要 TscanPlus 的可视化页面、右键菜单或其未接入的功能，应使用项目
+目录中保留的 GUI 版本手动打开；这不是后台 TscanClient 的启动标志。
+切换为 GUI 自动化后，新启动或恢复的实例才会使用 GUI；已经运行的进程不会被设置修改强制重启。
+
 `sttool/tscan_automation.py` 会：
 
 1. 用 Tscan 原目录作为 CWD 启动 EXE。

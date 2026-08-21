@@ -260,7 +260,7 @@ def component_paths(
             "workdir": workdir,
             "states": [workdir / "state.json"],
             "logs": [own_log if own_log.is_file() else component_activity],
-            "results": [workdir / "state.json"],
+            "results": [workdir / "state.json", workdir / "client"],
         }
     if component_id == "passhack":
         workdir = run_dir / "tool_data" / "passhack"
@@ -359,6 +359,7 @@ def human_status(value: object) -> str:
         "processing": "正在验证",
         "weak_password_found": "发现弱口令",
         "stopped_defense": "触发防护后停止",
+        "manual_required": "需要手动处理",
     }.get(text, text or "\u672a\u77e5")
 
 
@@ -718,6 +719,12 @@ def component_runtime(run_dir: Path, component_id: str) -> tuple[str, str, str]:
         state = load_json(run_dir / "tool_data" / "tscan" / "state.json")
         pid = int(state.get("pid") or 0)
         creation_token = int(state.get("process_creation_token") or 0)
+        if str(state.get("stage") or "") == "cdp_unavailable":
+            return (
+                "manual_required",
+                "cdp_unavailable",
+                str(state.get("detail") or "TscanPlus 自动控制未连接，窗口已保留"),
+            )
         if (
             pid > 0
             and creation_token > 0

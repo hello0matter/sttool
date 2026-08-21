@@ -42,6 +42,9 @@ class ToolDefinition:
     uses_shared_ai: bool = False
     allow_standalone: bool = False
     coordinator_managed: bool = False
+    alternate_executable: str = ""
+    alternate_args: tuple[str, ...] = ()
+    alternate_required_paths: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -62,6 +65,7 @@ class LaunchRequest:
     agent_api_key: str = field(default="", repr=False, compare=False)
     github_token: str = field(default="", repr=False, compare=False)
     work_mode: str = DEFAULT_WORK_MODE
+    tscan_backend: str = "gui"
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
     wait_for_fscan: bool = True
@@ -161,6 +165,7 @@ class RunState:
     reasoning_effort: str = ""
     agent_base_url: str = ""
     work_mode: str = DEFAULT_WORK_MODE
+    tscan_backend: str = "gui"
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
     wait_for_fscan: bool = True

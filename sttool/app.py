@@ -76,6 +76,7 @@ class LauncherApp(tk.Tk):
         self.run_states: dict[str, RunState] = {}
         self._loaded_run_config_key = ""
         self._busy = False
+        self._closing = False
         self._applying_project_value = True
         self._project_save_lock = threading.Lock()
         self._project_dirty = False
@@ -811,6 +812,7 @@ class LauncherApp(tk.Tk):
             agent_api_key=agent_api_key,
             github_token=self.github_token,
             work_mode=str(self.workflow_settings["work_mode"]),
+            tscan_backend=str(self.workflow_settings.get("tscan_backend", "gui")),
             auto_agent=bool(self.workflow_settings["auto_agent"]),
             wait_for_asset_commander=bool(
                 self.workflow_settings["wait_for_asset_commander"]
@@ -1548,6 +1550,15 @@ class LauncherApp(tk.Tk):
             )
 
     def _on_close(self) -> None:
+        if self._closing:
+            return
+        if self._busy:
+            messagebox.showinfo(
+                "操作进行中",
+                "当前正在启动、保存或暂停操作。请等待操作完成后再关闭主界面。",
+                parent=self,
+            )
+            return
         if self._project_dirty and not messagebox.askyesno(
             "未保存项目配置",
             "当前项目配置有未保存修改。\n\n点击“是”保存并应用，点击“否”直接关闭并丢弃修改？",
@@ -1558,6 +1569,66 @@ class LauncherApp(tk.Tk):
             return
         if self._project_dirty and not self._save_project(show_message=False):
             return
+        active_states = [
+            state
+            for state in self.run_states.values()
+            if state.status in {"starting", "running"}
+        ]
+        if not active_states:
+            self._finish_close()
+            return
+
+        if not messagebox.askyesno(
+            "暂停运行中的工程",
+            f"当前有 {len(active_states)} 个运行实例正在工作。\n\n"
+            "关闭主界面前会先暂停全部实例，停止其组件并保留断点。\n"
+            "是否继续关闭？",
+            parent=self,
+        ):
+            return
+
+        self._closing = True
+        self._busy = True
+        self.pause_button.state(["disabled"])
+        self.launch_status.configure(
+            text="正在暂停全部运行实例，完成后关闭主界面…", foreground=MUTED
+        )
+
+        def worker() -> None:
+            errors: list[str] = []
+            stopped: list[RunState] = []
+            for state in active_states:
+                try:
+                    stopped.append(self.manager.stop(state))
+                except Exception as exc:
+                    errors.append(f"{state.project_name}/{state.run_id}：{exc}")
+            self.after(0, lambda: self._close_after_pause(stopped, errors))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _close_after_pause(
+        self, stopped: list[RunState], errors: list[str]
+    ) -> None:
+        for state in stopped:
+            self.run_states[self._state_key(state)] = state
+        self._refresh_runs()
+        if errors:
+            self._closing = False
+            self._busy = False
+            self.pause_button.state(["!disabled"])
+            self.launch_status.configure(
+                text="部分实例暂停失败，主界面保持打开，请查看项目日志。",
+                foreground=DANGER,
+            )
+            messagebox.showwarning(
+                "暂停未完成",
+                "以下实例未能完全暂停，主界面不会关闭：\n" + "\n".join(errors),
+                parent=self,
+            )
+            return
+        self._finish_close()
+
+    def _finish_close(self) -> None:
         self._save_launcher_settings()
         self.destroy()
 

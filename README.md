@@ -10,7 +10,7 @@ STTool 把现有渗透工具按“项目 / 运行实例”统一启动和监控�
 python -m pip install -e .
 ```
 
-直接双击 `STTool.pyw` 不会出现 Python 黑色控制台。也可以双击 `start.bat`，或在当前目录运行：
+直接双击 `STTool.pyw` 不会出现 Python 黑色控制台，但不会自动请求管理员权限。推荐双击 `start.bat`，它会以管理员身份启动 GUI；也可以在当前目录运行：
 
 ```powershell
 python .\main.py

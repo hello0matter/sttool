@@ -37,6 +37,11 @@ TOOL_NETWORK_MODE_LABELS = {
     "socks5": "SOCKS5 优先（兼容 HTTP 降级）",
 }
 
+TSCAN_BACKEND_LABELS = {
+    "cli": "后台 CLI（无窗口，推荐）",
+    "gui": "GUI 自动化（完整页面和菜单）",
+}
+
 
 CREDENTIAL_AUDIT_LABELS = {
     "save_only": "仅保存待办，不自动验证",
@@ -102,6 +107,9 @@ class AISettingsDialog(tk.Toplevel):
         self.show_github_token_var = tk.BooleanVar(value=False)
         self.work_mode_var = tk.StringVar(
             value=WORK_MODE_LABELS[str(workflow["work_mode"])]
+        )
+        self.tscan_backend_var = tk.StringVar(
+            value=TSCAN_BACKEND_LABELS[str(workflow.get("tscan_backend", "gui"))]
         )
         self.auto_agent_var = tk.BooleanVar(value=bool(workflow["auto_agent"]))
         self.wait_asset_var = tk.BooleanVar(
@@ -521,6 +529,7 @@ class AISettingsDialog(tk.Toplevel):
     def _build_tool_network_tab(self, notebook: ttk.Notebook) -> None:
         tab = self._add_scrollable_tab(notebook, "工具网络")
         tab.columnconfigure(1, weight=1)
+        tab.columnconfigure(3, weight=1)
         ttk.Label(
             tab,
             text=(
@@ -581,7 +590,10 @@ class AISettingsDialog(tk.Toplevel):
 
     def _build_workflow_tab(self, notebook: ttk.Notebook) -> None:
         tab = self._add_scrollable_tab(notebook, "调度方式")
+        tab.columnconfigure(0, weight=0)
         tab.columnconfigure(1, weight=1)
+        tab.columnconfigure(2, weight=0)
+        tab.columnconfigure(3, weight=1)
         ttk.Label(
             tab,
             text=(
@@ -599,9 +611,24 @@ class AISettingsDialog(tk.Toplevel):
         )
         mode_box.grid(row=1, column=1, sticky="ew", pady=(0, 14))
         mode_box.bind("<<ComboboxSelected>>", self._mode_changed)
+        ttk.Label(tab, text="Tscan 执行方式").grid(
+            row=1, column=2, sticky="w", padx=(18, 8)
+        )
+        ttk.Combobox(
+            tab,
+            textvariable=self.tscan_backend_var,
+            values=tuple(TSCAN_BACKEND_LABELS.values()),
+            state="readonly",
+            width=28,
+        ).grid(row=1, column=3, sticky="ew", pady=(0, 14))
+        ttk.Label(
+            tab,
+            text="CLI 不显示窗口；GUI 才有 Tscan 页面和右键菜单。切换不会强制重启当前实例。",
+            wraplength=680,
+        ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=(0, 10))
 
         checks = ttk.LabelFrame(tab, text="启动条件", padding=12)
-        checks.grid(row=2, column=0, columnspan=2, sticky="ew", pady=(0, 14))
+        checks.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0, 14))
         ttk.Checkbutton(
             checks, text="自动启动新增资产的 AI 执行", variable=self.auto_agent_var
         ).grid(row=0, column=0, sticky="w", pady=3)
@@ -622,7 +649,7 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=3, column=0, sticky="w", pady=3)
 
         tuning = ttk.LabelFrame(tab, text="增量调度参数", padding=12)
-        tuning.grid(row=3, column=0, columnspan=2, sticky="ew")
+        tuning.grid(row=4, column=0, columnspan=4, sticky="ew")
         tuning.columnconfigure(1, weight=1)
         self._spin_field(
             tuning, 0, "获准资产无新增等待（秒）", self.settle_seconds_var, 1, 600
@@ -650,7 +677,7 @@ class AISettingsDialog(tk.Toplevel):
         approval = ttk.LabelFrame(
             tab, text="新增主机与 C 段资产准入（全局默认策略）", padding=12
         )
-        approval.grid(row=4, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        approval.grid(row=5, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         approval.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             approval,
@@ -696,7 +723,7 @@ class AISettingsDialog(tk.Toplevel):
         workload = ttk.LabelFrame(
             tab, text="下一批 AI 执行确认（待处理资产较多时）", padding=12
         )
-        workload.grid(row=6, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        workload.grid(row=7, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         workload.columnconfigure(1, weight=1)
         ttk.Label(workload, text="超过阈值时默认处理").grid(
             row=0, column=0, sticky="w", pady=4
@@ -730,7 +757,7 @@ class AISettingsDialog(tk.Toplevel):
         credential = ttk.LabelFrame(
             tab, text="登录入口口令安全检测", padding=12
         )
-        credential.grid(row=7, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        credential.grid(row=8, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         credential.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             credential,
@@ -797,7 +824,7 @@ class AISettingsDialog(tk.Toplevel):
         ).grid(row=11, column=0, columnspan=3, sticky="w", pady=(8, 0))
 
         scan = ttk.LabelFrame(tab, text="扫描工具参数（按工作模式预设）", padding=12)
-        scan.grid(row=5, column=0, columnspan=2, sticky="ew", pady=(14, 0))
+        scan.grid(row=12, column=0, columnspan=4, sticky="ew", pady=(14, 0))
         scan.columnconfigure(1, weight=1)
         ttk.Checkbutton(
             scan,
@@ -999,6 +1026,9 @@ class AISettingsDialog(tk.Toplevel):
         workflow = normalize_workflow_settings(
             {
                 "work_mode": reverse.get(self.work_mode_var.get(), "balanced"),
+                "tscan_backend": {
+                    label: mode for mode, label in TSCAN_BACKEND_LABELS.items()
+                }.get(self.tscan_backend_var.get(), "gui"),
                 "auto_agent": self.auto_agent_var.get(),
                 "wait_for_asset_commander": self.wait_asset_var.get(),
                 "wait_for_fscan": self.wait_fscan_var.get(),

@@ -171,6 +171,24 @@ def project_result_sources(run_dir: Path) -> list[ProjectResultSource]:
                 preview_kind="tscan",
             )
 
+    tscan_client_root = run_dir / "tool_data" / "tscan" / "client"
+    for path in sorted(tscan_client_root.glob("batch-*/*.txt")):
+        batch_name = path.parent.name.removeprefix("batch-")
+        batch_number = batch_name.lstrip("0") or "0"
+        module = path.stem
+        labels = {"port": ("端口与服务", "端口扫描"), "url": ("Web 指纹", "综合扫描"), "poc": ("POC 检测", "漏洞扫描")}
+        title, kind = labels.get(module, (module, "综合扫描"))
+        _add_source(
+            sources,
+            seen,
+            title=f"TscanClient 第 {batch_number} 轮 {title}",
+            subtitle="TscanClient 后台批次结果",
+            path=path,
+            kind=kind,
+            preview_kind="text",
+            batch=f"第 {batch_number} 轮",
+        )
+
     main_fscan = run_dir / "results" / "fscan.txt"
     _add_source(
         sources,
