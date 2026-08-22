@@ -293,6 +293,7 @@ def default_tools(
             alternate_executable=_pythonw(),
             alternate_args=(
                 str(tscan_automation), "--exe", str(tscan), "--target", "{target}",
+                "--auto-update", "{tscan_auto_update}",
                 "--project", "{project_name}", "--scope", "{processing_scope}",
                 "--state", "{run_dir}/tool_data/tscan/state.json",
                 "--asset-state", "{run_dir}/tool_data/asset_commander/workflow_state.json",

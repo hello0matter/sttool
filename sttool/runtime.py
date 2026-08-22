@@ -584,6 +584,7 @@ class RuntimeManager:
             "agent_base_url": request.agent_base_url.strip().rstrip("/"),
             "work_mode": request.work_mode,
             "tscan_backend": request.tscan_backend,
+            "tscan_auto_update": str(request.tscan_auto_update).lower(),
             "auto_agent": request.auto_agent,
             "wait_for_asset_commander": request.wait_for_asset_commander,
             "wait_for_fscan": request.wait_for_fscan,
@@ -1531,6 +1532,9 @@ class RuntimeManager:
                 github_token=github_token,
                 work_mode=str(value.get("work_mode", state.work_mode)),
                 tscan_backend=str(value.get("tscan_backend", state.tscan_backend)),
+                tscan_auto_update=bool(
+                    value.get("tscan_auto_update", state.tscan_auto_update)
+                ),
                 auto_agent=bool(value.get("auto_agent", state.auto_agent)),
                 wait_for_asset_commander=bool(
                     value.get(
@@ -1669,6 +1673,7 @@ class RuntimeManager:
                 agent_base_url=request.agent_base_url.strip().rstrip("/"),
                 work_mode=request.work_mode,
                 tscan_backend=request.tscan_backend,
+                tscan_auto_update=request.tscan_auto_update,
                 auto_agent=request.auto_agent,
                 wait_for_asset_commander=request.wait_for_asset_commander,
                 wait_for_fscan=request.wait_for_fscan,
@@ -1843,6 +1848,7 @@ class RuntimeManager:
                     github_token=github_token,
                     work_mode=request.work_mode,
                     tscan_backend=request.tscan_backend,
+                    tscan_auto_update=request.tscan_auto_update,
                     auto_agent=request.auto_agent,
                     wait_for_asset_commander=request.wait_for_asset_commander,
                     wait_for_fscan=request.wait_for_fscan,
@@ -1903,6 +1909,7 @@ class RuntimeManager:
                 github_token=github_token,
                 work_mode=request.work_mode,
                 tscan_backend=request.tscan_backend,
+                tscan_auto_update=request.tscan_auto_update,
                 auto_agent=request.auto_agent,
                 wait_for_asset_commander=request.wait_for_asset_commander,
                 wait_for_fscan=request.wait_for_fscan,

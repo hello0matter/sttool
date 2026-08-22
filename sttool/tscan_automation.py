@@ -1424,6 +1424,58 @@ def try_set_switch(page: Page, label: str, enabled: bool) -> bool | None:
     return set_switch(page, label, enabled)
 
 
+def _version_key(value: str) -> tuple[int, ...] | None:
+    match = re.search(r"\d+(?:\.\d+)+", value)
+    if not match:
+        return None
+    return tuple(int(part) for part in match.group(0).split("."))
+
+
+def check_homepage_update(page: Page, state_path: Path, enabled: bool) -> dict[str, object]:
+    """Check the Welcome page and click its update control only for a newer version."""
+    result: dict[str, object] = {"enabled": enabled, "checked": False}
+    if not enabled:
+        append_activity(state_path, "主页版本检查已关闭，跳过 TscanPlus 自动更新")
+        return result
+    try:
+        click_tab(page, "Welcome")
+        text = page.locator("body").inner_text(timeout=3000)
+    except Exception as exc:
+        result["error"] = str(exc)
+        append_activity(state_path, f"主页版本检查失败，跳过自动更新：{exc}")
+        return result
+    current_match = re.search(r"当前\s*(?:版本)?\s*[：:]?\s*(v?\d+(?:\.\d+)+)", text, re.I)
+    latest_match = re.search(r"最新\s*(?:版本)?\s*[：:]?\s*(v?\d+(?:\.\d+)+)", text, re.I)
+    current = current_match.group(1) if current_match else ""
+    latest = latest_match.group(1) if latest_match else ""
+    result.update(checked=True, current=current, latest=latest)
+    current_key = _version_key(current)
+    latest_key = _version_key(latest)
+    append_activity(
+        state_path,
+        f"主页版本检查：当前 {current or '未知'}，最新 {latest or '未知'}",
+    )
+    if not current_key or not latest_key:
+        append_activity(state_path, "无法识别主页版本，跳过 TscanPlus 自动更新")
+        return result
+    if latest_key <= current_key:
+        append_activity(state_path, "TscanPlus 当前已是最新版本")
+        return result
+    for label in ("更新PoC", "更新 POC", "更新"):
+        button = page.get_by_role("button", name=label, exact=True)
+        try:
+            if button.count() and button.first.is_visible():
+                safe_click(page, button.first)
+                result.update(update_clicked=True, update_label=label)
+                append_activity(state_path, f"检测到 TscanPlus 新版本，已点击{label}")
+                return result
+        except Exception:
+            continue
+    append_activity(state_path, "检测到 TscanPlus 新版本，但未找到更新按钮")
+    result["update_clicked"] = False
+    return result
+
+
 def click_tab(page: Page, name: str) -> None:
     tab = visible(page.locator(f'.n-tabs-tab[data-name="{name}"]'))
     safe_click(page, tab)
@@ -1556,7 +1608,10 @@ def configure_textarea_scan(
         "xpath=ancestor::*[contains(concat(' ', normalize-space(@class), ' '), ' n-tab-pane ')][1]"
     )
     scope = panel if panel.count() else page
-    button = visible(scope.get_by_role("button", name=button_name, exact=True))
+    try:
+        button = visible(scope.get_by_role("button", name=button_name, exact=True))
+    except Exception:
+        button = visible(page.get_by_role("button", name=button_name, exact=True))
     clicked = False
     retry_clicked = False
     dismissed_modals: tuple[str, ...] = ()
@@ -1582,6 +1637,9 @@ def configure_textarea_scan(
             acknowledged, snapshot = wait_for_stage_ack(
                 page, button, progress_method=progress_method
             )
+        if not acknowledged and not progress_method:
+            acknowledged = True
+            reason = "已点击启动；Tscan 未提供可查询进度接口，按提交记录"
         if not acknowledged:
             reason = "已点击启动，但 Tscan 未在 10 秒内确认任务进入运行状态"
     return {
@@ -1632,10 +1690,10 @@ def configure_asset_discovery(
     set_labeled_input(page, "\u7ebf\u7a0b", "200")
 
     options = {
-        "password_crack": set_switch(page, PASSWORD_CRACK, False),
-        "poc_check": set_switch(page, POC_CHECK, False),
-        "port_fingerprint": set_switch(page, PORT_FINGERPRINT, True),
-        "proxy": set_switch(page, ENABLE_PROXY, False),
+        "password_crack": try_set_switch(page, PASSWORD_CRACK, False),
+        "poc_check": try_set_switch(page, POC_CHECK, False),
+        "port_fingerprint": try_set_switch(page, PORT_FINGERPRINT, True),
+        "proxy": try_set_switch(page, ENABLE_PROXY, False),
     }
 
     scan_clicked = False
@@ -2571,6 +2629,7 @@ def automate(
     state_path: Path,
     state: dict[str, object],
     batch_id: str = "initial",
+    auto_update: bool = True,
 ) -> dict[str, object]:
     os.environ["NO_PROXY"] = "127.0.0.1,localhost"
     endpoint = wait_for_cdp(port)
@@ -2580,6 +2639,9 @@ def automate(
             raise RuntimeError("Tscan WebView2 page was not found")
         page = browser.contexts[0].pages[0]
         page.wait_for_load_state("domcontentloaded")
+        update_result = check_homepage_update(page, state_path, auto_update)
+        state["version_check"] = update_result
+        atomic_json_write(state_path, state)
         result = dispatch_stages_on_page(
             page,
             target,
@@ -3178,6 +3240,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--asset-export", type=Path, default=Path("asset_commander_assets.json"))
     parser.add_argument("--asset-bus", type=Path, default=Path("asset_bus.json"))
     parser.add_argument("--prepare-only", action="store_true")
+    parser.add_argument("--auto-update", choices=("true", "false"), default="true")
     return parser.parse_args()
 
 
@@ -3381,6 +3444,7 @@ def main() -> int:
                     not args.prepare_only,
                     state_path,
                     state,
+                    auto_update=args.auto_update == "true",
                 )
             else:
                 automation = automate_uia(

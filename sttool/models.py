@@ -66,6 +66,7 @@ class LaunchRequest:
     github_token: str = field(default="", repr=False, compare=False)
     work_mode: str = DEFAULT_WORK_MODE
     tscan_backend: str = "gui"
+    tscan_auto_update: bool = True
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
     wait_for_fscan: bool = True
@@ -166,6 +167,7 @@ class RunState:
     agent_base_url: str = ""
     work_mode: str = DEFAULT_WORK_MODE
     tscan_backend: str = "gui"
+    tscan_auto_update: bool = True
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
     wait_for_fscan: bool = True

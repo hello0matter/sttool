@@ -813,6 +813,7 @@ class LauncherApp(tk.Tk):
             github_token=self.github_token,
             work_mode=str(self.workflow_settings["work_mode"]),
             tscan_backend=str(self.workflow_settings.get("tscan_backend", "gui")),
+            tscan_auto_update=bool(self.workflow_settings.get("tscan_auto_update", True)),
             auto_agent=bool(self.workflow_settings["auto_agent"]),
             wait_for_asset_commander=bool(
                 self.workflow_settings["wait_for_asset_commander"]

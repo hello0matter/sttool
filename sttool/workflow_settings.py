@@ -181,6 +181,7 @@ def work_mode_defaults(mode: object) -> dict[str, object]:
         normalized = DEFAULT_WORK_MODE
     return {
         "work_mode": normalized,
+        "tscan_auto_update": True,
         **WORK_MODE_PRESETS[normalized],
         **CREDENTIAL_AUDIT_DEFAULTS,
     }
@@ -199,6 +200,7 @@ def normalize_workflow_settings(value: object) -> dict[str, object]:
     )
 
     bool_fields = (
+        "tscan_auto_update",
         "auto_agent",
         "wait_for_asset_commander",
         "wait_for_fscan",

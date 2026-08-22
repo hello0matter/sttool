@@ -111,6 +111,9 @@ class AISettingsDialog(tk.Toplevel):
         self.tscan_backend_var = tk.StringVar(
             value=TSCAN_BACKEND_LABELS[str(workflow.get("tscan_backend", "gui"))]
         )
+        self.tscan_auto_update_var = tk.BooleanVar(
+            value=bool(workflow.get("tscan_auto_update", True))
+        )
         self.auto_agent_var = tk.BooleanVar(value=bool(workflow["auto_agent"]))
         self.wait_asset_var = tk.BooleanVar(
             value=bool(workflow["wait_for_asset_commander"])
@@ -626,6 +629,11 @@ class AISettingsDialog(tk.Toplevel):
             text="CLI 不显示窗口；GUI 才有 Tscan 页面和右键菜单。切换不会强制重启当前实例。",
             wraplength=680,
         ).grid(row=2, column=2, columnspan=2, sticky="w", padx=(18, 0), pady=(0, 10))
+        ttk.Checkbutton(
+            tab,
+            text="每次启动 Tscan 自动检查并更新（默认开启）",
+            variable=self.tscan_auto_update_var,
+        ).grid(row=2, column=0, columnspan=2, sticky="w", pady=(0, 10))
 
         checks = ttk.LabelFrame(tab, text="启动条件", padding=12)
         checks.grid(row=3, column=0, columnspan=4, sticky="ew", pady=(0, 14))
@@ -1029,6 +1037,7 @@ class AISettingsDialog(tk.Toplevel):
                 "tscan_backend": {
                     label: mode for mode, label in TSCAN_BACKEND_LABELS.items()
                 }.get(self.tscan_backend_var.get(), "gui"),
+                "tscan_auto_update": self.tscan_auto_update_var.get(),
                 "auto_agent": self.auto_agent_var.get(),
                 "wait_for_asset_commander": self.wait_asset_var.get(),
                 "wait_for_fscan": self.wait_fscan_var.get(),

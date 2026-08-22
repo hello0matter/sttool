@@ -50,6 +50,7 @@ from sttool.tscan_automation import (
     webview_environment,
     workflow_assets_ready,
     workflow_completed,
+    _version_key,
 )
 
 
@@ -64,6 +65,10 @@ class ModalPage:
 
 
 class TscanAutomationTests(unittest.TestCase):
+    def test_tscan_version_key_compares_numeric_components(self) -> None:
+        self.assertEqual(_version_key("当前 v3.10.2"), (3, 10, 2))
+        self.assertIsNone(_version_key("未知"))
+
     def test_webview_environment_isolated_per_run(self) -> None:
         with TemporaryDirectory() as temporary:
             environment = webview_environment(52041, Path(temporary))
