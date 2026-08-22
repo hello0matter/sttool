@@ -1433,6 +1433,32 @@ def _version_key(value: str) -> tuple[int, ...] | None:
 
 def navigate_homepage(page: Page) -> None:
     """Navigate using Tscan's top-level Welcome menu, including resumed pages."""
+    clicked = page.evaluate(
+        """() => {
+          const visible = (element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const text = (element) => (element.innerText || element.textContent || '').trim();
+          const item = [...document.querySelectorAll('*')].find(
+            (element) => visible(element) && text(element) === 'Welcome'
+              && element.children.length === 0
+          );
+          if (!item) return false;
+          const clickable = item.closest(
+            '[role="menuitem"], nav, header, .n-menu-item, .menu-item, button, a'
+          ) || item;
+          for (const type of ['mousedown', 'mouseup', 'click']) {
+            clickable.dispatchEvent(new MouseEvent(type, { bubbles: true, cancelable: true, view: window }));
+          }
+          return true;
+        }"""
+    )
+    if clicked:
+        page.wait_for_timeout(700)
+        return
     candidates = page.get_by_text("Welcome", exact=True)
     for index in range(candidates.count()):
         candidate = candidates.nth(index)
@@ -1485,16 +1511,34 @@ def check_homepage_update(page: Page, state_path: Path, enabled: bool) -> dict[s
     if latest_key <= current_key:
         append_activity(state_path, "TscanPlus 当前已是最新版本")
         return result
-    for label in ("更新升级", "更新PoC", "更新 POC"):
-        button = page.get_by_role("button", name=label, exact=True)
-        try:
-            if button.count() and button.first.is_visible():
-                safe_click(page, button.first)
-                result.update(update_clicked=True, update_label=label)
-                append_activity(state_path, f"检测到 TscanPlus 新版本，已点击{label}")
-                return result
-        except Exception:
-            continue
+    clicked_label = page.evaluate(
+        """(labels) => {
+          const visible = (element) => {
+            const rect = element.getBoundingClientRect();
+            const style = getComputedStyle(element);
+            return rect.width > 0 && rect.height > 0
+              && style.display !== 'none' && style.visibility !== 'hidden';
+          };
+          const text = (element) => (element.innerText || element.textContent || '').trim();
+          for (const label of labels) {
+            const item = [...document.querySelectorAll('*')].find(
+              (element) => visible(element) && text(element) === label
+                && element.children.length === 0
+            );
+            if (!item) continue;
+            const clickable = item.closest('button, a, [role="button"]') || item;
+            clickable.click();
+            return label;
+          }
+          return '';
+        }""",
+        ["更新升级", "更新PoC", "更新 POC"],
+    )
+    if clicked_label:
+        page.wait_for_timeout(800)
+        result.update(update_clicked=True, update_label=clicked_label)
+        append_activity(state_path, f"检测到 TscanPlus 新版本，已点击{clicked_label}")
+        return result
     append_activity(state_path, "检测到 TscanPlus 新版本，但未找到更新按钮")
     result["update_clicked"] = False
     return result
