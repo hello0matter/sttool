@@ -1431,6 +1431,30 @@ def _version_key(value: str) -> tuple[int, ...] | None:
     return tuple(int(part) for part in match.group(0).split("."))
 
 
+def navigate_homepage(page: Page) -> None:
+    """Navigate using Tscan's top-level Welcome menu, including resumed pages."""
+    candidates = page.get_by_text("Welcome", exact=True)
+    for index in range(candidates.count()):
+        candidate = candidates.nth(index)
+        try:
+            if not candidate.is_visible():
+                continue
+            candidate.evaluate(
+                """element => {
+                  const clickable = element.closest(
+                    '[role="menuitem"], nav, header, .n-menu-item, .menu-item, button'
+                  ) || element;
+                  clickable.click();
+                }"""
+            )
+            page.wait_for_timeout(500)
+            return
+        except Exception:
+            continue
+    if not re.search(r"当前\s*(?:版本)?\s*[：:]?\s*v?\d+(?:\.\d+)+", page.locator("body").inner_text(), re.I):
+        raise RuntimeError("Tscan Welcome 主页导航未找到")
+
+
 def check_homepage_update(page: Page, state_path: Path, enabled: bool) -> dict[str, object]:
     """Check the Welcome page and click its update control only for a newer version."""
     result: dict[str, object] = {"enabled": enabled, "checked": False}
@@ -1438,7 +1462,7 @@ def check_homepage_update(page: Page, state_path: Path, enabled: bool) -> dict[s
         append_activity(state_path, "主页版本检查已关闭，跳过 TscanPlus 自动更新")
         return result
     try:
-        click_tab(page, "Welcome")
+        navigate_homepage(page)
         text = page.locator("body").inner_text(timeout=3000)
     except Exception as exc:
         result["error"] = str(exc)
@@ -1461,7 +1485,7 @@ def check_homepage_update(page: Page, state_path: Path, enabled: bool) -> dict[s
     if latest_key <= current_key:
         append_activity(state_path, "TscanPlus 当前已是最新版本")
         return result
-    for label in ("更新PoC", "更新 POC", "更新"):
+    for label in ("更新升级", "更新PoC", "更新 POC"):
         button = page.get_by_role("button", name=label, exact=True)
         try:
             if button.count() and button.first.is_visible():
@@ -2944,6 +2968,11 @@ def monitor_tscan_process(
                 f"http://127.0.0.1:{port}"
             )
             page = browser.contexts[0].pages[0]
+            auto_update = str(state.get("tscan_auto_update", "true")).lower() == "true"
+            state["version_check"] = check_homepage_update(
+                page, state_path, auto_update
+            )
+            atomic_json_write(state_path, state)
             existing_batches = state.get("stage_batches")
             if isinstance(existing_batches, list):
                 migrated = migrate_stage_batch_retries(
@@ -3280,6 +3309,7 @@ def main() -> int:
         "target": args.target,
         "project": args.project,
         "scope": args.scope,
+        "tscan_auto_update": args.auto_update,
         "pid": None,
         "process_creation_token": child_creation_token,
         "cdp_port": None,
