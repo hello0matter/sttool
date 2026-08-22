@@ -449,6 +449,9 @@ class LauncherApp(tk.Tk):
         ttk.Button(actions, text="项目范围", command=self._edit_selected_scope).pack(
             side="left", padx=(8, 0)
         )
+        ttk.Button(actions, text="实例设置", command=self._open_selected_run_settings).pack(
+            side="left", padx=(8, 0)
+        )
         self.recover_button = ttk.Button(
             actions, text="恢复实例", command=self._recover_selected_run
         )
@@ -1825,6 +1828,108 @@ class LauncherApp(tk.Tk):
     def _open_help(self) -> None:
         path = ensure_help_document(self.manager.app_dir)
         os.startfile(path)
+
+    def _open_selected_run_settings(self) -> None:
+        state = self._selected_state()
+        if state is None:
+            self.pause_status_var.set("请先选择一个运行实例。")
+            return
+        hot = {}
+        try:
+            hot_value = json.loads(
+                (Path(state.run_dir) / "tool_data" / "coordinator" / "hot_settings.json")
+                .read_text(encoding="utf-8")
+            )
+            if isinstance(hot_value, dict):
+                hot = hot_value
+        except (OSError, json.JSONDecodeError):
+            pass
+        dialog = AISettingsDialog(
+            self,
+            api_base_url=state.api_base_url,
+            model=state.model,
+            api_key=self.api_key,
+            codex_agent_model=state.agent_model if state.provider != "claude" else "",
+            codex_reasoning_effort=state.reasoning_effort if state.provider != "claude" else "",
+            codex_agent_base_url=state.agent_base_url if state.provider != "claude" else "",
+            claude_agent_model=state.agent_model if state.provider == "claude" else "",
+            claude_reasoning_effort=state.reasoning_effort if state.provider == "claude" else "",
+            claude_agent_base_url=state.agent_base_url if state.provider == "claude" else "",
+            github_token=self.github_token,
+            workflow_settings=state.to_dict(),
+            tool_network_settings=hot.get("tool_network"),
+            dialog_title=f"STTool 实例设置：{state.run_id}",
+        )
+        self.wait_window(dialog)
+        if dialog.result is None:
+            return
+        workflow_value = dialog.result["workflow"]
+        override_fields = {
+            field
+            for field, value in workflow_value.items()
+            if field in RunState.__dataclass_fields__
+            and getattr(state, field) != value
+        }
+        selected_network = normalize_tool_network(dialog.result.get("tool_network"))
+        current_network = normalize_tool_network(hot.get("tool_network"))
+        if selected_network != current_network:
+            override_fields.add("tool_network")
+        provider_model_key = (
+            "claude_agent_model" if state.provider == "claude" else "codex_agent_model"
+        )
+        provider_effort_key = (
+            "claude_reasoning_effort"
+            if state.provider == "claude"
+            else "codex_reasoning_effort"
+        )
+        provider_base_key = (
+            "claude_agent_base_url"
+            if state.provider == "claude"
+            else "codex_agent_base_url"
+        )
+        for field, value in {
+            "api_base_url": dialog.result["api_base_url"],
+            "model": dialog.result["model"],
+            "agent_model": dialog.result[provider_model_key],
+            "reasoning_effort": dialog.result[provider_effort_key],
+            "agent_base_url": dialog.result[provider_base_key],
+        }.items():
+            if str(getattr(state, field)) != str(value):
+                override_fields.add(field)
+        updated = self.manager.update_run_configuration(
+            state,
+            workflow_value,
+            selected_network,
+            api_base_url=str(dialog.result["api_base_url"]),
+            model=str(dialog.result["model"]),
+            agent_model=str(
+                dialog.result[
+                    "claude_agent_model"
+                    if state.provider == "claude"
+                    else "codex_agent_model"
+                ]
+            ),
+            reasoning_effort=str(
+                dialog.result[
+                    "claude_reasoning_effort"
+                    if state.provider == "claude"
+                    else "codex_reasoning_effort"
+                ]
+            ),
+            agent_base_url=str(
+                dialog.result[
+                    "claude_agent_base_url"
+                    if state.provider == "claude"
+                    else "codex_agent_base_url"
+                ]
+            ),
+            override_fields=override_fields,
+        )
+        self.run_states[self._state_key(updated)] = updated
+        self._refresh_runs()
+        self.pause_status_var.set(
+            f"实例 {updated.run_id} 的设置已保存；全局设置和其他实例不受影响。"
+        )
 
     def _open_global_search(self) -> None:
         GlobalSearchDialog(self)

@@ -35,6 +35,8 @@ def apply_global_settings_to_runs(
         for field, value in global_workflow.items():
             if field not in RunState.__dataclass_fields__:
                 continue
+            if field in state.settings_overrides:
+                continue
             if getattr(state, field) != value:
                 setattr(state, field, value)
                 changed_fields.append(field)
@@ -45,6 +47,8 @@ def apply_global_settings_to_runs(
             profiles=profiles,
         )
         for field, value in global_values.items():
+            if field in state.settings_overrides:
+                continue
             if getattr(state, field) != value:
                 setattr(state, field, value)
                 changed_fields.append(field)
@@ -56,9 +60,15 @@ def apply_global_settings_to_runs(
                 "已热更新全局设置：" + "、".join(changed_fields) + "。",
             )
 
-        write_hot_settings(
-            run_dir, state, global_workflow, normalized_network
+        effective_workflow = {
+            field: getattr(state, field)
+            for field in global_workflow
+            if field in RunState.__dataclass_fields__
+        }
+        effective_network = state.settings_overrides.get(
+            "tool_network", normalized_network
         )
+        write_hot_settings(run_dir, state, effective_workflow, effective_network)
         asset_path = run_dir / "tool_data" / "asset_bus" / "assets.json"
         if asset_path.is_file():
             AssetBus(asset_path, state.scope, state.target).update_approval_policy(
@@ -72,10 +82,14 @@ def apply_global_settings_to_runs(
             mode=str(workflow["workload_approval_mode"]),
             countdown_seconds=int(workflow["workload_countdown_seconds"]),
         )
-        _update_json(
-            run_dir / "project.json",
-            {**global_workflow, **global_values, "tool_network": normalized_network},
-        )
+        run_updates = {
+            field: value
+            for field, value in {**global_workflow, **global_values}.items()
+            if field not in state.settings_overrides
+        }
+        if "tool_network" not in state.settings_overrides:
+            run_updates["tool_network"] = normalized_network
+        _update_json(run_dir / "project.json", run_updates)
         updated_projects.add(run_dir.parent.parent)
 
     updated_projects.update(path.parent for path in projects_dir.glob("*/project.json"))

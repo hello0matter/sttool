@@ -69,11 +69,12 @@ class AISettingsDialog(tk.Toplevel):
         github_token: str = "",
         workflow_settings: dict[str, object] | None = None,
         tool_network_settings: dict[str, object] | None = None,
+        dialog_title: str = "STTool 全局设置",
     ) -> None:
         super().__init__(parent)
         self.result: dict[str, object] | None = None
         self._scroll_canvases: list[tk.Canvas] = []
-        self.title("STTool 全局设置")
+        self.title(dialog_title)
         screen_width = self.winfo_screenwidth()
         screen_height = self.winfo_screenheight()
         window_width = min(900, max(screen_width - 80, 700))

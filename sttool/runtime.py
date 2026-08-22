@@ -40,7 +40,12 @@ from .models import (
 )
 from .global_settings_sync import apply_global_settings_to_runs, write_hot_settings
 from .registry import DEFAULT_ST_ROOT, availability
-from .tool_network import cli_network_args, load_tool_network, tool_environment
+from .tool_network import (
+    cli_network_args,
+    load_tool_network,
+    normalize_tool_network,
+    tool_environment,
+)
 from .workflow_settings import normalize_workflow_settings, normalized_reasoning_effort
 
 
@@ -585,6 +590,7 @@ class RuntimeManager:
             "work_mode": request.work_mode,
             "tscan_backend": request.tscan_backend,
             "tscan_auto_update": str(request.tscan_auto_update).lower(),
+            "settings_overrides": {},
             "auto_agent": request.auto_agent,
             "wait_for_asset_commander": request.wait_for_asset_commander,
             "wait_for_fscan": request.wait_for_fscan,
@@ -737,6 +743,71 @@ class RuntimeManager:
                 )
             updated.append(state)
         return updated
+
+    def update_run_configuration(
+        self,
+        state: RunState,
+        workflow_settings: dict[str, object],
+        tool_network: dict[str, object] | None = None,
+        *,
+        api_base_url: str = "",
+        model: str = "",
+        agent_model: str = "",
+        reasoning_effort: str = "",
+        agent_base_url: str = "",
+        override_fields: set[str] | None = None,
+    ) -> RunState:
+        """Apply settings to one run without changing the project or other runs."""
+        workflow = normalize_workflow_settings(workflow_settings)
+        run_dir = Path(state.run_dir).resolve()
+        network = normalize_tool_network(tool_network)
+        changed: list[str] = []
+        scalar_values = {
+            "api_base_url": api_base_url.strip().rstrip("/"),
+            "model": model.strip(),
+            "agent_model": agent_model.strip(),
+            "reasoning_effort": normalized_reasoning_effort(reasoning_effort),
+            "agent_base_url": agent_base_url.strip().rstrip("/"),
+        }
+        for field, value in scalar_values.items():
+            if value and getattr(state, field) != value:
+                setattr(state, field, value)
+                changed.append(field)
+        for field, value in workflow.items():
+            if field in RunState.__dataclass_fields__ and getattr(state, field) != value:
+                setattr(state, field, value)
+                changed.append(field)
+        fields_to_override = (
+            set(workflow) if override_fields is None else set(override_fields)
+        ) | {
+            field
+            for field, value in scalar_values.items()
+            if value and (override_fields is None or field in override_fields)
+        }
+        state.settings_overrides.update(
+            {field: workflow[field] for field in workflow if field in fields_to_override}
+        )
+        state.settings_overrides.update(
+            {field: value for field, value in scalar_values.items() if field in fields_to_override}
+        )
+        if "tool_network" in fields_to_override:
+            state.settings_overrides["tool_network"] = network
+        state.updated_at = now_text()
+        atomic_json_write(run_dir / "run.json", state.to_dict())
+        hot = read_json_file(run_dir / "tool_data" / "coordinator" / "hot_settings.json")
+        write_hot_settings(run_dir, state, workflow, network)
+        project_path = run_dir / "project.json"
+        project = read_json_file(project_path)
+        if project:
+            project.update(workflow)
+            project.update({key: value for key, value in scalar_values.items() if value})
+            project["settings_overrides"] = state.settings_overrides
+            project["tool_network"] = network
+            project["updated_at"] = now_text()
+            atomic_json_write(project_path, project)
+        if changed or hot.get("tool_network") != network:
+            append_activity(run_dir, "已仅更新当前运行实例配置；不会影响其他实例或全局默认。")
+        return state
 
     def _new_standalone_dir(self, tool_id: str) -> tuple[str, Path]:
         runs_dir = self.app_dir / "standalone_runs" / safe_project_name(tool_id)
@@ -1087,6 +1158,7 @@ class RuntimeManager:
             "st_root": str(self.st_root),
             "project_name": request.project_name.strip(),
             "tscan_backend": request.tscan_backend,
+            "tscan_auto_update": str(request.tscan_auto_update).lower(),
             "scope": request.scope.strip(),
             "processing_scope": (
                 request.asset_processing_scope.strip() or request.scope.strip()
@@ -2055,6 +2127,8 @@ class RuntimeManager:
             state.agent_model = request.agent_model.strip()
             state.reasoning_effort = request.reasoning_effort
             state.work_mode = request.work_mode
+            state.tscan_backend = request.tscan_backend
+            state.tscan_auto_update = request.tscan_auto_update
             state.auto_agent = request.auto_agent
             state.wait_for_asset_commander = request.wait_for_asset_commander
             state.wait_for_fscan = request.wait_for_fscan

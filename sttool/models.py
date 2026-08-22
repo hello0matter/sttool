@@ -67,6 +67,7 @@ class LaunchRequest:
     work_mode: str = DEFAULT_WORK_MODE
     tscan_backend: str = "gui"
     tscan_auto_update: bool = True
+    settings_overrides: dict[str, Any] = field(default_factory=dict)
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
     wait_for_fscan: bool = True
@@ -168,6 +169,7 @@ class RunState:
     work_mode: str = DEFAULT_WORK_MODE
     tscan_backend: str = "gui"
     tscan_auto_update: bool = True
+    settings_overrides: dict[str, Any] = field(default_factory=dict)
     auto_agent: bool = True
     wait_for_asset_commander: bool = True
     wait_for_fscan: bool = True
