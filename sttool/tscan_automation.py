@@ -1538,6 +1538,30 @@ def check_homepage_update(page: Page, state_path: Path, enabled: bool) -> dict[s
         page.wait_for_timeout(800)
         result.update(update_clicked=True, update_label=clicked_label)
         append_activity(state_path, f"检测到 TscanPlus 新版本，已点击{clicked_label}")
+        started = page.evaluate(
+            """() => {
+              const visible = (element) => {
+                const rect = element.getBoundingClientRect();
+                const style = getComputedStyle(element);
+                return rect.width > 0 && rect.height > 0
+                  && style.display !== 'none' && style.visibility !== 'hidden';
+              };
+              const text = (element) => (element.innerText || element.textContent || '').trim();
+              const item = [...document.querySelectorAll('*')].find(
+                (element) => visible(element) && text(element) === '开始更新'
+                  && element.children.length === 0
+              );
+              if (!item) return false;
+              const clickable = item.closest('button, a, [role="button"]') || item;
+              clickable.click();
+              return true;
+            }"""
+        )
+        result["update_started"] = bool(started)
+        if started:
+            append_activity(state_path, "TscanPlus 更新弹窗已确认，已点击开始更新")
+        else:
+            append_activity(state_path, "TscanPlus 更新弹窗已打开，但未找到开始更新按钮")
         return result
     append_activity(state_path, "检测到 TscanPlus 新版本，但未找到更新按钮")
     result["update_clicked"] = False
